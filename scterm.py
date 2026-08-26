@@ -269,11 +269,25 @@ def send_text(inp, s, chunk=180):
 # ---------------------------------------------------------------------------
 
 def device_size(serial):
+    """Current (rotation-aware) display size in pixels.
+
+    `wm size` reports the PHYSICAL panel size (e.g. 1080x1920 on a portrait
+    phone) even when an app rotates the display to landscape.  screenrecord /
+    screencap capture the CURRENT rotated buffer, so the fit maths, stream
+    size and input mapping must use the rotated size (cur=WxH from the
+    window manager) or the image is letterboxed and then squeezed sideways
+    through portrait fit math.
+    """
     out = shell_cmd(serial, "wm", "size")
     m = re.search(r"(\d+)x(\d+)", out)
     if not m:
         return None
-    return int(m.group(1)), int(m.group(2))
+    w, h = int(m.group(1)), int(m.group(2))
+    cur = shell_cmd(serial, "dumpsys", "window")
+    cm = re.search(r"cur=(\d+)x(\d+)", cur)
+    if cm:
+        w, h = int(cm.group(1)), int(cm.group(2))
+    return w, h
 
 
 def model_name(serial):
@@ -995,10 +1009,14 @@ class Renderer:
 # ---------------------------------------------------------------------------
 
 def fit_image(img, cols, rows2, mode):
-    """Return (render_img, (out_w, out_h), offset_x) fitting img into cols x rows2."""
+    """Return (render_img, (out_w, out_h), (offset_x, offset_y)).
+
+    offset = paste offset in canvas coords (contain/fill) or crop offset in
+    resized coords (cover); input mapping needs it to stay in sync.
+    """
     dw, dh = img.size
     if mode == "fill":
-        return img.resize((cols, rows2), Image.LANCZOS), (cols, rows2), 0
+        return img.resize((cols, rows2), Image.LANCZOS), (cols, rows2), (0, 0)
     if mode == "cover":
         scale = max(cols / dw, rows2 / dh)
         ow = max(1, int(dw * scale))
@@ -1006,14 +1024,16 @@ def fit_image(img, cols, rows2, mode):
         resized = img.resize((ow, oh), Image.LANCZOS)
         left = (ow - cols) // 2
         top = (oh - rows2) // 2
-        return resized.crop((left, top, left + cols, top + rows2)), (cols, rows2), 0
+        return resized.crop((left, top, left + cols, top + rows2)), \
+            (cols, rows2), (left, top)
     scale = min(cols / dw, rows2 / dh)
     ow = max(1, int(dw * scale))
     oh = max(1, int(dh * scale))
     ox = (cols - ow) // 2
+    oy = (rows2 - oh) // 2
     buf = Image.new("RGB", (cols, rows2), (8, 8, 8))
-    buf.paste(img.resize((ow, oh), Image.LANCZOS), (ox, 0))
-    return buf, (ow, oh), ox
+    buf.paste(img.resize((ow, oh), Image.LANCZOS), (ox, oy))
+    return buf, (ow, oh), (ox, oy)
 
 
 def map_to_device(dev_size, mx, my, cols, rows, mode):
@@ -1021,22 +1041,21 @@ def map_to_device(dev_size, mx, my, cols, rows, mode):
     dw, dh = dev_size
     rows2 = rows * 2
     if mode == "fill":
-        ox, ow, oh, left = 0, cols, rows2, 0
+        ox, oy, ow, oh = 0, 0, cols, rows2
     elif mode == "cover":
         scale = max(cols / dw, rows2 / dh)
         ow, oh = max(1, int(dw * scale)), max(1, int(dh * scale))
-        left = (ow - cols) // 2
-        ox = -(left)
+        ox, oy = (ow - cols) // 2, (oh - rows2) // 2
     else:
         scale = min(cols / dw, rows2 / dh)
         ow, oh = max(1, int(dw * scale)), max(1, int(dh * scale))
-        ox = (cols - ow) // 2
-        left = 0
+        ox, oy = (cols - ow) // 2, (rows2 - oh) // 2
     if mode == "cover":
-        fx = (mx - 1 + left + 0.5) / ow
+        fx = (mx - 1 + ox + 0.5) / ow
+        fy = ((my - 1) * 2 + oy + 0.5) / oh
     else:
         fx = (mx - 1 - ox + 0.5) / ow
-    fy = ((my - 1) * 2 + 0.5) / oh
+        fy = ((my - 1) * 2 - oy + 0.5) / oh
     dx = int(round(fx * dw))
     dy = int(round(fy * dh))
     return max(0, min(dw - 1, dx)), max(0, min(dh - 1, dy))
@@ -1047,22 +1066,21 @@ def device_to_term(dev_size, dx, dy, cols, rows, mode):
     dw, dh = dev_size
     rows2 = rows * 2
     if mode == "fill":
-        ox, ow, oh, left = 0, cols, rows2, 0
+        ox, oy, ow, oh = 0, 0, cols, rows2
     elif mode == "cover":
         scale = max(cols / dw, rows2 / dh)
         ow, oh = max(1, int(dw * scale)), max(1, int(dh * scale))
-        left = (ow - cols) // 2
-        ox = -(left)
+        ox, oy = (ow - cols) // 2, (oh - rows2) // 2
     else:
         scale = min(cols / dw, rows2 / dh)
         ow, oh = max(1, int(dw * scale)), max(1, int(dh * scale))
-        ox = (cols - ow) // 2
-        left = 0
+        ox, oy = (cols - ow) // 2, (rows2 - oh) // 2
     if mode == "cover":
-        mx = int(round(dx / dw * ow - left + 1 - 0.5))
+        mx = int(round(dx / dw * ow - ox + 1 - 0.5))
+        my = int(round(dy / dh * oh / 2 - oy / 2 + 1 - 0.5))
     else:
         mx = int(round(dx / dw * ow + ox + 1 - 0.5))
-    my = int(round(dy / dh * oh / 2 + 1 - 0.5))
+        my = int(round(dy / dh * oh / 2 + oy / 2 + 1 - 0.5))
     return max(1, min(cols, mx)), max(1, min(rows, my))
 
 
@@ -1172,7 +1190,7 @@ def parse_input(data):
 # ---------------------------------------------------------------------------
 
 HELP_ROWS = [
-    ("Mouse", "click tap · drag swipe · wheel scroll"),
+    ("Mouse", "click tap · drag touch · wheel scroll"),
     ("Type", "text … Enter sends · Backspace deletes"),
     ("Keys", "F1 menu · F2 home · F3 back · F4 recents"),
     ("Keys", "F5 power · F6 vol+ · F7 vol- · F8 center"),
@@ -1216,7 +1234,7 @@ class TUI:
         self.truecolor = args.truecolor
         self.running = True
         self.fit = args.fit
-        self.chrome = args.chrome_bars and not args.zellij
+        self.chrome = args.chrome_bars
         self.grab = False
         self.menu_open = False
         self.menu_idx = 0
@@ -1228,6 +1246,7 @@ class TUI:
         self.press = None
         self.move = None
         self.dragged = False
+        self.last_touch_ts = None
         self.dot = None
         self.dot_until = 0.0
         self.last_seq = -1
@@ -1278,7 +1297,7 @@ class TUI:
         elif self.text_buf:
             hints.append(style(" text: " + "".join(self.text_buf) + " ", fg=WARN))
         else:
-            hints.append(style(" Click=tap  Drag=swipe  Wheel=scroll  "
+            hints.append(style(" Click=tap  Drag=touch  Wheel=scroll  "
                                "Type=text  ?=help  ^T=menu  Esc×2=quit ",
                                fg=DIM))
         return fit_line(hints + [right], cols)
@@ -1347,6 +1366,8 @@ class TUI:
             elif kind == "fit":
                 self.fit = FIT_MODES[(FIT_MODES.index(self.fit) + 1) % 3]
                 self.last_seq = -1
+                self.prev_rows = []  # force a full redraw in the new mode
+                self.prev_top = None
             elif kind == "stream_toggle":
                 m.set_stream_mode(not m.is_stream())
                 self.last_seq = -1
@@ -1376,7 +1397,14 @@ class TUI:
                     self.text_buf.append(ev[1])
             elif kind == "enter":
                 if self.pending_tap and time.time() < self.pending_until:
-                    tap(m.inp, *self.pending_tap)
+                    # finger is already DOWN (live touch): finishing the
+                    # gesture at the confirmed spot = a tap there
+                    if self.press:
+                        touch_up(m.inp, *self.pending_tap)
+                        self.press = None
+                        self.move = None
+                        self.dragged = False
+                        self.last_touch_ts = None
                     self.pending_tap = None
                 elif self.text_buf:
                     send_text(m.inp, "".join(self.text_buf))
@@ -1460,6 +1488,8 @@ class TUI:
         elif key_ == "fit":
             self.fit = FIT_MODES[(FIT_MODES.index(self.fit) + 1) % 3]
             self.last_seq = -1
+            self.prev_rows = []  # force a full redraw in the new mode
+            self.prev_top = None
         elif key_ == "stream":
             m.set_stream_mode(not m.is_stream())
             self.last_seq = -1
@@ -1526,6 +1556,9 @@ class TUI:
             self.move = (mx, cy)
             self.dragged = False
             self.last_seq = -1
+            # finger on the glass: DOWN immediately, so the app reacts live
+            touch_down(m.inp, x, y)
+            self.last_touch_ts = time.time()
         elif motion and btn == 0 and self.press:
             x, y = map_to_device((dw, dh), mx, cy, cols, rows, self.fit)
             self.pending_tap = (x, y)
@@ -1533,27 +1566,24 @@ class TUI:
             self.move = (mx, cy)
             self.dragged = True
             self.last_seq = -1
+            # stream MOVE events at ~35 Hz max — the shell pipe is fast, but
+            # terminal mouse floods at up to 125 Hz which apps can't use
+            now = time.time()
+            if self.last_touch_ts is None or \
+                    now - self.last_touch_ts >= 0.028:
+                touch_move(m.inp, x, y)
+                self.last_touch_ts = now
         elif btn == 0 and released:
             if self.press:
-                if self.dragged:
-                    x1, y1 = map_to_device((dw, dh), self.press[0],
-                                           self.press[1], cols, rows, self.fit)
-                    tx, ty = (self.pending_tap or map_to_device(
-                        (dw, dh), self.move[0], self.move[1],
-                        cols, rows, self.fit))
-                    swipe(m.inp, x1, y1, tx, ty, 120)
-                    self.pending_tap = None
-                elif self.pending_tap and time.time() < self.pending_until:
-                    tap(m.inp, *self.pending_tap)
-                    self.pending_tap = None
-                else:
-                    x, y = map_to_device((dw, dh), self.press[0],
-                                         self.press[1], cols, rows, self.fit)
-                    tap(m.inp, x, y)
-                    self.pending_tap = None
+                tx, ty = (self.pending_tap or map_to_device(
+                    (dw, dh), self.move[0], self.move[1],
+                    cols, rows, self.fit))
+                touch_up(m.inp, tx, ty)
+                self.pending_tap = None
             self.press = None
             self.move = None
             self.dragged = False
+            self.last_touch_ts = None
 
     # ------------------------------------------------------------------ draw
     def draw(self, rows_strs, cols, lines, m, dev, rend, ms, cap_mode):
@@ -1568,7 +1598,9 @@ class TUI:
         full = (len(self.prev_rows) != len(rows_strs)
                 or len(changed) > len(rows_strs) // 2)
         if full:
-            out.append("\x1b[H")
+            # start BELOW the chrome top bar (row 1) so a full redraw can't
+            # overwrite it; the top bar is drawn separately afterwards
+            out.append(f"\x1b[{1 + top_rows};1H")
             for s in rows_strs:
                 out.append(s)
                 out.append("\r\n")
@@ -1649,8 +1681,8 @@ class TUI:
                 dev = m.dev_size()
                 rows2 = rows * 2
                 pil = self.decode_image(img, cols_now, rows2)
-                render_img, (ow, oh), ox = fit_image(pil, cols_now, rows2,
-                                                     self.fit)
+                render_img, (ow, oh), (ox, oy) = fit_image(
+                    pil, cols_now, rows2, self.fit)
                 r = Renderer(cols_now, rows, self.truecolor)
                 t0 = time.perf_counter()
                 rows_strs = r.frame(render_img)

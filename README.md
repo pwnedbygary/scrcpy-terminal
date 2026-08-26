@@ -77,12 +77,12 @@ with no TTY silently drops to web-only.
 │  │    TUI fps                              20│
 │  │    Bitrate                          6 Mb/s│
 │  │    ...                                   │
-└─ Click=tap  Drag=swipe  Wheel=scroll  Type=text  ?=help  ^T=menu  Esc×2=quit ▁▂▃▅▆▇█
+└─ Click=tap  Drag=touch  Wheel=scroll  Type=text  ?=help  ^T=menu  Esc×2=quit ▁▂▃▅▆▇█
 ```
 
 | Input | Action |
 |---|---|
-| Click / drag / wheel | tap / swipe / scroll |
+| Click / drag / wheel | tap / live touch drag / scroll |
 | Typing + Enter | text input (`input text`) |
 | F1–F12, arrows | menu, home, back, recents, power, volume, dpad |
 | `?` | help overlay (press again to close) |
@@ -92,6 +92,11 @@ with no TTY silently drops to web-only.
 | `Ctrl-Alt-G` / `F12` | grab mode — keys go straight to the device (also locks Zellij) |
 | `Esc` ×2 | quit |
 | click, hold, arrows | "pending tap": preview + nudge ±12 px, Enter confirms |
+
+Dragging acts exactly like a finger: the device receives `DOWN` the instant
+the button is pressed, live `MOVE` events as you drag (throttled to ~35 Hz),
+and `UP` on release — apps react in real time, and long-press works by
+holding the button.
 
 Rendering is incremental: only changed rows are re-emitted, so slow links
 and tmux/ssh sessions stay fluid. A live sparkline on the status bar shows
