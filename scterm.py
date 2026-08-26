@@ -934,9 +934,10 @@ class Renderer:
         tc = self.truecolor
         for y in range(rows):
             lo, hi = y * cols, (y + 1) * cols
-            sel = (starts >= lo) & (starts < hi)
-            rs = starts[sel] - lo
-            re_ = run_ends[sel] - lo
+            # select runs that OVERLAP with this row's range [lo, hi)
+            sel = (starts < hi) & (run_ends > lo)
+            rs = np.maximum(starts[sel], lo) - lo
+            re_ = np.minimum(run_ends[sel], hi) - lo
             parts = []
             for s0, e0 in zip(rs, re_):
                 k = keys[s0 + lo]
@@ -2452,6 +2453,10 @@ def main():
     ap.add_argument("--version", action="version", version=f"scterm {VERSION}")
     args = ap.parse_args()
 
+    # auto-detect Zellij — skip alt-screen, let Zellij handle mouse routing
+    if not args.zellij and os.environ.get("ZELLIJ"):
+        args.zellij = True
+
     debug_f = None
     if args.debug:
         try:
@@ -2541,7 +2546,7 @@ def main():
             print("[tui] no TTY — web only", file=sys.stderr)
         else:
             if args.chrome_bars is None:
-                args.chrome_bars = not args.zellij
+                args.chrome_bars = True
             try:
                 run_tui(args, m)
             except Exception:
