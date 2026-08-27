@@ -519,3 +519,86 @@ func (a *AudioStream) Next() ([]byte, error) {
 	}
 	return data, nil
 }
+
+// Scroll injects a scroll wheel event (TYPE_INJECT_SCROLL_EVENT).
+func (c *Control) Scroll(x, y, w, h int, hScroll, vScroll float64) {
+	var m W
+	m.u8(TypeInjectScroll)
+	m.u32(uint32(x))
+	m.u32(uint32(y))
+	m.u16(uint16(w))
+	m.u16(uint16(h))
+	// fixed-point i16 *16: value range [-16,16] -> [-1,1]
+	hs := clampF(hScroll, -1, 1) * 16
+	vs := clampF(vScroll, -1, 1) * 16
+	m.u16(uint16(int16(hs * 32768)))
+	m.u16(uint16(int16(vs * 32768)))
+	m.u32(0) // buttons
+	c.send(m.b.Bytes())
+}
+
+func clampF(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// GamepadState is a normalized gamepad snapshot (-1..1 axes, bool buttons).
+type GamepadState struct {
+	LX, LY, RX, RY float64
+	L2, R2         float64
+	A, B, X, Y     bool
+	LB, RB         bool
+	Back, Start    bool
+	Guide          bool
+	LStick, RStick bool
+	Hat            int8 // 0 center, 1 up, 2 up-right, ..., 8 up-left
+}
+
+// Report converts a gamepad state to the 15-byte HID input report.
+func (g *GamepadState) Report() []byte {
+	rescale := func(v float64) uint16 {
+		// -1 -> 0, +1 -> 65535 (mirrors scrcpy's AXIS_RESCALE)
+		return uint16(clampF(v, -1, 1)*32767.5 + 32768)
+	}
+	var buttons uint16
+	if g.A {
+		buttons |= 0x0001
+	}
+	if g.B {
+		buttons |= 0x0002
+	}
+	if g.X {
+		buttons |= 0x0008
+	}
+	if g.Y {
+		buttons |= 0x0010
+	}
+	if g.LB {
+		buttons |= 0x0040
+	}
+	if g.RB {
+		buttons |= 0x0080
+	}
+	if g.Back {
+		buttons |= 0x0400
+	}
+	if g.Start {
+		buttons |= 0x0800
+	}
+	if g.Guide {
+		buttons |= 0x1000
+	}
+	if g.LStick {
+		buttons |= 0x2000
+	}
+	if g.RStick {
+		buttons |= 0x4000
+	}
+	return GamepadReport(rescale(g.LX), rescale(g.LY), rescale(g.RX), rescale(g.RY),
+		buttons, uint8(g.Hat))
+}

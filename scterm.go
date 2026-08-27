@@ -221,6 +221,9 @@ func (p *ProtoInput) Swipe(x1, y1, x2, y2, ms int) {
 	}
 	p.ctrl.Touch(1, x2, y2, max(p.w, 1), max(p.h, 1))
 }
+func (p *ProtoInput) Scroll(x, y int, hScroll, vScroll float64) {
+	p.ctrl.Scroll(x, y, max(p.w, 1), max(p.h, 1), hScroll, vScroll)
+}
 func (p *ProtoInput) Key(code int) {
 	p.ctrl.Key(0, code)
 	time.Sleep(30 * time.Millisecond)
@@ -232,6 +235,26 @@ func (p *ProtoInput) Text(s string) {
 	p.ctrl.SetClipboard(s)
 }
 func (p *ProtoInput) Close() {}
+
+// gamepadFeed pushes viewer gamepads to the device. Engine mode: a UHID
+// gamepad (lazy create on first report). No-op without the engine.
+type gamepadFeed struct {
+	cap     *Capture
+	created bool
+}
+
+func (g *gamepadFeed) feed(st engine.GamepadState) {
+	s := g.cap.ses
+	if s == nil || g.cap.protoIn == nil {
+		return
+	}
+	if !g.created {
+		s.Ctrl.UhidCreate(0x2000, 0x054c, 0x09cc, "scterm gamepad", engine.GamepadDesc)
+		g.created = true
+	}
+	st.LX, st.LY = -st.LX, -st.LY
+	s.Ctrl.UhidInput(0x2000, st.Report())
+}
 
 func (a *AdbInput) Close() {
 	a.mu.Lock()
@@ -2196,6 +2219,7 @@ func (t *TUI) exit() {
 type WebApp struct {
 	cap      *Capture
 	inp      Input
+	gpad     *gamepadFeed
 	fpsCap   int
 	quality  int
 	scale    int
@@ -2203,7 +2227,11 @@ type WebApp struct {
 }
 
 func NewWebApp(c *Capture, inp Input) *WebApp {
-	return &WebApp{cap: c, inp: inp, fpsCap: 30, quality: 4, scale: 100}
+	w := &WebApp{cap: c, inp: inp, fpsCap: 30, quality: 4, scale: 100}
+	if c.useEngine {
+		w.gpad = &gamepadFeed{cap: c}
+	}
+	return w
 }
 
 func (w *WebApp) writeJSON(res http.ResponseWriter, v interface{}) {
@@ -2230,6 +2258,8 @@ func (w *WebApp) Handler() http.Handler {
 	mux.HandleFunc("/input/key", w.inputKey)
 	mux.HandleFunc("/input/text", w.inputText)
 	mux.HandleFunc("/input/audio", w.inputAudio)
+	mux.HandleFunc("/input/scroll", w.inputScroll)
+	mux.HandleFunc("/input/gamepad", w.inputGamepad)
 	mux.HandleFunc("/settings/fps", w.setFPS)
 	mux.HandleFunc("/settings/quality", w.setQuality)
 	mux.HandleFunc("/settings/scale", w.setScale)
@@ -2320,6 +2350,34 @@ func (w *WebApp) inputTouch(res http.ResponseWriter, req *http.Request) {
 			w.inp.TouchMove(x, y)
 		case "up":
 			w.inp.TouchUp(x, y)
+		}
+	}
+	w.writeJSON(res, map[string]bool{"ok": true})
+}
+
+func (w *WebApp) inputScroll(res http.ResponseWriter, req *http.Request) {
+	var j struct {
+		X, Y   float64 `json:"x"`
+		DX, DY float64 `json:"dx"`
+	}
+	if err := w.readJSON(req, &j); err == nil {
+		if pi, ok := w.inp.(*ProtoInput); ok {
+			x, y := normalize(w.cap, j.X, j.Y)
+			v := j.DY
+			if v == 0 {
+				v = j.DX * 0.5
+			}
+			pi.Scroll(x, y, 0, v*0.06)
+		}
+	}
+	w.writeJSON(res, map[string]bool{"ok": true})
+}
+
+func (w *WebApp) inputGamepad(res http.ResponseWriter, req *http.Request) {
+	var st engine.GamepadState
+	if err := w.readJSON(req, &st); err == nil {
+		if g := w.gpad; g != nil {
+			g.feed(st)
 		}
 	}
 	w.writeJSON(res, map[string]bool{"ok": true})
@@ -2687,10 +2745,32 @@ wrap.addEventListener('pointerup',e=>{
   api('/input/touch',{act:'up',...pos(e)});lastP=null;
 });
 wrap.addEventListener('wheel',e=>{
-  const p=pos(e);const d=e.deltaY>0?0.06:-0.06;
-  api('/input/swipe',{x1:p.x,y1:p.y-d,x2:p.x,y2:p.y+d});
+  const p=pos(e);
+  api('/input/scroll',{x:p.x,y:p.y,dx:e.deltaX,dy:e.deltaY});
   e.preventDefault();
 },{passive:false});
+/* ---- gamepad (viewer controller -> device) ---- */
+(function(){
+  let last=null;
+  setInterval(()=>{
+    const gp=(navigator.getGamepads&&navigator.getGamepads())||[];
+    const g=gp[0]; if(!g)return;
+    const b=g.buttons,ax=g.axes;
+    const btn=i=>b[i]&&b[i].pressed;
+    const st={
+      lx:ax[0]||0,ly:ax[1]||0,rx:ax[2]||0,ry:ax[3]||0,
+      l2:ax[4]||0,r2:ax[5]||0,
+      a:btn(0),b:btn(1),x:btn(2),y:btn(3),
+      lb:btn(4),rb:btn(5),back:btn(8),start:btn(9),guide:btn(10),
+      ls:btn(11),rs:btn(12),
+      hat:btn(12)?0:(btn(13)?8:0)
+    };
+    const d=(btn(14))||(btn(15))||(btn(16))||(btn(17));
+    if(d){st.hat=btn(14)?8:btn(15)?5:btn(13)?1:btn(17)?2:btn(16)?7:0;}
+    const k=JSON.stringify(st);
+    if(k!==last){last=k;api('/input/gamepad',JSON.parse(k));}
+  },50);
+})();
 /* ---- keyboard ---- */
 function fmap(k){return {F1:82,F2:3,F3:4,F4:187,F5:26,F6:24,F7:25,F8:23,F9:19,F10:20,F11:21}[k]||0;}
 document.addEventListener('keydown',e=>{
@@ -2891,6 +2971,22 @@ func main() {
 	}
 	setRotation(serial, 0)
 	cap.Start()
+
+	if useEngine {
+		// TUI-side gamepad: host evdev joystick -> UHID gamepad on the
+		// device (silently no-op if no gamepad is attached to this PC).
+		go func() {
+			for {
+				gr, err := engine.OpenGamepadReader()
+				if err != nil {
+					return
+				}
+				feed := &gamepadFeed{cap: cap}
+				gr.ReadLoop(func(st engine.GamepadState) { feed.feed(st) })
+				time.Sleep(2 * time.Second)
+			}
+		}()
+	}
 
 	if web {
 		app := NewWebApp(cap, inp)
