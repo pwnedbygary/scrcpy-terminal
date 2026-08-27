@@ -188,7 +188,8 @@ func main() {
 		"shell",
 		"CLASSPATH="+DEV_PATH,
 		"app_process", "/", "com.genymobile.scrcpy.Server",
-		"4.1", "scid="+SCID, "log_level=verbose", "tunnel_forward=true")...)
+		"4.1", "scid="+SCID, "log_level=verbose", "tunnel_forward=true",
+		"audio=false")...)
 	sl, _ := os.Create("/tmp/probe_server.log")
 	cmd.Stdout = sl
 	cmd.Stderr = sl
@@ -255,6 +256,7 @@ func main() {
 		}
 		name, ok := readN(64)
 		if !ok {
+			fmt.Println("!! video reader: device meta never arrived")
 			return
 		}
 		fmt.Printf(".. device meta (64B): %q\n", strings.TrimRight(string(name), "\x00"))

@@ -124,3 +124,27 @@ Gamepad report descriptor (81 bytes):
 0x00,0x25,0x01,0x95,0x10,0x75,0x01,0x81,0x02,0x05,0x01,0x09,0x39,0x15,
 0x01,0x25,0x08,0x75,0x04,0x95,0x01,0x81,0x42,0xc0,0xc0
 ```
+
+### Session header (video stream, 4.x)
+
+After codec-id, the stream starts with a **session message** (12 bytes)
+when `header[0] & 0x80`:
+
+```
+[4B] flags      (bit7 of byte0 = SESSION; low bit(s) = client-resized)
+[4B] width      (big-endian)
+[4B] height
+```
+
+Re-session messages can appear mid-stream (client resize). Verified
+against the v4.1 demuxer (`sc_demuxer_is_session`: `header[0] & 0x80`).
+
+### UHID / gamepads on this device
+
+UHID needs `/dev/uhid` (open as uid 2000 shell; group uhid is granted on
+this ROM, so open is possible) — registration on-device still unconfirmed
+in the engine probe (format matches the client serializer byte-for-byte;
+next step: capture the server-side UHID error during create). Fallback
+that needs no UHID: map gamepad dpad/buttons to INJECT_KEYCODE
+(KEYCODE_DPAD_* / KEYCODE_BUTTON_*) and sticks to INJECT_TOUCH, all over
+the (verified) control channel — root-free.
