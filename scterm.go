@@ -1512,6 +1512,11 @@ func (t *TUI) feed(data []byte, evs *[]event) {
 			i++
 			continue
 		}
+		if b == 0x07 { // ^G — backup grab toggle (some terminals eat F12)
+			*evs = append(*evs, event{kind: evGrab})
+			i++
+			continue
+		}
 		if b < 0x20 {
 			i++
 			continue
@@ -1616,9 +1621,10 @@ func (t *TUI) handle(ev event) {
 }
 
 func (t *TUI) fkey(code int) {
-	codes := map[int]string{1: "MENU", 2: "HOME", 3: "BACK", 4: "APP_SWITCH",
-		5: "POWER", 6: "VOL_UP", 7: "VOL_DOWN", 8: "CENTER",
-		9: "DPAD_UP", 10: "DPAD_DOWN", 11: "DPAD_LEFT", 12: "GRAB"}
+	// CSI F-keys: F1..F5 = 11..15, F6..F10 = 17..21, F11=23, F12=24
+	codes := map[int]string{11: "MENU", 12: "HOME", 13: "BACK", 14: "APP_SWITCH",
+		15: "POWER", 17: "VOL_UP", 18: "VOL_DOWN", 19: "CENTER",
+		20: "DPAD_UP", 21: "DPAD_DOWN", 23: "DPAD_LEFT", 24: "GRAB"}
 	if name, ok := codes[code]; ok {
 		if name == "GRAB" {
 			t.toggleGrab()
@@ -1717,7 +1723,7 @@ func (t *TUI) mouse(ev event) {
 		t.dragged = true
 		t.dotX, t.dotY = ev.x, cy
 		t.dotUntil = time.Now().Add(4 * time.Second)
-		if time.Since(t.lastTouch) >= 28*time.Millisecond {
+		if time.Since(t.lastTouch) >= 60*time.Millisecond {
 			t.inp.TouchMove(x, y)
 			t.lastTouch = time.Now()
 		}
@@ -2331,8 +2337,20 @@ wrap.addEventListener('pointerdown',e=>{
   $('wrap').classList.add('live');
   e.preventDefault();
 });
-wrap.addEventListener('pointermove',e=>{if(e.buttons===1)api('/input/touch',{act:'move',...pos(e)});});
-wrap.addEventListener('pointerup',e=>{api('/input/touch',{act:'up',...pos(e)});});
+// throttle moves to ~60ms: the device-side 'input motionevent' takes
+// 100-300ms each; flooding it queues seconds of backlog (the 2-3s drag lag)
+let lastMoveT=0,lastP=null;
+wrap.addEventListener('pointermove',e=>{
+  if(e.buttons!==1)return;
+  lastP=pos(e);
+  const now=performance.now();
+  if(now-lastMoveT>60){api('/input/touch',{act:'move',...lastP});lastMoveT=now;}
+});
+wrap.addEventListener('pointerup',e=>{
+  // flush the final position so the device ends the gesture where we are
+  if(lastP){let p=pos(e);api('/input/touch',{act:'move',...p});}
+  api('/input/touch',{act:'up',...pos(e)});lastP=null;
+});
 wrap.addEventListener('wheel',e=>{
   const p=pos(e);const d=e.deltaY>0?0.06:-0.06;
   api('/input/swipe',{x1:p.x,y1:p.y-d,x2:p.x,y2:p.y+d});
