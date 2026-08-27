@@ -62,6 +62,13 @@ except Exception:
 
 from PIL import Image
 
+# stray '-' from early scrcpy --record - runs (now fixed to --record-format=opus --record - with PIPE)
+try:
+    if os.path.exists("-"):
+        os.remove("-")
+except Exception:
+    pass
+
 VERSION = "2.0.0"
 BLOCK = "▀"  # half-block: top pixel = fg, bottom pixel = bg
 
@@ -435,6 +442,60 @@ def pick_stream_size(dev, max_w, max_h):
     return w, h
 
 
+def pil_jpeg_quality(q):
+    """Map ffmpeg-style `-q:v` (1-10, lower = better) to PIL's
+    JPEG quality (1-100, higher = better)."""
+    return max(25, min(95, int(105 - max(1, min(10, q)) * 10)))
+
+
+def grab_screencap(serial):
+    """One-shot `screencap` -> PIL RGB image, self-sizing from the raw
+    RGBA header or the PNG. Returns None on failure. ~100-200ms."""
+    cmd = ["adb"]
+    if serial:
+        cmd += ["-s", serial]
+    cmd += ["exec-out", "screencap"]
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=20)
+    except Exception:
+        return None
+    if p.returncode != 0 or not p.stdout:
+        return None
+    return _screencap_parse(p.stdout)
+
+
+def _screencap_parse(data):
+    """Parse a screencap buffer (raw RGBA w/ or w/o 16B header, or PNG)."""
+    # fast path: raw RGBA with 16-byte header (w, h, format, flags)
+    try:
+        import struct
+        hw, hh = struct.unpack("<II", data[:8])
+        if 0 < hw <= 8192 and 0 < hh <= 8192 and \
+                len(data) == hw * hh * 4 + 16:
+            return Image.frombytes(
+                "RGBA", (hw, hh), data[16:], "raw", "RGBA", 0, 1
+            ).convert("RGB")
+    except Exception:
+        pass
+    # raw RGBA without header: try likely sizes
+    for hw, hh in ((1080, 1920), (1920, 1080), (1280, 720), (720, 1280),
+                   (2400, 1080), (1080, 2400)):
+        if len(data) == hw * hh * 4:
+            try:
+                return Image.frombytes(
+                    "RGBA", (hw, hh), data, "raw", "RGBA", 0, 1
+                ).convert("RGB")
+            except Exception:
+                pass
+            break
+    # PNG fallback
+    try:
+        return Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:
+        return None
+
+
 class ScreencapSource:
     """Raw-RGBA screencap loop — no ffmpeg needed. ~2-4x faster than
     `screencap -p` because the device skips PNG encoding. Falls back to PNG
@@ -538,6 +599,7 @@ class FfmpegSource:
                                q=max(1, min(10, q)), scale=max(25, min(100, scale_pct)),
                                fps_cap=fps_cap)
         self.last_params = dict(self.params)
+        self.rate_orig = None
 
     # -- parameter updates (thread-safe) -----------------------------------
     def _update(self, **kw):
@@ -566,30 +628,86 @@ class FfmpegSource:
     def set_scale(self, pct):
         self._update(scale=max(25, min(100, int(pct))))
 
+    # -- refresh-rate handling ----------------------------------------------
+    # On 120Hz displays Android's capture path only feeds screenrecord
+    # frames when the display content CHANGES (damage tracking), so a
+    # static screen stalls to ~1fps. Forcing 60Hz makes frames flow
+    # continuously (~9fps static, full rate on motion). Best effort; the
+    # low-fps fallback below handles ROMs where this doesn't stick.
+    def _apply_refresh(self):
+        serial = self.m.serial
+        if not serial or self.rate_orig is not None:
+            return
+        try:
+            peak = shell_cmd(serial, "settings", "get", "system",
+                             "peak_refresh_rate").strip()
+            mini = shell_cmd(serial, "settings", "get", "system",
+                             "min_refresh_rate").strip()
+            self.rate_orig = (peak or "0", mini or "0")
+            changed = []
+            if peak not in ("60", "60.0"):
+                shell_cmd(serial, "settings", "put", "system",
+                          "peak_refresh_rate", "60")
+                changed.append("peak")
+            if mini not in ("60", "60.0"):
+                shell_cmd(serial, "settings", "put", "system",
+                          "min_refresh_rate", "60")
+                changed.append("min")
+            if changed:
+                time.sleep(0.35)  # let the display re-negotiate
+        except Exception:
+            self.rate_orig = None
+
+    def _restore_refresh(self):
+        if not self.rate_orig:
+            return
+        peak, mini = self.rate_orig
+        self.rate_orig = None
+        serial = self.m.serial
+        if not serial:
+            return
+        try:
+            shell_cmd(serial, "settings", "put", "system",
+                      "peak_refresh_rate", peak)
+            shell_cmd(serial, "settings", "put", "system",
+                      "min_refresh_rate", mini)
+        except Exception:
+            pass
+
     # -- pipeline -----------------------------------------------------------
     def _spawn(self):
         p = self._snapshot()
         w, h = p["w"], p["h"]
         serial = self.m.serial
+        self._apply_refresh()
         adb_cmd = ["adb"]
         if serial:
             adb_cmd += ["-s", serial]
+        # NOTE: no --size on screenrecord! On some displays a requested
+        # capture size switches screenrecord into damage-tracked scaling
+        # that only receives frames when content CHANGES (static screen
+        # stalls to ~1fps). Native capture flows continuously on the
+        # 60Hz refresh forced by _apply_refresh; ffmpeg downscales below.
         adb_cmd += ["exec-out",
-                    f"screenrecord --output-format=h264 --size {w}x{h}"
+                    f"screenrecord --output-format=h264"
                     f" --bit-rate {p['bitrate']} --time-limit 179 -"]
-        vf = []
+        vf = [f"scale={w}:{h}"]
         if p["fps_cap"]:
             vf += [f"fps={p['fps_cap']}"]
         if p["scale"] != 100:
             vf += [f"scale=trunc(iw*{p['scale']}/100/2)*2:"
                    f"trunc(ih*{p['scale']}/100/2)*2"]
         ff_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
-                  "-strict", "unofficial",
                   "-flags", "low_delay", "-probesize", "32768",
-                  "-f", "h264", "-i", "pipe:0"]
-        if vf:
-            ff_cmd += ["-vf", ",".join(vf)]
-        ff_cmd += ["-an", "-c:v", "mjpeg", "-q:v", str(p["q"]),
+                  "-f", "h264", "-i", "pipe:0",
+                  "-vf", ",".join(vf)]
+        # NOTE: -fflags nobuffer silently BREAKS the h264 demuxer on this
+        # input (0 frames decoded, no error). Keep low_delay+probesize.
+        # -strict unofficial must also sit AFTER -i as an output option;
+        # before -i it leaves the mjpeg encoder in strict mode and it
+        # refuses the (limited-range YUV) h264 input -> no frames at all.
+        ff_cmd += ["-strict", "unofficial",
+                   "-an", "-c:v", "mjpeg", "-q:v", str(p["q"]),
                    "-f", "image2pipe", "pipe:1"]
         try:
             self.adb = subprocess.Popen(adb_cmd, stdout=subprocess.PIPE,
@@ -671,6 +789,7 @@ class FfmpegSource:
     def close(self):
         self._stop = True
         self._cleanup()
+        self._restore_refresh()
 
 
 class CaptureManager:
@@ -701,9 +820,13 @@ class CaptureManager:
         self._info_thread = None
         self._watch_stop = False
         self._watch_thread = None
+        self._filler_stop = True
+        self._filler_thread = None
+        self.last_pub = 0.0
         if serial:
             self._start_source()
             self._start_info()
+        self._start_filler()
         self._start_watchdog()
 
     # -- lifecycle ----------------------------------------------------------
@@ -775,6 +898,43 @@ class CaptureManager:
     def is_stream(self):
         return isinstance(self.source, FfmpegSource)
 
+    # -- stale-frame filler --------------------------------------------------
+    # screenrecord on some ROMs only captures frames when the display
+    # content CHANGES (damage tracking), so a static screen stalls to
+    # ~1fps. The filler grabs a screencap whenever the stream has been
+    # silent too long: static screens stay fresh, and the instant content
+    # animates the stream takes over again at full rate — no mode flips.
+    def _filler_loop(self):
+        while not self._filler_stop:
+            time.sleep(0.35)
+            try:
+                with self.lock:
+                    streaming = isinstance(self.source, FfmpegSource)
+                    serial = self.serial if streaming else None
+                    stale = time.time() - self.last_pub > 0.6
+                if not stale or not serial:
+                    continue
+                img = grab_screencap(serial)
+                if img is None:
+                    continue
+                w, h = pick_stream_size(img.size, self.max_w, self.max_h)
+                if img.size != (w, h):
+                    img = img.resize((w, h), Image.BILINEAR)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=pil_jpeg_quality(self.q))
+                self._publish(buf.getvalue())
+            except Exception:
+                pass
+
+    def _start_filler(self):
+        self._filler_stop = True
+        if self._filler_thread and self._filler_thread.is_alive():
+            self._filler_thread.join(timeout=2)
+        self._filler_stop = False
+        self._filler_thread = threading.Thread(target=self._filler_loop,
+                                               daemon=True)
+        self._filler_thread.start()
+
     # -- frame publishing ---------------------------------------------------
     def _publish(self, frame):
         with self.lock:
@@ -783,6 +943,7 @@ class CaptureManager:
             self.image = frame
             self.is_jpeg = isinstance(frame, bytes)
             self.seq += 1
+            self.last_pub = time.time()
 
     def latest(self):
         with self.lock:
@@ -836,9 +997,11 @@ class CaptureManager:
     def close(self):
         self._info_stop = True
         self._watch_stop = True
+        self._filler_stop = True
         self._stop_source()
         self.inp.close()
-        for t in (self._info_thread, self._watch_thread):
+        for t in (self._info_thread, self._watch_thread,
+                  self._filler_thread):
             if t and t.is_alive():
                 try:
                     t.join(timeout=5)
@@ -1250,6 +1413,8 @@ class TUI:
         self.dot = None
         self.dot_until = 0.0
         self.last_seq = -1
+        self.prev_stream_seq = -1
+        self.stall_since = None
         self.prev_rows = []
         self.prev_top = None
         self.prev_bottom = None
@@ -1257,6 +1422,7 @@ class TUI:
         self.frames = 0
         self.t0 = time.time()
         self.proc_fps = 0.0
+        self.last_frame_at = 0.0
         self.proc_ms = 0.0
         self.geom = (0, 0)
 
@@ -1519,8 +1685,9 @@ class TUI:
 
     def _mouse(self, ev, cols, rows, m):
         args = self.args
-        if args.zellij and not self.grab:
-            return
+        # mouse should work whenever Zellij has locked the pane (Ctrl+g)
+        # or when the app's own grab is on; don't gate on app grab alone
+        # so regular terminal and Zellij-locked both get mouse
         if self.menu_open:
             return
         b, mx, my, released = ev[1], ev[2], ev[3], ev[4]
@@ -1619,11 +1786,18 @@ class TUI:
             out.append(f"\x1b[{lines};1H{bottom}")
             self.prev_bottom = bottom
 
-        # cursor dot
+        # cursor dot — single dot, no trail: erase old, draw new
+        if hasattr(self, "_prev_dot") and self._prev_dot and self._prev_dot != self.dot:
+            px, py = self._prev_dot
+            if 0 <= py - 1 < len(rows_strs):
+                out.append(f"\x1b[{py + top_rows};1H{rows_strs[py-1]}")
         if self.dot and time.time() < self.dot_until:
             tx, ty = self.dot
             out.append(f"\x1b[{ty + top_rows};{tx}H"
                        f"\x1b[38;5;45m●\x1b[0m")
+            self._prev_dot = (tx, ty)
+        else:
+            self._prev_dot = None
         # overlays
         if self.menu_open:
             items = build_menu(self.args, m, self.chrome)
@@ -1675,6 +1849,21 @@ class TUI:
                     args.stream = False
                 time.sleep(0.05)
                 continue
+            # stream stall guard: screenrecord on some displays (e.g. forced
+            # 120Hz by an app) only delivers frames when content changes, so
+            # a static screen stalls to ~0-2fps. Fall back to screencap.
+            if isinstance(m.source, FfmpegSource) and \
+                    time.time() - startup > 10:
+                if seq == self.prev_stream_seq:
+                    if self.stall_since is None:
+                        self.stall_since = time.time()
+                    elif time.time() - self.stall_since > 8:
+                        self.stall_since = None
+                        m.set_stream_mode(False)
+                        args.stream = False
+                else:
+                    self.prev_stream_seq = seq
+                    self.stall_since = None
             now = time.time()
             if seq != self.last_seq and now - last_draw >= interval:
                 last_draw = now
@@ -1689,8 +1878,11 @@ class TUI:
                 ms = (time.perf_counter() - t0) * 1000
                 self.last_seq = seq
                 self.frames += 1
-                fps = self.frames / (now - self.t0)
-                self.proc_fps = fps
+                frame_dt = now - self.last_frame_at
+                self.last_frame_at = now
+                inst = 1.0 / max(0.001, frame_dt)
+                self.proc_fps = (self.proc_fps * 0.85 + inst * 0.15
+                                 if self.proc_fps else inst)
                 self.proc_ms = ms
                 self.spark.append(min(1.0, max(0.0, ms / 50.0)))
                 cap_mode = "stream" if m.is_stream() else "cap"
@@ -1700,9 +1892,11 @@ class TUI:
                                                 self.pending_tap[1],
                                                 cols_now, rows, self.fit)
                         self.dot = (tx, ty)
-                        self.dot_until = self.pending_until
+                        self.dot_until = time.time() + 0.5
                     except Exception:
                         self.dot = None
+                else:
+                    self.dot = None
                 self.draw(rows_strs, cols_now, lines_now, m, dev,
                           (ow, oh), ms, cap_mode)
             else:
@@ -1983,13 +2177,18 @@ function showCur(x,y){
   dot.style.left=(ox+x*cw)+'px';dot.style.top=(oy+y*ch)+'px';dot.style.display='block';
 }
 function hideCur(){if(dot)dot.style.display='none';}
-img.addEventListener('pointerdown',e=>{const p=pos(e);a=p;cur=p;showCur(p[0],p[1]);e.preventDefault();});
-img.addEventListener('pointermove',e=>{if(!cur)return;const p=pos(e);cur=p;showCur(p[0],p[1]);e.preventDefault();});
+let lastMove=0;
+img.addEventListener('pointerdown',e=>{const p=pos(e);a=p;cur=p;showCur(p[0],p[1]);api('/input/touch',{action:'down',x:p[0],y:p[1]});e.preventDefault();});
+img.addEventListener('pointermove',e=>{
+  if(!cur)return;const p=pos(e);cur=p;showCur(p[0],p[1]);
+  const now=performance.now();
+  if(now-lastMove>28){lastMove=now; api('/input/touch',{action:'move',x:p[0],y:p[1]});}
+  e.preventDefault();
+});
 img.addEventListener('pointerup',e=>{
   if(!cur||!a)return;
-  const p=pos(e),dx=Math.abs(p[0]-a[0]),dy=Math.abs(p[1]-a[1]);
-  if(Math.hypot(dx,dy)<0.01)api('/input/tap',{x:p[0],y:p[1]});
-  else api('/input/swipe',{x1:a[0],y1:a[1],x2:p[0],y2:p[1]});
+  const p=pos(e);
+  api('/input/touch',{action:'up',x:p[0],y:p[1]});
   cur=null;a=null;setTimeout(hideCur,350);e.preventDefault();});
 img.addEventListener('pointercancel',()=>{cur=null;a=null;hideCur();});
 /* ---- keyboard capture ---- */
@@ -2212,7 +2411,8 @@ class WebApp:
                                 im = im.copy()
                                 im.thumbnail((1280, 1280), Image.BILINEAR)
                             im.save(buf, format="JPEG",
-                                    quality=app.jpeg_quality)
+                                    quality=pil_jpeg_quality(
+                                        app.jpeg_quality))
                             data = buf.getvalue()
                         self.wfile.write(
                             b"--frame\r\nContent-Type: image/jpeg\r\n"
@@ -2263,6 +2463,17 @@ class WebApp:
                           float(j.get("y1", 0)) * dh,
                           float(j.get("x2", 0)) * dw,
                           float(j.get("y2", 0)) * dh, 120)
+                elif path == "/input/touch":
+                    dw, dh = app._dev_size()
+                    act = str(j.get("action", "")).lower()
+                    x = float(j.get("x", 0.5)) * dw
+                    y = float(j.get("y", 0.5)) * dh
+                    if act == "down":
+                        touch_down(m.inp, x, y)
+                    elif act == "move":
+                        touch_move(m.inp, x, y)
+                    elif act == "up":
+                        touch_up(m.inp, x, y)
                 elif path == "/input/text":
                     text = str(j.get("text", ""))
                     send_text(m.inp, text)
@@ -2447,8 +2658,8 @@ def main():
                     help="device serial (default: first adb device)")
     ap.add_argument("--pick", action="store_true",
                     help="show device picker (USB + WiFi scan + IP)")
-    ap.add_argument("--fps", type=int, default=12,
-                    help="TUI target refresh rate (default 12)")
+    ap.add_argument("--fps", type=int, default=20,
+                    help="TUI target refresh rate (default 20)")
     ap.add_argument("--web-fps", type=int, default=30,
                     help="web stream frame cap (default 30)")
     ap.add_argument("--fit", choices=FIT_MODES, default="contain",
@@ -2548,7 +2759,7 @@ def main():
     except Exception:
         mw, mh = 1280, 1280
     m = CaptureManager(serial, mw, mh, args.bitrate, args.jpeg_quality,
-                       args.web_scale, 0, stream_ok)
+                       args.web_scale, args.web_fps, stream_ok)
     dbg("capture", "ffmpeg", HAS_FFMPEG, "stream_ok", stream_ok,
         "serial", serial)
 

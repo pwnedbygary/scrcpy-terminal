@@ -49,7 +49,7 @@ with no TTY silently drops to web-only.
 ```
 -s, --serial SERIAL      device serial (default: first adb device)
     --pick               interactive device picker (USB + WiFi scan + IP)
-    --fps N              TUI refresh cap (default 12; 60 ≈ screen feed rate)
+    --fps N              TUI refresh cap (default 20; 60 ≈ screen feed rate)
     --web-fps N          web stream frame cap (default 30)
     --fit MODE           contain | cover | fill (default contain)
     --colors MODE        auto | truecolor | 256
