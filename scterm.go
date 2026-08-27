@@ -2173,10 +2173,13 @@ padding:6px 13px;border-radius:999px;width:190px;font:inherit;font-size:12.5px;o
 /* ---------- stage ---------- */
 #wrap{flex:1;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;
 background:radial-gradient(700px 400px at 50% 40%,rgba(255,255,255,.03),transparent 70%)}
-#wrap video,#wrap img{max-width:calc(100% - 40px);max-height:calc(100% - 28px);display:none;
+#wrap video,#wrap img{position:absolute;max-width:calc(100% - 40px);max-height:calc(100% - 28px);
 object-fit:contain;border-radius:10px;box-shadow:0 10px 60px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.06)}
-#wrap video.on,#wrap img.on{display:block}
-#wrap.live video.on,#wrap.live img.on{box-shadow:0 10px 60px rgba(0,0,0,.55),0 0 26px rgba(0,224,180,.18),0 0 0 1px rgba(0,224,180,.25)}
+#wrap img{display:block;opacity:1;transition:opacity .3s}
+#wrap video{opacity:0;transition:opacity .3s}
+#wrap video.on{opacity:1}
+#wrap img.off{opacity:0;pointer-events:none}
+#wrap.live video.on,#wrap.live img:not(.off){box-shadow:0 10px 60px rgba(0,0,0,.55),0 0 26px rgba(0,224,180,.18),0 0 0 1px rgba(0,224,180,.25)}
 /* connecting overlay */
 #noconn{position:absolute;inset:0;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;
 color:var(--dim);background:rgba(7,8,12,.5);backdrop-filter:blur(4px);transition:opacity .4s}
@@ -2242,7 +2245,10 @@ setInterval(pollStatus,2500);pollStatus();
 const mseOK=window.MediaSource&&MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"');
 function useMSE(){
   usingMSE=true;
-  $('v').classList.add('on');$('vimg').classList.remove('on');
+  // live mjpg stays as a backdrop (static screens keep updating via the
+  // filler); the video fades in over it once real frames are playing
+  $('vimg').src='/stream.mjpg';
+  $('v').addEventListener('playing',()=>{$('v').classList.add('on');$('vimg').classList.add('off');});
   const ms=new MediaSource();
   $('v').src=URL.createObjectURL(ms);
   ms.addEventListener('sourceopen',async()=>{
@@ -2262,7 +2268,7 @@ function useMSE(){
     try{$('v').play().catch(()=>{});}catch(e){}
   });
 }
-function useMJPEG(){usingMSE=false;$('v').classList.remove('on');$('vimg').classList.add('on');$('vimg').src='/stream.mjpg';}
+function useMJPEG(){usingMSE=false;$('v').classList.remove('on');$('vimg').classList.remove('off');$('vimg').src='/stream.mjpg';}
 function fallbackMJPEG(){try{$('v').src='';}catch(e){}useMJPEG();}
 if(mseOK)useMSE();else useMJPEG();
 /* ---- pointer: live touch ---- */
