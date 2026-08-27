@@ -1448,9 +1448,10 @@ func (t *TUI) feed(data []byte, evs *[]event) {
 							x: x, y: y, press: press, motion: motion, wheel: wheel})
 					}
 				default:
-					if strings.HasSuffix(seq, "~") {
-						code := strings.TrimSuffix(seq, "~")
-						n, _ := strconv.Atoi(code)
+					// F-keys: ESC [ 1 1 ~ — the '~' is the terminator (fin),
+					// so seq holds the code digits
+					if fin == '~' {
+						n, _ := strconv.Atoi(seq)
 						*evs = append(*evs, event{kind: evFKey, code: n})
 					} else {
 						*evs = append(*evs, event{kind: evEsc})
