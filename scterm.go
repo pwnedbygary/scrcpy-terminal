@@ -2323,7 +2323,12 @@ function useMSE(){
 }
 function useMJPEG(){usingMSE=false;$('v').classList.remove('on');$('vimg').classList.remove('off');$('vimg').src='/stream.mjpg';}
 function fallbackMJPEG(){try{$('v').src='';}catch(e){}useMJPEG();}
-if(mseOK)useMSE();else useMJPEG();
+// DEFAULT TRANSPORT: MJPEG. The MSE fMP4 path only delivers fragments
+// at keyframes (2s, and some ROMs ignore the option entirely), so during
+// a drag the <video> froze while the live mjpg backdrop ran at 28fps —
+// that was the 2-3s feedback lag. MJPEG updates every frame (~35ms).
+// (MSE remains available for a future smooth-playback toggle.)
+useMJPEG();
 /* ---- pointer: live touch ---- */
 function pos(e){
   const el=usingMSE?$('v'):$('vimg');
