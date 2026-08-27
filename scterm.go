@@ -413,6 +413,10 @@ type Capture struct {
 
 	termW, termH int
 
+	engMu       sync.Mutex
+	engineDead  bool
+	stopping    bool
+
 	infoMu  sync.Mutex
 	model   string
 	battery int
@@ -493,8 +497,12 @@ func (c *Capture) spawnPipeline() {
 		} else {
 			scr = cmd
 			go func(cmd *exec.Cmd) {
-				werr := cmd.Wait()
-				logf("scrcpy exited: %v", werr)
+				cmd.Wait()
+				c.engMu.Lock()
+				if !c.stopping {
+					c.engineDead = true
+				}
+				c.engMu.Unlock()
 			}(cmd)
 		}
 	}
@@ -578,6 +586,14 @@ func (c *Capture) spawnPipeline() {
 		logf("ffmpeg failed: %v", err)
 		return
 	}
+	go func(cmd *exec.Cmd) {
+		cmd.Wait()
+		c.engMu.Lock()
+		if !c.stopping {
+			c.engineDead = true
+		}
+		c.engMu.Unlock()
+	}(cmd)
 	mjW.Close()
 	f4W.Close()
 	ogW.Close()
@@ -917,29 +933,29 @@ func (c *Capture) watchdog() {
 		case <-time.After(2 * time.Second):
 		}
 		c.mu.Lock()
-		streamLast := c.streamLast
 		seq := c.seq
 		first := c.firstPub
 		c.mu.Unlock()
-		if os.Getenv("SCTERM_DEBUG") != "" {
-			dbg("wd: seq=%d streamAge=%.1fs scrAlive=%v ffAlive=%v",
-				seq, time.Since(streamLast).Seconds(),
-				c.scr != nil && c.scr.Process != nil && c.scr.ProcessState == nil,
-				c.ff != nil && c.ff.Process != nil && c.ff.ProcessState == nil)
-		}
-		if seq == 0 && !first.IsZero() && time.Since(first) > 10*time.Second {
-			logf("pipeline never produced frames; restarting")
+		c.engMu.Lock()
+		dead := c.engineDead
+		c.engMu.Unlock()
+
+		if dead && time.Since(lastRestart) > 3*time.Second {
+			// an engine process actually crashed — respawn promptly
+			logf("engine process died; respawning")
+			lastRestart = time.Now()
 			c.spawnPipeline()
 			continue
 		}
-		// stream-specific staleness: the screencap filler keeps lastPub
-		// fresh even when scrcpy/ffmpeg is dead, so use streamLast
-		if !streamLast.IsZero() && time.Since(streamLast) > 6*time.Second &&
-			time.Since(lastRestart) > 10*time.Second {
-			logf("STREAM silent %.0fs (engine=%s); respawning",
-				time.Since(streamLast).Seconds(), c.engine)
-			lastRestart = time.Now()
+		// NOTE: a SILENT-but-alive stream is NOT a failure: this ROM
+		// doesn't feed the encoder when the display is static (the
+		// screencap filler keeps visuals fresh). Respawning every ~10s
+		// on static screens flipped scrcpy's audio focus on the device
+		// every cycle (user-observed on-device sound toggling).
+		if seq == 0 && !first.IsZero() && time.Since(first) > 15*time.Second {
+			logf("pipeline never produced frames; restarting")
 			c.spawnPipeline()
+			continue
 		}
 	}
 }
@@ -1055,6 +1071,10 @@ func fitImage(src image.Image, w, h int, mode string) image.Image {
 }
 
 func (c *Capture) teardown() {
+	c.engMu.Lock()
+	c.stopping = true
+	c.engineDead = false
+	c.engMu.Unlock()
 	for _, p := range []*exec.Cmd{c.ff, c.scr} {
 		if p != nil && p.Process != nil {
 			p.Process.Kill() // reaped by the launch goroutine
@@ -2311,10 +2331,17 @@ func (w *WebApp) streamMjpg(res http.ResponseWriter, req *http.Request) {
 
 // streamOgg serves the live Ogg Opus stream (one consumer).
 func (w *WebApp) streamOgg(res http.ResponseWriter, req *http.Request) {
-	ch := w.cap.ogg.Sub()
 	fl := res.(http.Flusher)
 	res.Header().Set("Content-Type", "audio/ogg")
 	res.Header().Set("Cache-Control", "no-cache")
+	// WAIT for the Ogg init (OpusHead) — if the device is silent when the
+	// browser connects, ffmpeg hasn't muxed headers yet; subscribing now
+	// would stream headerless pages and the browser plays nothing.
+	deadline := time.Now().Add(20 * time.Second)
+	for w.cap.oggInit == nil && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	ch := w.cap.ogg.Sub()
 	if init := w.cap.oggInit; init != nil {
 		res.Write(init)
 		fl.Flush()
@@ -2553,6 +2580,7 @@ async function toggleAudio(){
   $('abtn').textContent=audioOn?'🔊 Audio on':'🔈 Audio';
   if(audioOn){
     const a=document.createElement('audio');a.autoplay=true;a.src='/audio.ogg';a.id='aud';a.style.display='none';document.body.appendChild(a);
+    a.play().catch(()=>{});
   }else{
     const a=document.getElementById('aud');if(a){a.pause();a.remove();}
   }
