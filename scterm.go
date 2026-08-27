@@ -1743,8 +1743,14 @@ func (t *TUI) quit() {
 
 // Run is the main TUI loop.
 func (t *TUI) Run() {
-	// always alt-screen + hide cursor + mouse OFF.
-	os.Stdout.WriteString("\x1b[?1049h\x1b[?25l\x1b[?1000l\x1b[?1002l\x1b[?1006l")
+	// alt-screen + hide cursor. Mouse ON by default OUTSIDE Zellij
+	// (no PTY leak there — click/tap works immediately); in Zellij it
+	// stays OFF until F12/Ctrl-G grab locks the pane (byte leak).
+	if t.inZellij {
+		os.Stdout.WriteString("\x1b[?1049h\x1b[?25l\x1b[?1000l\x1b[?1002l\x1b[?1006l")
+	} else {
+		os.Stdout.WriteString("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+	}
 	os.Stdout.Sync()
 	fd := int(os.Stdin.Fd())
 	setRaw(fd)
