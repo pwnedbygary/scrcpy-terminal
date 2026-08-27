@@ -230,6 +230,15 @@ func setRotation(serial string, deg int) {
 	shellOut(serial, "settings", "put", "system", "user_rotation", strconv.Itoa((deg/90)%4))
 }
 
+// hostOut runs a HOST-side adb command (e.g. `adb devices`) — no `shell`.
+func hostOut(tail ...string) string {
+	out, err := exec.Command("adb", tail...).CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
 func wakeUnlock(serial string, stayAwake bool) {
 	if serial == "" {
 		return
@@ -366,6 +375,7 @@ type Capture struct {
 	lastPub  time.Time
 	firstPub time.Time
 	pubFPS   float64
+	pubWin   []time.Time
 
 	// fmp4/ogg fan-out
 	fmp4     *StreamSlot
@@ -555,7 +565,7 @@ func (c *Capture) readMJPEG(r *os.File) {
 			e += s + 4
 			frame := append([]byte(nil), buf[s:e]...)
 			buf = buf[e:]
-			c.publishLocked(frame)
+			c.publishLocked(frame, "pipe")
 		}
 		if len(buf) > 2<<20 {
 			if i := indexOf(buf, soi); i >= 0 {
@@ -567,7 +577,18 @@ func (c *Capture) readMJPEG(r *os.File) {
 	}
 }
 
-func (c *Capture) publishLocked(frame []byte) {
+func (c *Capture) publishLocked(frame []byte, srcName string) {
+	// cap: skip if publishing faster than 30fps (the flood is from the
+	// un-throttled mjpeg output; filler is ~2fps and fine)
+	c.mu.Lock()
+	last := c.lastPub
+	c.mu.Unlock()
+	if !last.IsZero() && time.Since(last) < 16*time.Millisecond && len(frame) > 1000 {
+		return
+	}
+	if os.Getenv("SCTERM_DEBUG") != "" && c.seq%10 == 0 {
+		dbg("publish seq=%d len=%d src=%s", c.seq, len(frame), srcName)
+	}
 	now := time.Now()
 	c.mu.Lock()
 	c.latest = frame
@@ -575,11 +596,22 @@ func (c *Capture) publishLocked(frame []byte) {
 	if c.firstPub.IsZero() {
 		c.firstPub = now
 	}
-	dt := now.Sub(c.lastPub).Seconds()
-	if c.lastPub.IsZero() || dt <= 0 {
-		dt = 0.033
+	// publish rate over the last 2s (robust to bursty simultaneous
+	// publishers — an EMA on inter-arrival exploded to thousands)
+	c.pubWin = append(c.pubWin, now)
+	cut := now.Add(-2 * time.Second)
+	i := 0
+	for i < len(c.pubWin) && c.pubWin[i].Before(cut) {
+		i++
 	}
-	c.pubFPS = c.pubFPS*0.85 + (1.0/dt)*0.15
+	c.pubWin = c.pubWin[i:]
+	if n := len(c.pubWin); n > 0 {
+		f := float64(n) / 2.0
+		if f > 120 {
+			f = 120
+		}
+		c.pubFPS = f
+	}
 	c.lastPub = now
 	c.mu.Unlock()
 }
@@ -813,7 +845,7 @@ func (c *Capture) filler() {
 			dbg("filler: jpeg encode failed: %v", err)
 			continue
 		}
-		c.publishLocked(buf.Bytes())
+		c.publishLocked(buf.Bytes(), "fill")
 		dbg("filler: published %d bytes", buf.Len())
 	}
 }
@@ -1122,7 +1154,9 @@ func NewTUI(c *Capture, inp *AdbInput, fit string, chrome bool) *TUI {
 	return t
 }
 
-const SPARK = "▁▂▃▄▅▆▇█"
+// ASCII-safe sparkline (the unicode ▁▂▃▄▅▆▇█ blocks aren't rendered
+// in many Zellij/terminal font combos — showed as 'a' mojibake).
+const SPARK = " .:-=+*#%@"
 
 func (t *TUI) style(s string, color string) string {
 	if color == "" {
@@ -1166,17 +1200,20 @@ func (t *TUI) draw(rows []string, ms float64, capMode string) {
 
 	if t.chrome {
 		top := t.topBar(cols, canvasRows, ms, capMode)
-		if top != t.prevTop {
+		// Zellij: always redraw (stray bytes can corrupt a cached bar)
+		if !t.inZellij {
+			if top != t.prevTop {
+				out.WriteString("\x1b[1;1H\x1b[2K")
+				out.WriteString(top)
+				t.prevTop = top
+			}
+		} else {
 			out.WriteString("\x1b[1;1H\x1b[2K")
 			out.WriteString(top)
-			t.prevTop = top
 		}
 	}
 	bot := t.bottomBar(cols)
-	if bot != t.prevBot {
-		fmt.Fprintf(&out, "\x1b[%d;1H\x1b[2K%s", lines, bot)
-		t.prevBot = bot
-	}
+	fmt.Fprintf(&out, "\x1b[%d;1H\x1b[2K%s", lines, bot)
 
 	// cursor dot
 	if t.dotUntil.After(time.Now()) {
@@ -1681,13 +1718,16 @@ func (t *TUI) quit() {
 
 // Run is the main TUI loop.
 func (t *TUI) Run() {
-	// screen setup
+	// screen setup: alt-screen + hide cursor, mouse OFF everywhere;
+	// grab mode (F12) enables mouse — prevents Zellij PTY echo corruption.
 	inZellij := t.inZellij
 	if !inZellij {
-		os.Stdout.WriteString("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+		os.Stdout.WriteString("\x1b[?1049h\x1b[?25l")
 	} else {
 		os.Stdout.WriteString("\x1b[2J\x1b[H")
 	}
+	// guarantee mouse is OFF (fixes white horizontal lines in Zellij)
+	os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1006l")
 	os.Stdout.Sync()
 	fd := int(os.Stdin.Fd())
 	setRaw(fd)
@@ -1885,15 +1925,7 @@ func (w *WebApp) apiStatus(res http.ResponseWriter, req *http.Request) {
 }
 
 func (w *WebApp) apiDevices(res http.ResponseWriter, req *http.Request) {
-	out := shellOut("", "devices")
-	devs := []string{}
-	for _, line := range strings.Split(out, "\n")[1:] {
-		f := strings.Fields(line)
-		if len(f) >= 2 && f[1] == "device" {
-			devs = append(devs, f[0])
-		}
-	}
-	w.writeJSON(res, map[string]interface{}{"devices": devs})
+	w.writeJSON(res, map[string]interface{}{"devices": listDevices()})
 }
 
 type norm struct{ X, Y float64 }
@@ -2173,8 +2205,8 @@ padding:6px 13px;border-radius:999px;width:190px;font:inherit;font-size:12.5px;o
 /* ---------- stage ---------- */
 #wrap{flex:1;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;
 background:radial-gradient(700px 400px at 50% 40%,rgba(255,255,255,.03),transparent 70%)}
-#wrap video,#wrap img{position:absolute;max-width:calc(100% - 40px);max-height:calc(100% - 28px);
-object-fit:contain;border-radius:10px;box-shadow:0 10px 60px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.06)}
+#wrap video,#wrap img{position:absolute;width:100%;height:100%;object-fit:contain;
+border-radius:10px;box-shadow:0 10px 60px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.06)}
 #wrap img{display:block;opacity:1;transition:opacity .3s}
 #wrap video{opacity:0;transition:opacity .3s}
 #wrap video.on{opacity:1}
@@ -2343,11 +2375,14 @@ $('qr').addEventListener('change',e=>{$('qv').textContent=e.target.value;api('/s
 
 func listDevices() []string {
 	devs := []string{}
-	out := shellOut("", "devices")
+	out := hostOut("devices")
 	for _, line := range strings.Split(out, "\n")[1:] {
 		f := strings.Fields(line)
-		if len(f) >= 2 && f[1] == "device" {
-			devs = append(devs, f[0])
+		if len(f) >= 2 {
+			state := f[1]
+			if state == "device" || state == "unauthorized" {
+				devs = append(devs, f[0])
+			}
 		}
 	}
 	return devs
