@@ -67,6 +67,18 @@ const (
 	BLOCK     = "▀"
 )
 
+// atomicWrite writes the whole buffer to fd, retrying short writes so
+// Zellij never interleaves stray bytes between partial chunks.
+func atomicWrite(fd int, data []byte) {
+	for len(data) > 0 {
+		n, err := syscall.Write(fd, data)
+		if err != nil {
+			return
+		}
+		data = data[n:]
+	}
+}
+
 func dbg(format string, a ...interface{}) {
 	if os.Getenv("SCTERM_DEBUG") != "" {
 		fmt.Fprintf(os.Stderr, "[scterm] "+format+"\n", a...)
@@ -1227,7 +1239,7 @@ func (t *TUI) draw(rows []string, ms float64, capMode string) {
 		out.WriteString(t.helpOverlay(cols, lines))
 	}
 	if out.Len() > 0 {
-		os.Stdout.WriteString(out.String())
+		atomicWrite(int(os.Stdout.Fd()), []byte(out.String()))
 	}
 }
 
@@ -1718,16 +1730,8 @@ func (t *TUI) quit() {
 
 // Run is the main TUI loop.
 func (t *TUI) Run() {
-	// screen setup: alt-screen + hide cursor, mouse OFF everywhere;
-	// grab mode (F12) enables mouse — prevents Zellij PTY echo corruption.
-	inZellij := t.inZellij
-	if !inZellij {
-		os.Stdout.WriteString("\x1b[?1049h\x1b[?25l")
-	} else {
-		os.Stdout.WriteString("\x1b[2J\x1b[H")
-	}
-	// guarantee mouse is OFF (fixes white horizontal lines in Zellij)
-	os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1006l")
+	// always alt-screen + hide cursor + mouse OFF.
+	os.Stdout.WriteString("\x1b[?1049h\x1b[?25l\x1b[?1000l\x1b[?1002l\x1b[?1006l")
 	os.Stdout.Sync()
 	fd := int(os.Stdin.Fd())
 	setRaw(fd)
@@ -1845,11 +1849,7 @@ func (t *TUI) Run() {
 // exit restores the terminal.
 func (t *TUI) exit() {
 	restoreTerm(int(os.Stdin.Fd()))
-	if !t.inZellij {
-		os.Stdout.WriteString("\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1006l")
-	} else {
-		os.Stdout.WriteString("\x1b[0m\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1006l")
-	}
+	os.Stdout.WriteString("\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1006l")
 	os.Stdout.Sync()
 }
 
