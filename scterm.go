@@ -700,21 +700,11 @@ func indexOf(h, n []byte) int {
 	return -1
 }
 
-// mjpegVf builds the scale/pad/crop chain for the pipe:1 output.
+// mjpegVf builds the pipe:1 output filter. The stream is a fixed
+// 960x540 canvas; the TUI applies fit (contain/cover/fill) internally so
+// resizes and fit changes never need to restart ffmpeg/scrcpy.
 func (c *Capture) mjpegVf() string {
-	w, h := c.termW, c.termH
-	if w <= 0 || h <= 0 {
-		w, h = 640, 360
-	}
-	w, h = even(w), even(h)
-	res := fmt.Sprintf("scale=%d:%d", w, h)
-	switch c.fitMode {
-	case "contain":
-		return res + fmt.Sprintf(":force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=#080808", w, h)
-	case "cover":
-		return res + fmt.Sprintf(":force_original_aspect_ratio=increase,crop=%d:%d", w, h)
-	}
-	return res
+	return "scale=960:540"
 }
 
 func even(n int) int {
@@ -724,22 +714,19 @@ func even(n int) int {
 	return n &^ 1
 }
 
-// SetFit changes fit mode and restarts ffmpeg (mjpeg geometry).
+// SetFit records the fit mode. The TUI applies it in-process each frame.
 func (c *Capture) SetFit(mode string) {
 	if mode == c.fitMode {
 		return
 	}
 	c.fitMode = mode
-	c.RespawnFFMpeg()
 }
 
-// ResizeTerm sets the mjpeg target; the TUI calls it after SIGWINCH.
+// ResizeTerm records the TUI canvas size (used by the filler target).
+// It does NOT restart anything: the mjpeg pipe is fixed at 960x540 and
+// the TUI fits it in-process.
 func (c *Capture) ResizeTerm(w, h int) {
-	if w == c.termW && h == c.termH {
-		return
-	}
 	c.termW, c.termH = w, h
-	c.RespawnFFMpeg()
 }
 
 // RespawnFFMpeg kills and respawns ffmpeg (keeps scrcpy/fifo running).
@@ -1189,40 +1176,21 @@ func (t *TUI) draw(rows []string, ms float64, capMode string) {
 	var out strings.Builder
 	out.Grow(1 << 20)
 
-	changed := []int{}
-	for i, s := range rows {
-		if i >= len(t.prevRows) || t.prevRows[i] != s {
-			changed = append(changed, i)
-		}
+	// ALWAYS full redraw — the incremental changed-rows path caused
+	// horizontal bands/corruption (python fix: incremental redraw was
+	// abandoned for exactly this). Erase each line first so any stray
+	// bytes are wiped before we paint over them.
+	fmt.Fprintf(&out, "\x1b[%d;1H", 1+topRows)
+	for _, s := range rows {
+		out.WriteString("\x1b[2K")
+		out.WriteString(s)
+		out.WriteString("\r\n")
 	}
-	full := len(t.prevRows) != len(rows) || len(changed) > len(rows)/2
-	if full {
-		fmt.Fprintf(&out, "\x1b[%d;1H", 1+topRows)
-		for _, s := range rows {
-			out.WriteString("\x1b[2K")
-			out.WriteString(s)
-			out.WriteString("\r\n")
-		}
-	} else {
-		for _, i := range changed {
-			fmt.Fprintf(&out, "\x1b[%d;1H\x1b[2K%s", i+1+topRows, rows[i])
-		}
-	}
-	t.prevRows = append([]string(nil), rows...)
 
 	if t.chrome {
 		top := t.topBar(cols, canvasRows, ms, capMode)
-		// Zellij: always redraw (stray bytes can corrupt a cached bar)
-		if !t.inZellij {
-			if top != t.prevTop {
-				out.WriteString("\x1b[1;1H\x1b[2K")
-				out.WriteString(top)
-				t.prevTop = top
-			}
-		} else {
-			out.WriteString("\x1b[1;1H\x1b[2K")
-			out.WriteString(top)
-		}
+		out.WriteString("\x1b[1;1H\x1b[2K")
+		out.WriteString(top)
 	}
 	bot := t.bottomBar(cols)
 	fmt.Fprintf(&out, "\x1b[%d;1H\x1b[2K%s", lines, bot)
@@ -1812,7 +1780,7 @@ func (t *TUI) Run() {
 		if t.rows == 0 {
 			continue
 		}
-		// frame draw at interval
+		// frame draw at interval — decode, fit (contain/cover/fill), render
 		if img, seq, ok := t.cap.Latest(); ok && seq != frameSeq &&
 			time.Since(lastDraw) >= interval {
 			frameSeq = seq
@@ -1820,7 +1788,8 @@ func (t *TUI) Run() {
 			img2, err := jpeg.Decode(bytes.NewReader(img))
 			if err == nil {
 				t0 := time.Now()
-				rows := t.renderer.Render(img2, t.cols, t.rows)
+				fitted := fitImage(img2, t.cols, t.rows*2, t.fit)
+				rows := t.renderer.Render(fitted, t.cols, t.rows)
 				ms := float64(time.Since(t0).Microseconds()) / 1000.0
 				// fps EMA
 				dt := time.Since(t.lastFrameT).Seconds()
