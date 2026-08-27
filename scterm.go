@@ -550,7 +550,9 @@ func (c *Capture) spawnPipeline() {
 
 	cmd := exec.Command("ffmpeg", ffArgs...)
 	cmd.Stdout = mjW
-	cmd.Stderr = os.Stderr
+	// stderr to devnull: ffmpeg's broken-pipe warnings on respawn were
+	// landing inside the TUI render and corrupting the display
+	cmd.Stderr = nil
 	cmd.ExtraFiles = []*os.File{f4W, ogW, webW}
 	if scr == nil {
 		// wire adb screenrecord stdout as ffmpeg stdin
@@ -960,9 +962,10 @@ func (c *Capture) filler() {
 		case <-time.After(200 * time.Millisecond):
 		}
 		c.mu.Lock()
-		stale := c.latest == nil || time.Since(c.lastPub) > 600*time.Millisecond
+		stale := c.latest == nil || time.Since(c.lastPub) > 250*time.Millisecond
 		c.mu.Unlock()
 		if !stale || c.serial == "" {
+			time.Sleep(60 * time.Millisecond)
 			continue
 		}
 		w, h := c.termW, c.termH
@@ -1108,6 +1111,7 @@ func (r *Renderer) Render(img image.Image, cols, rows int) []string {
 		cb := yc.Cb
 		cr := yc.Cr
 		cs := yc.CStride
+		sw, sh := b.Dx(), b.Dy()
 		var top, bot [3]uint8
 		for y := 0; y < rows; y++ {
 			var sb strings.Builder
@@ -1124,14 +1128,22 @@ func (r *Renderer) Render(img image.Image, cols, rows int) []string {
 				}
 			}
 			for x := 0; x < cols; x++ {
-				px := b.Min.X + x
-				y0 := b.Min.Y + y*2
-				y1 := y0 + 1
+				// proportional + clamped sampling: any source size is safe
+				// (a stale pre-resize frame must never panic the renderer)
+				sx := b.Min.X + (x*sw)/cols
+				if sx >= b.Max.X {
+					sx = b.Max.X - 1
+				}
+				y0 := b.Min.Y + (y*2*sh)/(rows*2)
+				y1 := b.Min.Y + ((y*2+1)*sh)/(rows*2)
+				if y0 >= b.Max.Y {
+					y0 = b.Max.Y - 1
+				}
 				if y1 >= b.Max.Y {
 					y1 = b.Max.Y - 1
 				}
-				top = ycbcrAt(ys, ysStride, cb, cr, cs, px, y0, b.Min)
-				bot = ycbcrAt(ys, ysStride, cb, cr, cs, px, y1, b.Min)
+				top = ycbcrAt(ys, ysStride, cb, cr, cs, sx, y0, b.Min)
+				bot = ycbcrAt(ys, ysStride, cb, cr, cs, sx, y1, b.Min)
 				k := escKey(top, bot)
 				if k == prevKey {
 					run++
@@ -1161,15 +1173,22 @@ func (r *Renderer) Render(img image.Image, cols, rows int) []string {
 				run = 0
 			}
 		}
+		sw, sh := b.Dx(), b.Dy()
 		for x := 0; x < cols; x++ {
-			px := b.Min.X + x
-			y0 := b.Min.Y + y*2
-			y1 := y0 + 1
+			sx := b.Min.X + (x*sw)/cols
+			if sx >= b.Max.X {
+				sx = b.Max.X - 1
+			}
+			y0 := b.Min.Y + (y*2*sh)/(rows*2)
+			y1 := b.Min.Y + ((y*2+1)*sh)/(rows*2)
+			if y0 >= b.Max.Y {
+				y0 = b.Max.Y - 1
+			}
 			if y1 >= b.Max.Y {
 				y1 = b.Max.Y - 1
 			}
-			tr, tg, tb, _ := img.At(px, y0).RGBA()
-			br, bg, bb, _ := img.At(px, y1).RGBA()
+			tr, tg, tb, _ := img.At(sx, y0).RGBA()
+			br, bg, bb, _ := img.At(sx, y1).RGBA()
 			k := escKey([3]uint8{uint8(tr >> 8), uint8(tg >> 8), uint8(tb >> 8)},
 				[3]uint8{uint8(br >> 8), uint8(bg >> 8), uint8(bb >> 8)})
 			if k == prevKey {
@@ -1276,6 +1295,9 @@ type TUI struct {
 	exitNow    func()
 	lastFrameT time.Time
 	frameCount int
+	resizeAt   time.Time
+	resizeW    int
+	resizeH    int
 
 	started  time.Time
 	frames   int
@@ -1938,21 +1960,30 @@ func (t *TUI) Run() {
 		case <-quit:
 			stop = true
 		}
-		// resize check
+		// resize check, DEBOUNCED: record the pending size, apply only
+		// after it stays stable ~400ms (window drags fire many SIGWINCHes
+		// and each apply respawns the pipeline)
 		cols, lines := getTermSize()
 		if cols != t.cols || lines != t.lines {
-			t.cols, t.lines = cols, lines
-			t.rows = lines - 1
+			t.resizeAt = time.Now()
+			t.resizeW, t.resizeH = cols, lines
+		}
+		if t.resizeW > 0 && !t.resizeAt.IsZero() &&
+			time.Since(t.resizeAt) > 400*time.Millisecond {
+			t.cols, t.lines = t.resizeW, t.resizeH
+			t.resizeW, t.resizeH = 0, 0
+			t.rows = t.lines - 1
 			if t.chrome {
-				t.rows = lines - 2
+				t.rows = t.lines - 2
 			}
 			if t.rows < 4 {
 				t.rows = 4
 			}
-			if cols > 4 {
-				t.cap.ResizeTerm(cols, t.rows*2)
+			if t.cols > 4 {
+				t.cap.ResizeTerm(t.cols, t.rows*2)
 				t.prevRows = nil
 				t.prevTop, t.prevBot = "", ""
+				t.renderer.Reset()
 			}
 		}
 		if t.rows == 0 {
