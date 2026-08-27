@@ -132,7 +132,8 @@ daemon or an Android client can reuse the exact same endpoints:
 | `POST /input/swipe` | `{"x1","y1","x2","y2"}` normalised |
 | `POST /input/key` | `{"code": 82}` or `?code=82` |
 | `POST /input/text` | `{"text": "hello world"}` (auto-chunked) |
-| `POST /input/audio` | `{"enabled": true}` (requires scrcpy) |
+| `POST /input/audio` | `{"enabled": true}` (requires scrcpy; live **Ogg Opus** at `/audio.ogg`) |
+| `GET /audio.ogg` | live Ogg Opus stream from the device (browser-plays via 🔊) |
 | `POST /settings/bitrate` | `{"bitrate": 8000000}` |
 | `POST /settings/fps` | `{"fps": 30}` |
 | `POST /settings/quality` | `{"q": 4}` — MJPEG quality 1–10 |

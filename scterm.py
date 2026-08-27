@@ -699,6 +699,11 @@ class FfmpegSource:
                    f"trunc(ih*{p['scale']}/100/2)*2"]
         ff_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
                   "-flags", "low_delay", "-probesize", "32768",
+                  # input-rate assumption: without it the h264 demuxer
+                  # emits degenerate timestamps and the fps= filter does
+                  # NOTHING (measured 67fps with fps=30!). With -r 60 the
+                  # filter drops correctly and the encoder is capped.
+                  "-r", "60",
                   "-f", "h264", "-i", "pipe:0",
                   "-vf", ",".join(vf)]
         # NOTE: -fflags nobuffer silently BREAKS the h264 demuxer on this
@@ -823,6 +828,8 @@ class CaptureManager:
         self._filler_stop = True
         self._filler_thread = None
         self.last_pub = 0.0
+        self.pub_fps = 0.0
+        self._pub_win = []
         if serial:
             self._start_source()
             self._start_info()
@@ -901,21 +908,26 @@ class CaptureManager:
     # -- stale-frame filler --------------------------------------------------
     # screenrecord on some ROMs only captures frames when the display
     # content CHANGES (damage tracking), so a static screen stalls to
-    # ~1fps. The filler grabs a screencap whenever the stream has been
-    # silent too long: static screens stay fresh, and the instant content
-    # animates the stream takes over again at full rate — no mode flips.
+    # ~1fps. When the stream is silent, the filler grabs screencaps back
+    # to back (continuous, ~3-4fps with PNG capture): static screens stay
+    # fresh, and the instant content animates the stream takes over at
+    # full rate — no mode flips.
     def _filler_loop(self):
         while not self._filler_stop:
-            time.sleep(0.35)
             try:
                 with self.lock:
                     streaming = isinstance(self.source, FfmpegSource)
                     serial = self.serial if streaming else None
-                    stale = time.time() - self.last_pub > 0.6
-                if not stale or not serial:
+                    stale = time.time() - self.last_pub > 0.5
+                if not serial or not streaming:
+                    time.sleep(0.2)
+                    continue
+                if not stale:
+                    time.sleep(0.1)   # stream healthy — just watch
                     continue
                 img = grab_screencap(serial)
                 if img is None:
+                    time.sleep(0.4)
                     continue
                 w, h = pick_stream_size(img.size, self.max_w, self.max_h)
                 if img.size != (w, h):
@@ -924,7 +936,7 @@ class CaptureManager:
                 img.save(buf, format="JPEG", quality=pil_jpeg_quality(self.q))
                 self._publish(buf.getvalue())
             except Exception:
-                pass
+                time.sleep(0.1)
 
     def _start_filler(self):
         self._filler_stop = True
@@ -943,7 +955,15 @@ class CaptureManager:
             self.image = frame
             self.is_jpeg = isinstance(frame, bytes)
             self.seq += 1
-            self.last_pub = time.time()
+            now = time.time()
+            # publish rate = frames published in the last 2s (robust to
+            # bursty sources publishing at the same instant)
+            win = self._pub_win
+            win.append(now)
+            while win and now - win[0] > 2.0:
+                win.pop(0)
+            self.pub_fps = min(60.0, round(len(win) / 2.0, 1))
+            self.last_pub = now
 
     def latest(self):
         with self.lock:
@@ -1023,7 +1043,10 @@ class CaptureManager:
                 src = self.source
                 if not isinstance(src, FfmpegSource):
                     continue
-                got = self.first_pub
+                # last_pub (NOT first_pub!) — first_pub is the first-ever
+                # publish, so this watchdog used to respawn the whole
+                # pipeline ~10s after startup, stuttering every run.
+                got = self.last_pub
                 now = time.time()
             try:
                 spawn_age = now - src.spawned_at
@@ -1762,8 +1785,7 @@ class TUI:
         for i, s in enumerate(rows_strs):
             if i >= len(self.prev_rows) or self.prev_rows[i] != s:
                 changed.append(i)
-        full = (len(self.prev_rows) != len(rows_strs)
-                or len(changed) > len(rows_strs) // 2)
+        full = True  # was incremental — caused horizontal black bands
         if full:
             # start BELOW the chrome top bar (row 1) so a full redraw can't
             # overwrite it; the top bar is drawn separately afterwards
@@ -2122,8 +2144,8 @@ async function toggleAudio(){
   b.classList.toggle('on',audioOn);
   await api('/input/audio',{enabled:audioOn});
   if(audioOn){
-    if(!audioEl){audioEl=document.createElement('audio');audioEl.autoplay=true;audioEl.src='/audio.opus';document.body.appendChild(audioEl);}
-    else audioEl.src='/audio.opus';
+    if(!audioEl){audioEl=document.createElement('audio');audioEl.autoplay=true;audioEl.src='/audio.ogg';document.body.appendChild(audioEl);}
+    else audioEl.src='/audio.ogg';
   } else if(audioEl){audioEl.pause();audioEl.removeAttribute('src');}
 }
 $('fr').addEventListener('change',e=>{targetFps=+e.target.value;api('/settings/fps',{fps:targetFps});});
@@ -2151,6 +2173,7 @@ async function pollStatus(){
     $('res').textContent=(j.size&&j.size[0]+'×'+j.size[1])||'--×--';
     $('bat').textContent=j.battery!=null?j.battery+'%':'-';
     $('abtn').style.display=j.audio_avail?'':'none';
+    $('fps').textContent=(j.pub_fps!=null)?j.pub_fps.toFixed(1):'--';
     if(j.serial){$('noconn').style.display='none';}
     else{$('noconn').style.display='flex';$('liveC').classList.remove('live');}
   }catch(e){}
@@ -2210,10 +2233,7 @@ $('textin').addEventListener('keydown',e=>{
 });
 /* ---- stream ---- */
 img.src='/stream.mjpg';
-let last=performance.now(),n=0,fps=0;
-img.addEventListener('load',()=>{n++;$('liveC').classList.add('live');$('liveT').textContent='live';});
-setInterval(()=>{const now=performance.now();fps=Math.round(n*1000/(now-last));
-  $('fps').textContent=fps;n=0;last=now;},1000);
+img.addEventListener('load',()=>{$('liveC').classList.add('live');$('liveT').textContent='live';});
 /* show settings bar when top bar open on coarse pointers */
 const isCoarse=matchMedia('(pointer:coarse)').matches;
 if(isCoarse)$('settings').style.display='flex';
@@ -2241,6 +2261,7 @@ class WebApp:
         self.jpeg_quality = jpeg_quality
         self.audio_lock = threading.Lock()
         self.audio_proc = None
+        self.audio_ff = None
         self.rot = 0
         self.html = WEB_HTML.encode("utf-8")
         self.httpd = None
@@ -2279,14 +2300,17 @@ class WebApp:
             "source": (src.kind if src else "none"),
             "ffmpeg": HAS_FFMPEG,
             "audio_avail": HAS_SCRCPY,
-            "audio_on": bool(self.audio_proc and
-                            self.audio_proc.poll() is None),
+            "audio_on": bool(self.audio_ff or
+                             (self.audio_proc and
+                              self.audio_proc.poll() is None)),
             "bitrate": (src._snapshot().get("bitrate")
                         if self.m.is_stream() else None),
             "q": (src._snapshot().get("q") if self.m.is_stream() else None),
             "scale": (src._snapshot().get("scale")
                       if self.m.is_stream() else None),
             "web_fps": self.fps_cap,
+            "pub_fps": round(self.m.pub_fps, 1),
+            "seq": self.m.seq,
             "rot": self.rot,
             "devices": list_adb_devices(),
         }
@@ -2298,29 +2322,39 @@ class WebApp:
         with self.audio_lock:
             self._audio_stop_locked()
             try:
+                # --no-window kills the GUI window (android-guy popup);
+                # --no-playback keeps audio out of the PC speakers (the
+                # browser plays the stream instead); --record=/dev/stdout
+                # with record-format=opus emits a LIVE Ogg Opus stream
+                # that browsers play natively. (aac gives a non-streamable
+                # mp4 with moov at the end; opus+ogg is the streamable one.)
                 cmd = ["scrcpy", "-s", self.m.serial, "--no-video",
-                       "--no-playback", "--audio-codec=opus",
-                       "--audio-bit-rate=128000", "--record-format=opus",
-                       "--record", "-"]
+                       "--no-window", "--no-playback",
+                       "--verbosity=error",
+                       "--audio-codec=opus", "--audio-bit-rate=128000",
+                       "--record-format=opus", "--record=/dev/stdout"]
                 self.audio_proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self.audio_ff = None
                 return True
             except Exception:
                 self.audio_proc = None
+                self.audio_ff = None
                 return False
 
     def _audio_stop_locked(self):
-        p = self.audio_proc
-        self.audio_proc = None
-        if p:
-            try:
-                p.terminate()
-                p.wait(timeout=2)
-            except Exception:
+        for attr in ("audio_ff", "audio_proc"):
+            p = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if p:
                 try:
-                    p.kill()
+                    p.terminate()
+                    p.wait(timeout=2)
                 except Exception:
-                    pass
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
 
     def _audio_stop(self):
         with self.audio_lock:
@@ -2368,7 +2402,7 @@ class WebApp:
                     self.end_headers()
                 elif path == "/stream.mjpg":
                     self._stream_mjpg()
-                elif path == "/audio.opus":
+                elif path == "/audio.ogg":
                     self._stream_audio()
                 elif path == "/api/status":
                     app._send_json(self, app._status())
@@ -2430,10 +2464,17 @@ class WebApp:
                 self.send_header("Content-Type", "audio/ogg")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
+                # non-blocking: buffered read() blocks when the device is
+                # silent (scrcpy emits nothing), hanging the client
+                fd = app.audio_proc.stdout.fileno()
                 try:
-                    while (app.audio_proc and
-                           app.audio_proc.poll() is None):
-                        chunk = app.audio_proc.stdout.read(4096)
+                    import os as _os
+                    while app.audio_proc and \
+                            app.audio_proc.poll() is None:
+                        r, _, _ = select.select([fd], [], [], 0.2)
+                        if not r:
+                            continue
+                        chunk = _os.read(fd, 8192)
                         if not chunk:
                             break
                         self.wfile.write(chunk)
