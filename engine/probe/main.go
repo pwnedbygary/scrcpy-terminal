@@ -64,6 +64,22 @@ func msgInjectKeycode(action uint8, keycode int) []byte {
 
 func msgBackOrScreenOn() []byte { return []byte{4} }
 
+func msgSetClipboard(text string) []byte {
+	var m W
+	m.u8(9) // TYPE_SET_CLIPBOARD
+	var lenBytes []byte
+	if len(text) < 0x100 {
+		lenBytes = []byte{byte(len(text))}
+	} else {
+		lenBytes = []byte{byte(len(text) >> 8), byte(len(text))}
+	}
+	m.u8(uint8(len(lenBytes)))
+	m.raw(lenBytes)
+	m.str(text)
+	m.u8(0) // paste=false
+	return m.b.Bytes()
+}
+
 var gamepadDesc = []byte{
 	0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0xa1, 0x00, 0x05, 0x01, 0x09, 0x30,
 	0x09, 0x31, 0x09, 0x33, 0x09, 0x34, 0x15, 0x00, 0xff, 0x27, 0xff, 0xff,
@@ -297,29 +313,35 @@ func main() {
 	} else {
 		defer aud.Close()
 		fmt.Println(".. audio socket connected")
-		go func() { // drain audio
-			b := make([]byte, 256)
-			for {
-				if _, err := aud.Read(b); err != nil {
-					return
-				}
-			}
-		}()
+		// NOTE: no drain — audio reply probe below reads it directly
 	}
-	// bisect: which conn is CONTROL? GET_CLIPBOARD elicits a reply/error
+	// bisect: which conn is CONTROL? SET_CLIPBOARD is unconditional and
+	// device-visible — write to a conn, then read the clipboard back.
+	focus := func() string {
+		out, _ := adb(*serial, "shell",
+			"dumpsys window | grep -E 'mCurrentFocus' | head -1")
+		return strings.TrimSpace(string(out))
+	}
 	probe := func(name string, c net.Conn) {
+		before := focus()
 		c.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		c.Write([]byte{8})
+		c.Write([]byte{5}) // EXPAND_NOTIFICATION_PANEL
 		c.SetWriteDeadline(time.Time{})
-		c.SetReadDeadline(time.Now().Add(2 * time.Second))
-		rb := make([]byte, 32)
-		n, err := c.Read(rb)
-		if n > 0 {
-			fmt.Printf(".. [%s] REPLIED: % x\n", name, rb[:n])
-		} else if err != nil {
-			fmt.Printf(".. [%s] no reply: %v\n", name, err)
+		time.Sleep(900 * time.Millisecond)
+		after := focus()
+		isShade := strings.Contains(strings.ToLower(after), "notification")
+		if isShade {
+			fmt.Printf(".. [%s] IS CONTROL: shade opened -> %q\n", name, after)
+		} else {
+			fmt.Printf(".. [%s] no shade (was %q, now %q)\n", name, before, after)
 		}
-		c.SetReadDeadline(time.Time{})
+		// collapse for the next probe
+		c.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		c.Write([]byte{7}) // COLLAPSE_PANELS
+		c.SetWriteDeadline(time.Time{})
+		time.Sleep(700 * time.Millisecond)
+		// verify collapsed before the next probe
+		time.Sleep(500 * time.Millisecond)
 	}
 	time.Sleep(200 * time.Millisecond)
 	probe("conn2", aud)
@@ -334,16 +356,49 @@ func main() {
 	probe("conn3", ctrl)
 	fmt.Println(".. conn2+conn3 connected & probed")
 
-	// drain device messages from control (non-blocking)
-	go func() {
-		buf := make([]byte, 256)
-		for {
-			if _, err := ctrl.Read(buf); err != nil {
-				return
-			}
-			fmt.Printf("   device msg: % x\n", buf[:4])
+	// (no proactive drain here — probes below read ctrl directly)
+
+	// now conn3 is confirmed CONTROL — step through messages ONE at a
+	// time to find which one breaks the stream alignment
+	fmt.Println(".. [control confirmed] message-by-message test")
+	focusHas := func(sub string) bool {
+		out, _ := adb(*serial, "shell",
+			"dumpsys window | grep -E 'mCurrentFocus' | head -1")
+		return strings.Contains(strings.ToLower(string(out)), sub)
+	}
+	step := func(name string, msg []byte, verify string, eat int) {
+		fmt.Printf("   -> sending %s (%d bytes)\n", name, len(msg))
+		ctrl.Write(msg)
+		time.Sleep(time.Duration(eat) * time.Millisecond)
+		if verify == "shade" && focusHas("notification") {
+			fmt.Printf("      OK: shade/notification focus\n")
 		}
-	}()
+		if verify == "launcher" && focusHas("launcher") {
+			fmt.Printf("      OK: launcher focus (HOME worked)\n")
+		}
+	}
+	step("EXPAND_PANEL", []byte{5}, "shade", 900)
+	step("COLLAPSE", []byte{7}, "", 600)
+	// POWER off/on twice — guaranteed screen animation for the encoder
+	for i := 0; i < 2; i++ {
+		ctrl.Write(msgInjectKeycode(0, 26))
+		time.Sleep(60 * time.Millisecond)
+		ctrl.Write(msgInjectKeycode(1, 26))
+		time.Sleep(700 * time.Millisecond)
+		awake, _ := adb(*serial, "shell",
+			"dumpsys power | grep mWakefulness | head -1")
+		fmt.Printf("   power cycle %d -> %s", i+1, string(awake))
+		time.Sleep(700 * time.Millisecond) // screen-off -> screen-on animation
+	}
+	// UHID create ALONE (fresh session, right after the bisect) to prove
+	// the format — if the stream stays aligned, the gamepad registers
+	uhidMsg := msgUhidCreate(0x2000, 0x054c, 0x09cc, "scterm gamepad", gamepadDesc)
+	fmt.Printf(".. UHID_CREATE msg: %d bytes\n", len(uhidMsg))
+	ctrl.Write(uhidMsg)
+	time.Sleep(1000 * time.Millisecond)
+	outd, _ := adb(*serial, "shell",
+		"dumpsys input | grep -i -A2 -E 'scterm|uhid' | head -8")
+	fmt.Printf(".. uhid while held:\n%s\n", strings.TrimSpace(string(outd)))
 
 	// 5a) control ECHO test: GET_CLIPBOARD — the server replies with a
 	// DeviceMessage (CLIPBOARD) on the same socket if the channel works
