@@ -386,7 +386,7 @@ type Capture struct {
 	ff   *exec.Cmd
 	stop chan struct{}
 
-	// mjpeg latest-frame cache
+	// mjpeg latest-frame cache (TUI-sized pipe:1)
 	mu         sync.Mutex
 	latest     []byte
 	seq        uint64
@@ -395,6 +395,14 @@ type Capture struct {
 	firstPub   time.Time
 	pubFPS     float64
 	pubWin     []time.Time
+
+	// web-sized mjpeg cache (pipe:5, 960x540)
+	webMu  sync.Mutex
+	webJpg []byte
+	webSeq uint64
+	webPub time.Time
+	webWin []time.Time
+	tuiWin []time.Time
 
 	// fmp4/ogg fan-out
 	fmp4     *StreamSlot
@@ -505,12 +513,19 @@ func (c *Capture) spawnPipeline() {
 			"-f", "h264", "-i", "pipe:0"}
 	}
 	ffArgs = append(ffArgs,
+		// pipe:1 — TUI-sized mjpeg, fit applied (tiny, instant decodes)
 		"-map", "0:v", "-vf", c.mjpegVf(),
 		"-c:v", "mjpeg", "-strict", "unofficial", "-q:v", fmt.Sprint(c.jpegQ),
 		"-f", "image2pipe", "pipe:1",
+		// pipe:3 — fMP4 for MSE (copy)
 		"-map", "0:v", "-c:v", "copy",
 		"-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:3",
-		"-map", "0:a?", "-c:a", "copy", "-f", "ogg", "pipe:4")
+		// pipe:4 — Ogg Opus audio (copy)
+		"-map", "0:a?", "-c:a", "copy", "-f", "ogg", "pipe:4",
+		// pipe:5 — full-size mjpeg for the web viewer
+		"-map", "0:v", "-vf", "scale=960:540",
+		"-c:v", "mjpeg", "-strict", "unofficial", "-q:v", fmt.Sprint(c.jpegQ),
+		"-f", "image2pipe", "pipe:5")
 
 	mjR, mjW, err := os.Pipe()
 	if err != nil {
@@ -527,11 +542,16 @@ func (c *Capture) spawnPipeline() {
 		logf("pipe: %v", err)
 		return
 	}
+	webR, webW, err := os.Pipe()
+	if err != nil {
+		logf("pipe: %v", err)
+		return
+	}
 
 	cmd := exec.Command("ffmpeg", ffArgs...)
 	cmd.Stdout = mjW
 	cmd.Stderr = os.Stderr
-	cmd.ExtraFiles = []*os.File{f4W, ogW}
+	cmd.ExtraFiles = []*os.File{f4W, ogW, webW}
 	if scr == nil {
 		// wire adb screenrecord stdout as ffmpeg stdin
 		r, w, err := os.Pipe()
@@ -559,12 +579,14 @@ func (c *Capture) spawnPipeline() {
 	mjW.Close()
 	f4W.Close()
 	ogW.Close()
+	webW.Close()
 	c.ff = cmd
 
-	c.pipesWg.Add(3)
+	c.pipesWg.Add(4)
 	go c.readMJPEG(mjR)
 	go c.readCopy(f4R, "fmp4")
 	go c.readCopy(ogR, "ogg")
+	go c.readWebJpeg(webR)
 }
 
 // readMJPEG splits the image2pipe JPEG stream into frames.
@@ -646,11 +668,77 @@ func (c *Capture) publishLocked(frame []byte, srcName string) {
 		}
 		c.pubFPS = f
 	}
+	c.tuiWin = append(c.tuiWin, now)
+	cut3 := now.Add(-2 * time.Second)
+	for len(c.tuiWin) > 0 && c.tuiWin[0].Before(cut3) {
+		c.tuiWin = c.tuiWin[1:]
+	}
 	c.lastPub = now
 	if srcName == "pipe" {
 		c.streamLast = now
 	}
 	c.mu.Unlock()
+}
+
+// readWebJpeg splits web-sized jpegs (960x540) into their own cache so
+// the browser always sees a full-size frame, independent of the TUI size.
+func (c *Capture) readWebJpeg(r *os.File) {
+	defer c.pipesWg.Done()
+	defer r.Close()
+	buf := make([]byte, 0, 1<<20)
+	tmp := make([]byte, 65536)
+	soi := []byte{0xff, 0xd8}
+	eoi := []byte{0xff, 0xd9}
+	for {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
+		if err != nil {
+			return
+		}
+		for {
+			s := indexOf(buf, soi)
+			if s < 0 {
+				break
+			}
+			e := indexOf(buf[s+2:], eoi)
+			if e < 0 {
+				break
+			}
+			e += s + 4
+			frame := append([]byte(nil), buf[s:e]...)
+			buf = buf[e:]
+			now := time.Now()
+			c.webMu.Lock()
+			c.webJpg = frame
+			c.webSeq++
+			c.webPub = now
+			c.webWin = append(c.webWin, now)
+			cut2 := now.Add(-2 * time.Second)
+			for len(c.webWin) > 0 && c.webWin[0].Before(cut2) {
+				c.webWin = c.webWin[1:]
+			}
+			c.webMu.Unlock()
+		}
+		if len(buf) > 2<<20 {
+			if i := indexOf(buf, soi); i >= 0 {
+				buf = append([]byte(nil), buf[i:]...)
+			} else {
+				buf = buf[:0]
+			}
+		}
+	}
+}
+
+// WebLatest returns the most recent web-sized jpeg.
+func (c *Capture) WebLatest() ([]byte, uint64, bool) {
+	c.webMu.Lock()
+	defer c.webMu.Unlock()
+	if c.webJpg == nil {
+		return nil, 0, false
+	}
+	return c.webJpg, c.webSeq, true
 }
 
 // readCopy drains a copy pipe (fmp4/ogg) into its slot. The header bytes
@@ -725,11 +813,23 @@ func indexOf(h, n []byte) int {
 	return -1
 }
 
-// mjpegVf builds the pipe:1 output filter. The stream is a fixed
-// 960x540 canvas; the TUI applies fit (contain/cover/fill) internally so
-// resizes and fit changes never need to restart ffmpeg/scrcpy.
+// mjpegVf fits + scales the pipe:1 output to the TUI canvas exactly
+// (contain pads, cover crops, fill stretches), so the TUI decodes a tiny
+// image and renders it directly — no per-frame fit work, tiny writes.
 func (c *Capture) mjpegVf() string {
-	return "scale=960:540"
+	w, h := c.termW, c.termH
+	if w <= 0 || h <= 0 {
+		w, h = 100, 60
+	}
+	w, h = even(w), even(h)
+	res := fmt.Sprintf("scale=%d:%d", w, h)
+	switch c.fitMode {
+	case "contain":
+		return res + fmt.Sprintf(":force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=#080808", w, h)
+	case "cover":
+		return res + fmt.Sprintf(":force_original_aspect_ratio=increase,crop=%d:%d", w, h)
+	}
+	return res
 }
 
 func even(n int) int {
@@ -739,19 +839,23 @@ func even(n int) int {
 	return n &^ 1
 }
 
-// SetFit records the fit mode. The TUI applies it in-process each frame.
+// SetFit applies a new fit mode (respawns ffmpeg geometry; rare).
 func (c *Capture) SetFit(mode string) {
 	if mode == c.fitMode {
 		return
 	}
 	c.fitMode = mode
+	c.spawnPipeline()
 }
 
-// ResizeTerm records the TUI canvas size (used by the filler target).
-// It does NOT restart anything: the mjpeg pipe is fixed at 960x540 and
-// the TUI fits it in-process.
+// ResizeTerm updates the TUI canvas size and respawns the pipeline so
+// ffmpeg fits the pipe:1 output to the new geometry (regex: rare event).
 func (c *Capture) ResizeTerm(w, h int) {
+	if w == c.termW && h == c.termH {
+		return
+	}
 	c.termW, c.termH = w, h
+	c.spawnPipeline()
 }
 
 // RespawnFFMpeg kills and respawns ffmpeg (keeps scrcpy/fifo running).
@@ -1090,8 +1194,13 @@ func ycbcrAt(ys []uint8, yStride int, cb, cr []uint8, cStride int, x, y int, min
 }
 
 func escKey(top, bot [3]uint8) string {
+	// quantize to 4 bits/channel: drops JPEG noise so adjacent cells
+	// merge into long RLE runs. Full-redraw frames drop from ~80KB to
+	// ~5-10KB — without this the always-full-redraw TUI writes 2.4MB/s
+	// and backpressures on the pty, falling seconds behind.
 	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm",
-		top[0], top[1], top[2], bot[0], bot[1], bot[2])
+		top[0]&0xE0, top[1]&0xE0, top[2]&0xE0,
+		bot[0]&0xE0, bot[1]&0xE0, bot[2]&0xE0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1166,6 +1275,7 @@ type TUI struct {
 
 	exitNow    func()
 	lastFrameT time.Time
+	frameCount int
 
 	started  time.Time
 	frames   int
@@ -1209,16 +1319,32 @@ func (t *TUI) draw(rows []string, ms float64, capMode string) {
 	var out strings.Builder
 	out.Grow(1 << 20)
 
-	// ALWAYS full redraw — the incremental changed-rows path caused
-	// horizontal bands/corruption (python fix: incremental redraw was
-	// abandoned for exactly this). Erase each line first so any stray
-	// bytes are wiped before we paint over them.
-	fmt.Fprintf(&out, "\x1b[%d;1H", 1+topRows)
-	for _, s := range rows {
-		out.WriteString("\x1b[2K")
-		out.WriteString(s)
-		out.WriteString("\r\n")
+	// HYBRID redraw: only changed rows (a full redraw per frame is
+	// ~50KB and stalls the pty ~1s during motion), with a periodic
+	// full repaint to scrub any stray leaked bytes.
+	t.frameCount++
+	changed := []int{}
+	for i, s := range rows {
+		if i >= len(t.prevRows) || t.prevRows[i] != s {
+			changed = append(changed, i)
+		}
 	}
+	full := len(t.prevRows) != len(rows) ||
+		len(changed) > len(rows)/2 ||
+		t.frameCount%24 == 0
+	if full {
+		fmt.Fprintf(&out, "\x1b[%d;1H", 1+topRows)
+		for _, s := range rows {
+			out.WriteString("\x1b[2K")
+			out.WriteString(s)
+			out.WriteString("\r\n")
+		}
+	} else {
+		for _, i := range changed {
+			fmt.Fprintf(&out, "\x1b[%d;1H\x1b[2K%s", i+1+topRows, rows[i])
+		}
+	}
+	t.prevRows = append([]string(nil), rows...)
 
 	if t.chrome {
 		top := t.topBar(cols, canvasRows, ms, capMode)
@@ -1840,9 +1966,9 @@ func (t *TUI) Run() {
 			img2, err := jpeg.Decode(bytes.NewReader(img))
 			if err == nil {
 				t0 := time.Now()
-				fitted := fitImage(img2, t.cols, t.rows*2, t.fit)
-				rows := t.renderer.Render(fitted, t.cols, t.rows)
+				rows := t.renderer.Render(img2, t.cols, t.rows)
 				ms := float64(time.Since(t0).Microseconds()) / 1000.0
+
 				// fps EMA
 				dt := time.Since(t.lastFrameT).Seconds()
 				t.lastFrameT = time.Now()
@@ -1941,6 +2067,7 @@ func (w *WebApp) apiStatus(res http.ResponseWriter, req *http.Request) {
 		"model": model, "size": []int{dw, dh},
 		"battery": bat, "source": w.cap.engine,
 		"codec": w.cap.codec, "fps": int(fps + 0.5),
+		"tui_fps": float64(len(w.cap.tuiWin)) / 2.0,
 		"web_fps": w.fpsCap, "fit": w.cap.fitMode,
 	})
 }
@@ -2126,7 +2253,7 @@ func (w *WebApp) streamMjpg(res http.ResponseWriter, req *http.Request) {
 	lastSent := time.Now()
 	fpsMu := &w.fpsCapMu
 	for {
-		img, seq, ok := w.cap.Latest()
+		img, seq, ok := w.cap.WebLatest()
 		if !ok {
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -2505,7 +2632,7 @@ func main() {
 		}
 	}
 	if fps == 0 {
-		fps = 30
+		fps = 18
 	}
 	if maxSize == 0 {
 		maxSize = 1280
