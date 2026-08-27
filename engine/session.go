@@ -28,14 +28,16 @@ type Session struct {
 
 	Video *VideoStream
 	Ctrl  *Control
+	Audio *AudioStream
 
 	cmd *exec.Cmd
 }
 
 // Options mirror the subset of server options we need.
 type Options struct {
-	Audio   bool
-	MaxSize int // 0 = native
+	Audio        bool
+	MaxSize      int    // 0 = native
+	CodecOptions string // e.g. "i-frame-interval=2" (comma-separated)
 }
 
 // Open creates a session: push server, forward, launch, connect video +
@@ -80,6 +82,12 @@ func openOnce(serial string, opts Options) (*Session, error) {
 	if !opts.Audio {
 		args += " audio=false"
 	}
+	if opts.CodecOptions != "" {
+		args += " video_codec_options=" + opts.CodecOptions
+	}
+	if opts.MaxSize > 0 {
+		args += fmt.Sprintf(" max_size=%d", opts.MaxSize)
+	}
 	cmd := exec.Command("adb", "-s", serial, "shell", args)
 	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	cmd.Stdout = devNull
@@ -97,16 +105,33 @@ func openOnce(serial string, opts Options) (*Session, error) {
 		return nil, fmt.Errorf("video connect: %w", err)
 	}
 
-	// control socket (2nd accept with audio=false)
+	// audio socket (2nd accept) then control (3rd accept) when audio on;
+	// with audio off: control is the 2nd accept
+	var aud net.Conn
+	if opts.Audio {
+		aud, err = dialRaw(addr, 8*time.Second)
+		if err != nil {
+			video.Close()
+			cmd.Process.Kill()
+			return nil, fmt.Errorf("audio connect: %w", err)
+		}
+	}
 	ctrl, err := dialRaw(addr, 8*time.Second)
 	if err != nil {
 		video.Close()
+		if aud != nil {
+			aud.Close()
+		}
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("control connect: %w", err)
 	}
 
 	vs := &VideoStream{conn: video}
 	cs := &Control{conn: ctrl}
+	var as *AudioStream
+	if aud != nil {
+		as = &AudioStream{conn: aud}
+	}
 
 	// handshake
 	if err := vs.readHandshake(); err != nil {
@@ -115,9 +140,18 @@ func openOnce(serial string, opts Options) (*Session, error) {
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("handshake: %w", err)
 	}
+	if as != nil {
+		if err := as.readHeader(); err != nil {
+			video.Close()
+			ctrl.Close()
+			aud.Close()
+			cmd.Process.Kill()
+			return nil, fmt.Errorf("audio header: %w", err)
+		}
+	}
 
 	s := &Session{Serial: serial, SCID: sid, Port: port,
-		Video: vs, Ctrl: cs, cmd: cmd}
+		Video: vs, Ctrl: cs, Audio: as, cmd: cmd}
 
 	// role-verify control: EXPAND must open the shade
 	if !s.Ctrl.verifyControl(serial) {
@@ -131,6 +165,9 @@ func openOnce(serial string, opts Options) (*Session, error) {
 func (s *Session) Close() {
 	if s.Video != nil {
 		s.Video.conn.Close()
+	}
+	if s.Audio != nil {
+		s.Audio.conn.Close()
 	}
 	if s.Ctrl != nil {
 		s.Ctrl.conn.Close()
@@ -444,3 +481,41 @@ func (c *Control) verifyControl(serial string) bool {
 }
 
 var _ = io.Copy
+
+// ---- audio ----
+
+// AudioStream reads the raw Opus packet stream (same framing as video,
+// codec id first: 'opus' 0x6f707573).
+type AudioStream struct {
+	conn net.Conn
+	Codec string
+}
+
+func (a *AudioStream) readHeader() error {
+	codec := make([]byte, 4)
+	if err := readFullN(a.conn, codec); err != nil {
+		return err
+	}
+	a.Codec = fmt.Sprintf("%c%c%c%c", codec[0], codec[1], codec[2], codec[3])
+	if a.Codec != "opus" {
+		return fmt.Errorf("unexpected audio codec %q", a.Codec)
+	}
+	return nil
+}
+
+// Next reads the next audio packet (blocking).
+func (a *AudioStream) Next() ([]byte, error) {
+	hdr := make([]byte, 12)
+	if err := readFullN(a.conn, hdr); err != nil {
+		return nil, err
+	}
+	ln := binary.BigEndian.Uint32(hdr[8:])
+	if ln == 0 || ln > 1<<20 {
+		return nil, fmt.Errorf("bad audio len %d", ln)
+	}
+	data := make([]byte, ln)
+	if err := readFullN(a.conn, data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}

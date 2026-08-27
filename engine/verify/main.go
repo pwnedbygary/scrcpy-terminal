@@ -20,7 +20,7 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("== engine.verify ==")
-	s, err := engine.Open(*serial, engine.Options{Audio: false})
+	s, err := engine.Open(*serial, engine.Options{Audio: true, CodecOptions: "i-frame-interval=2"})
 	if err != nil {
 		fmt.Println("open failed:", err)
 		os.Exit(1)

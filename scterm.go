@@ -37,6 +37,8 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
+
+	"scterm/engine"
 )
 
 const VERSION = "3.0.0-go"
@@ -183,6 +185,53 @@ func (a *AdbInput) Text(s string) {
 	}
 	a.send("input text '" + strings.ReplaceAll(s, "'", "'\\''") + "'")
 }
+
+// Input abstracts the device-input sink (adb shell or engine control).
+type Input interface {
+	Tap(x, y int)
+	Swipe(x1, y1, x2, y2, ms int)
+	TouchDown(x, y int)
+	TouchMove(x, y int)
+	TouchUp(x, y int)
+	Key(code int)
+	Text(s string)
+	Close()
+}
+
+// ProtoInput sends input over the engine's control socket (scrcpy wire
+// protocol) instead of adb shell commands.
+type ProtoInput struct {
+	serial string
+	ctrl   *engine.Control
+	w, h   int // current device size for scroll/position math
+}
+
+func (p *ProtoInput) SetSize(w, h int) { p.w, p.h = w, h }
+
+func (p *ProtoInput) Tap(x, y int)          { p.ctrl.Tap(x, y, max(p.w, 1), max(p.h, 1)) }
+func (p *ProtoInput) TouchDown(x, y int)    { p.ctrl.Touch(0, x, y, max(p.w, 1), max(p.h, 1)) }
+func (p *ProtoInput) TouchMove(x, y int)    { p.ctrl.Touch(2, x, y, max(p.w, 1), max(p.h, 1)) }
+func (p *ProtoInput) TouchUp(x, y int)      { p.ctrl.Touch(1, x, y, max(p.w, 1), max(p.h, 1)) }
+func (p *ProtoInput) Swipe(x1, y1, x2, y2, ms int) {
+	p.ctrl.Touch(0, x1, y1, max(p.w, 1), max(p.h, 1))
+	steps := 8
+	for i := 1; i <= steps; i++ {
+		time.Sleep(time.Duration(ms/steps) * time.Millisecond)
+		p.ctrl.Touch(2, x1+(x2-x1)*i/steps, y1+(y2-y1)*i/steps, max(p.w, 1), max(p.h, 1))
+	}
+	p.ctrl.Touch(1, x2, y2, max(p.w, 1), max(p.h, 1))
+}
+func (p *ProtoInput) Key(code int) {
+	p.ctrl.Key(0, code)
+	time.Sleep(30 * time.Millisecond)
+	p.ctrl.Key(1, code)
+}
+func (p *ProtoInput) Text(s string) {
+	// best-effort: ASCII via key codes would need a mapping; send the
+	// clipboard route instead (set + paste) — engine control supports it
+	p.ctrl.SetClipboard(s)
+}
+func (p *ProtoInput) Close() {}
 
 func (a *AdbInput) Close() {
 	a.mu.Lock()
@@ -374,7 +423,10 @@ func (s *StreamSlot) Publish(b []byte) {
 
 type Capture struct {
 	serial  string
-	engine  string // "scrcpy" | "screenrecord"
+	engine  string      // "scrcpy" | "screenrecord" | "engine"
+	useEngine bool     // use the native protocol engine
+	ses     *engine.Session
+	protoIn *ProtoInput
 	maxSize int
 	bitrate int
 	jpegQ   int
@@ -459,8 +511,28 @@ func (c *Capture) spawnPipeline() {
 
 	var ffArgs []string
 	var scr *exec.Cmd
+	var ses *engine.Session
 
-	if hasScrcpy() {
+	if c.useEngine {
+		// NATIVE ENGINE: raw protocol session (no scrcpy, no mkv)
+		var err error
+		ses, err = engine.Open(c.serial, engine.Options{
+			Audio:        true,
+			CodecOptions: "i-frame-interval=2",
+		})
+		if err != nil {
+			logf("engine open failed: %v", err)
+			return
+		}
+		c.ses = ses
+		c.engine = "engine"
+		if c.protoIn != nil {
+			c.protoIn.ctrl = ses.Ctrl
+		}
+		ffArgs = []string{"-hide_banner", "-loglevel", "error",
+			"-flags", "low_delay", "-probesize", "32768", "-analyzeduration", "0",
+			"-f", "h264", "-i", "pipe:0"}
+	} else if hasScrcpy() {
 		fifo := fmt.Sprintf("/tmp/scterm_go_%d.mkv", os.Getpid())
 		os.Remove(fifo)
 		if err := syscall.Mkfifo(fifo, 0o600); err != nil {
@@ -508,17 +580,19 @@ func (c *Capture) spawnPipeline() {
 	}
 	c.scr = scr
 
-	if scr != nil {
-		c.engine = "scrcpy"
-		ffArgs = []string{"-hide_banner", "-loglevel", "error",
-			"-fflags", "nobuffer", "-flags", "low_delay", "-probesize", "32768",
-			"-analyzeduration", "0", "-f", "matroska", "-i", c.fifo}
-	} else {
-		// fallback: adb screenrecord -> h264 pipe (no audio)
-		c.engine = "screenrecord"
-		ffArgs = []string{"-hide_banner", "-loglevel", "error",
-			"-flags", "low_delay", "-probesize", "32768", "-r", "60",
-			"-f", "h264", "-i", "pipe:0"}
+	if !c.useEngine {
+		if scr != nil {
+			c.engine = "scrcpy"
+			ffArgs = []string{"-hide_banner", "-loglevel", "error",
+				"-fflags", "nobuffer", "-flags", "low_delay", "-probesize", "32768",
+				"-analyzeduration", "0", "-f", "matroska", "-i", c.fifo}
+		} else {
+			// fallback: adb screenrecord -> h264 pipe (no audio)
+			c.engine = "screenrecord"
+			ffArgs = []string{"-hide_banner", "-loglevel", "error",
+				"-flags", "low_delay", "-probesize", "32768", "-r", "60",
+				"-f", "h264", "-i", "pipe:0"}
+		}
 	}
 	ffArgs = append(ffArgs,
 		// pipe:1 — TUI-sized mjpeg, fit applied (tiny, instant decodes)
@@ -528,12 +602,18 @@ func (c *Capture) spawnPipeline() {
 		// pipe:3 — fMP4 for MSE (copy)
 		"-map", "0:v", "-c:v", "copy",
 		"-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:3",
-		// pipe:4 — Ogg Opus audio (copy)
-		"-map", "0:a?", "-c:a", "copy", "-f", "ogg", "pipe:4",
 		// pipe:5 — full-size mjpeg for the web viewer
 		"-map", "0:v", "-vf", "scale=960:540",
 		"-c:v", "mjpeg", "-strict", "unofficial", "-q:v", fmt.Sprint(c.jpegQ),
 		"-f", "image2pipe", "pipe:5")
+	if c.useEngine {
+		// engine mode: no ogg output from ffmpeg — the engine's opus
+		// packets are muxed to Ogg by us (zero ffmpeg in the audio path)
+	} else {
+		ffArgs = append(ffArgs,
+			// pipe:4 — Ogg Opus audio (copy)
+			"-map", "0:a?", "-c:a", "copy", "-f", "ogg", "pipe:4")
+	}
 
 	mjR, mjW, err := os.Pipe()
 	if err != nil {
@@ -562,7 +642,16 @@ func (c *Capture) spawnPipeline() {
 	// landing inside the TUI render and corrupting the display
 	cmd.Stderr = nil
 	cmd.ExtraFiles = []*os.File{f4W, ogW, webW}
-	if scr == nil {
+	var engStdin io.WriteCloser
+	if c.useEngine {
+		es, err := cmd.StdinPipe() // must happen BEFORE Start
+		if err != nil {
+			logf("ffmpeg stdin: %v", err)
+			return
+		}
+		engStdin = es
+	}
+	if scr == nil && !c.useEngine {
 		// wire adb screenrecord stdout as ffmpeg stdin
 		r, w, err := os.Pipe()
 		if err != nil {
@@ -596,9 +685,54 @@ func (c *Capture) spawnPipeline() {
 	}(cmd)
 	mjW.Close()
 	f4W.Close()
-	ogW.Close()
+	if ses == nil {
+		ogW.Close()
+	}
 	webW.Close()
 	c.ff = cmd
+
+	if ses != nil {
+		// engine mode: feed raw H264 to ffmpeg; mux opus->Ogg ourselves
+		stdin := engStdin
+		go func() {
+			for {
+				pkt, err := ses.Video.Next()
+				if err != nil {
+					c.engMu.Lock()
+					if !c.stopping {
+						c.engineDead = true
+					}
+					c.engMu.Unlock()
+					stdin.Close()
+					return
+				}
+				if _, err := stdin.Write(pkt.Data); err != nil {
+					return
+				}
+			}
+		}()
+		if ses.Audio != nil {
+			go func() {
+				mux := engine.NewOggMuxer(ogW, 2)
+				if err := mux.WriteHeaders(); err != nil {
+					return
+				}
+				for {
+					pkt, err := ses.Audio.Next()
+					if err != nil {
+						ogW.Close()
+						return
+					}
+					if err := mux.WritePacket(pkt); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}
+	if c.protoIn != nil {
+		c.protoIn.SetSize(ses.Video.Width, ses.Video.Height)
+	}
 
 	c.pipesWg.Add(4)
 	go c.readMJPEG(mjR)
@@ -1081,6 +1215,10 @@ func (c *Capture) teardown() {
 		}
 	}
 	c.ff, c.scr = nil, nil
+	if c.ses != nil {
+		c.ses.Close()
+		c.ses = nil
+	}
 	if c.fifo != "" {
 		os.Remove(c.fifo)
 		c.fifo = ""
@@ -1282,7 +1420,7 @@ func restoreTerm(fd int) {
 
 type TUI struct {
 	cap      *Capture
-	inp      *AdbInput
+	inp      Input
 	fit      string
 	chrome   bool
 	grab     bool
@@ -1328,7 +1466,7 @@ type TUI struct {
 	devW, devH int
 }
 
-func NewTUI(c *Capture, inp *AdbInput, fit string, chrome bool) *TUI {
+func NewTUI(c *Capture, inp Input, fit string, chrome bool) *TUI {
 	t := &TUI{
 		cap: c, inp: inp, fit: fit, chrome: chrome,
 		inZellij: os.Getenv("ZELLIJ") != "",
@@ -2057,14 +2195,14 @@ func (t *TUI) exit() {
 
 type WebApp struct {
 	cap      *Capture
-	inp      *AdbInput
+	inp      Input
 	fpsCap   int
 	quality  int
 	scale    int
 	fpsCapMu sync.Mutex
 }
 
-func NewWebApp(c *Capture, inp *AdbInput) *WebApp {
+func NewWebApp(c *Capture, inp Input) *WebApp {
 	return &WebApp{cap: c, inp: inp, fpsCap: 30, quality: 4, scale: 100}
 }
 
@@ -2626,6 +2764,7 @@ func main() {
 		jpegQ   int
 		wake    bool
 		stay    bool
+		useEngine bool
 	)
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -2638,6 +2777,8 @@ func main() {
 			return ""
 		}
 		switch {
+		case a == "--engine":
+			useEngine = true
 		case a == "--tui":
 			tui = true
 		case a == "--web":
@@ -2735,7 +2876,15 @@ func main() {
 	cap := NewCapture(serial, maxSize, bitrate, jpegQ)
 	cap.fpsCap = fps
 	cap.fitMode = fit
-	inp := NewAdbInput(serial)
+	cap.useEngine = useEngine
+	var inp Input
+	if useEngine {
+		pi := &ProtoInput{serial: serial, ctrl: nil}
+		cap.protoIn = pi
+		inp = pi
+	} else {
+		inp = NewAdbInput(serial)
+	}
 
 	if wake {
 		wakeUnlock(serial, stay)
