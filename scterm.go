@@ -133,9 +133,15 @@ func NewAdbInput(serial string) *AdbInput { return &AdbInput{serial: serial} }
 func (a *AdbInput) ensure() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.in != nil {
+	if a.in != nil && a.cmd != nil && a.cmd.ProcessState == nil {
 		return true
 	}
+	// stale pipe from a dead adb shell — reconnect
+	if a.cmd != nil && a.cmd.Process != nil {
+		a.cmd.Process.Kill()
+		a.cmd.Wait()
+	}
+	a.in = nil
 	cmd := exec.Command("adb", adbArgs(a.serial, "shell")...)
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -381,13 +387,14 @@ type Capture struct {
 	stop chan struct{}
 
 	// mjpeg latest-frame cache
-	mu       sync.Mutex
-	latest   []byte
-	seq      uint64
-	lastPub  time.Time
-	firstPub time.Time
-	pubFPS   float64
-	pubWin   []time.Time
+	mu         sync.Mutex
+	latest     []byte
+	seq        uint64
+	lastPub    time.Time
+	streamLast time.Time // last STREAM (readMJPEG) publish, not filler
+	firstPub   time.Time
+	pubFPS     float64
+	pubWin     []time.Time
 
 	// fmp4/ogg fan-out
 	fmp4     *StreamSlot
@@ -450,7 +457,7 @@ func (c *Capture) spawnPipeline() {
 		}
 		c.fifo = fifo
 
-		args := []string{"-n", "-N"}
+		args := []string{"-n", "-N", "--no-window"}
 		args = append(args, fmt.Sprintf("--max-size=%d", c.maxSize))
 		args = append(args, "--record="+fifo, "--record-format=mkv", "--verbosity=error")
 		if c.serial != "" {
@@ -461,15 +468,26 @@ func (c *Capture) spawnPipeline() {
 		}
 		args = append(args, "--max-fps=30")
 		args = append(args, "--video-codec-options=i-frame-interval=2")
+		// clear stale device-side servers from killed clients (they block
+		// new scrcpy starts: 'server already running')
+		exec.Command("adb", adbArgs(c.serial, "shell", "pkill -f scrcpy-server")...).Run()
+		time.Sleep(200 * time.Millisecond)
 		cmd := exec.Command("scrcpy", args...)
 		cmd.Env = os.Environ()
 		if headless() {
 			cmd.Env = append(cmd.Env, "SDL_VIDEODRIVER=dummy", "XDG_RUNTIME_DIR="+os.TempDir())
 		}
+		// fully silent: no window, no console noise
+		cmd.Stdout = nil
+		cmd.Stderr = nil
 		if err := cmd.Start(); err != nil {
 			logf("scrcpy failed: %v", err)
 		} else {
 			scr = cmd
+			go func(cmd *exec.Cmd) {
+				werr := cmd.Wait()
+				logf("scrcpy exited: %v", werr)
+			}(cmd)
 		}
 	}
 	c.scr = scr
@@ -561,8 +579,12 @@ func (c *Capture) readMJPEG(r *os.File) {
 		n, err := r.Read(tmp)
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
+			if os.Getenv("SCTERM_DEBUG") != "" && c.seq%20 == 0 {
+				dbg("mjpeg reader: +%dB (seq=%d)", n, c.seq)
+			}
 		}
 		if err != nil {
+			dbg("mjpeg reader EOF: %v", err)
 			return
 		}
 		for {
@@ -625,6 +647,9 @@ func (c *Capture) publishLocked(frame []byte, srcName string) {
 		c.pubFPS = f
 	}
 	c.lastPub = now
+	if srcName == "pipe" {
+		c.streamLast = now
+	}
 	c.mu.Unlock()
 }
 
@@ -786,18 +811,27 @@ func (c *Capture) watchdog() {
 		case <-time.After(2 * time.Second):
 		}
 		c.mu.Lock()
-		last := c.lastPub
+		streamLast := c.streamLast
 		seq := c.seq
 		first := c.firstPub
 		c.mu.Unlock()
+		if os.Getenv("SCTERM_DEBUG") != "" {
+			dbg("wd: seq=%d streamAge=%.1fs scrAlive=%v ffAlive=%v",
+				seq, time.Since(streamLast).Seconds(),
+				c.scr != nil && c.scr.Process != nil && c.scr.ProcessState == nil,
+				c.ff != nil && c.ff.Process != nil && c.ff.ProcessState == nil)
+		}
 		if seq == 0 && !first.IsZero() && time.Since(first) > 10*time.Second {
 			logf("pipeline never produced frames; restarting")
 			c.spawnPipeline()
 			continue
 		}
-		if !last.IsZero() && time.Since(last) > 8*time.Second &&
+		// stream-specific staleness: the screencap filler keeps lastPub
+		// fresh even when scrcpy/ffmpeg is dead, so use streamLast
+		if !streamLast.IsZero() && time.Since(streamLast) > 6*time.Second &&
 			time.Since(lastRestart) > 10*time.Second {
-			logf("pipeline silent; restarting")
+			logf("STREAM silent %.0fs (engine=%s); respawning",
+				time.Since(streamLast).Seconds(), c.engine)
 			lastRestart = time.Now()
 			c.spawnPipeline()
 		}
@@ -916,8 +950,7 @@ func fitImage(src image.Image, w, h int, mode string) image.Image {
 func (c *Capture) teardown() {
 	for _, p := range []*exec.Cmd{c.ff, c.scr} {
 		if p != nil && p.Process != nil {
-			p.Process.Kill()
-			p.Wait()
+			p.Process.Kill() // reaped by the launch goroutine
 		}
 	}
 	c.ff, c.scr = nil, nil
@@ -1259,7 +1292,11 @@ func (t *TUI) topBar(cols, canvasRows int, ms float64, capMode string) string {
 func (t *TUI) bottomBar(cols int) string {
 	var sb strings.Builder
 	sb.WriteString(C_DIM)
-	sb.WriteString(" Click=tap  Drag=touch  Wheel=scroll  Type=text  ?=help  ^T=menu  F12=grab  Esc×2=quit ")
+	if t.inZellij {
+		sb.WriteString(" F12=grab (mouse+keys)  Click=tap  Drag=touch  Wheel=scroll  ^T=menu  Esc×2=quit ")
+	} else {
+		sb.WriteString(" Click=tap  Drag=touch  Wheel=scroll  Type=text  ?=help  ^T=menu  F12=grab  Esc×2=quit ")
+	}
 	if len(t.spark) > 0 {
 		sb.WriteString(" ")
 		for _, v := range t.spark {
@@ -1398,16 +1435,16 @@ func (t *TUI) feed(data []byte, evs *[]event) {
 					*evs = append(*evs, event{kind: evDpad, code: KEYCODE["DPAD_LEFT"]})
 				case 'H':
 					*evs = append(*evs, event{kind: evDpad, code: KEYCODE["HOME"]})
-				case 'M', 'm': // SGR mouse: <b;x;y
+				case 'M', 'm': // SGR mouse: <b;x;y  (b holds button+flags)
 					parts := strings.Split(seq, ";")
 					if len(parts) == 3 {
-						btn, _ := strconv.Atoi(parts[0])
+						btnRaw, _ := strconv.Atoi(strings.TrimPrefix(parts[0], "<"))
 						x, _ := strconv.Atoi(parts[1])
 						y, _ := strconv.Atoi(parts[2])
 						press := fin == 'M'
-						motion := btn&32 != 0
-						wheel := btn&64 != 0
-						*evs = append(*evs, event{kind: evMouse, btn: btn & 3,
+						motion := btnRaw&32 != 0
+						wheel := btnRaw&64 != 0
+						*evs = append(*evs, event{kind: evMouse, btn: btnRaw,
 							x: x, y: y, press: press, motion: motion, wheel: wheel})
 					}
 				default:
@@ -1653,16 +1690,18 @@ func (t *TUI) mouse(ev event) {
 		return
 	}
 	cols := t.cols
+	btn := ev.btn & 3
 	if ev.wheel {
 		cx := dw / 2
-		if ev.btn == 4 { // wheel up
+		// SGR wheel: raw button ends in 68 (up) / 69 (down)
+		if ev.btn&1 == 0 {
 			t.inp.Swipe(cx, int(float64(dh)*0.35), cx, int(float64(dh)*0.65), 90)
-		} else if ev.btn == 5 { // wheel down
+		} else {
 			t.inp.Swipe(cx, int(float64(dh)*0.65), cx, int(float64(dh)*0.35), 90)
 		}
 		return
 	}
-	if ev.btn == 0 && ev.press {
+	if btn == 0 && ev.press {
 		x, y := mapToDevice(dw, dh, ev.x, cy, cols, t.rows, t.fit)
 		t.inp.TouchDown(x, y)
 		t.pressed = true
@@ -1672,7 +1711,7 @@ func (t *TUI) mouse(ev event) {
 		t.lastTouch = time.Now()
 		t.dotX, t.dotY = ev.x, cy
 		t.dotUntil = time.Now().Add(4 * time.Second)
-	} else if ev.motion && ev.btn == 0 && t.pressed {
+	} else if ev.motion && btn == 0 && t.pressed {
 		x, y := mapToDevice(dw, dh, ev.x, cy, cols, t.rows, t.fit)
 		t.lastMoveX, t.lastMoveY = x, y
 		t.dragged = true
@@ -1682,7 +1721,7 @@ func (t *TUI) mouse(ev event) {
 			t.inp.TouchMove(x, y)
 			t.lastTouch = time.Now()
 		}
-	} else if ev.btn == 0 && !ev.press && t.pressed {
+	} else if btn == 0 && !ev.press && t.pressed {
 		t.inp.TouchUp(t.lastMoveX, t.lastMoveY)
 		t.pressed = false
 		t.dragged = false
