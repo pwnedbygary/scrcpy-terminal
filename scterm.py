@@ -592,6 +592,7 @@ class FfmpegSource:
         self.adb = None
         self.ff = None
         self._stop = False
+        self._scrcpy_fifo = None
         self.spawned_at = time.time()
         self.plock = threading.Lock()
         with self.plock:
@@ -624,6 +625,10 @@ class FfmpegSource:
 
     def set_quality(self, q):
         self._update(q=max(1, min(10, int(q))))
+
+    def set_size(self, w, h):
+        self._update(w=max(320, min(3840, int(w))),
+                     h=max(180, min(2160, int(h))))
 
     def set_scale(self, pct):
         self._update(scale=max(25, min(100, int(pct))))
@@ -680,40 +685,80 @@ class FfmpegSource:
         w, h = p["w"], p["h"]
         serial = self.m.serial
         self._apply_refresh()
-        adb_cmd = ["adb"]
-        if serial:
-            adb_cmd += ["-s", serial]
-        # NOTE: no --size on screenrecord! On some displays a requested
-        # capture size switches screenrecord into damage-tracked scaling
-        # that only receives frames when content CHANGES (static screen
-        # stalls to ~1fps). Native capture flows continuously on the
-        # 60Hz refresh forced by _apply_refresh; ffmpeg downscales below.
-        adb_cmd += ["exec-out",
-                    f"screenrecord --output-format=h264"
-                    f" --bit-rate {p['bitrate']} --time-limit 179 -"]
+        self._h264_buf = b""
+
         vf = [f"scale={w}:{h}"]
         if p["fps_cap"]:
             vf += [f"fps={p['fps_cap']}"]
         if p["scale"] != 100:
             vf += [f"scale=trunc(iw*{p['scale']}/100/2)*2:"
                    f"trunc(ih*{p['scale']}/100/2)*2"]
+
+        # Try scrcpy H264 via FIFO first (fastest — same encoder as
+        # scrcpy/escrcpy uses). Fall back to screenrecord.
+        scrcpy_fifo = None
+        if HAS_SCRCPY:
+            try:
+                scrcpy_fifo = f"/tmp/scterm_scrcpy_{os.getpid()}.h264"
+                if os.path.exists(scrcpy_fifo):
+                    os.remove(scrcpy_fifo)
+                os.mkfifo(scrcpy_fifo)
+            except OSError:
+                scrcpy_fifo = None
+
+        if scrcpy_fifo:
+            scrcpy_cmd = ["scrcpy", "-n", "-N",
+                          f"--max-size={max(w, h)}",
+                          f"--record={scrcpy_fifo}",
+                          "--record-format=mkv",
+                          "-V=error"]
+            if serial:
+                scrcpy_cmd += ["-s", serial]
+            if p["bitrate"]:
+                scrcpy_cmd += [f"--video-bit-rate={p['bitrate']}"]
+            if p["fps_cap"]:
+                scrcpy_cmd += [f"--max-fps={p['fps_cap']}"]
+            ff_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                      "-fflags", "nobuffer", "-flags", "low_delay",
+                      "-probesize", "32768", "-analyzeduration", "0",
+                      "-f", "matroska", "-i", scrcpy_fifo,
+                      "-vf", ",".join(vf),
+                      "-an", "-c:v", "mjpeg", "-q:v", str(p["q"]),
+                      "-f", "image2pipe", "pipe:1"]
+            try:
+                self.adb = subprocess.Popen(scrcpy_cmd,
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL)
+                self.ff = subprocess.Popen(ff_cmd,
+                                           stdout=subprocess.PIPE,
+                                           stderr=subprocess.DEVNULL)
+                self._scrcpy_fifo = scrcpy_fifo
+                self.last_params = p
+                self.spawned_at = time.time()
+                return
+            except Exception:
+                pass
+            # cleanup on failure
+            try:
+                os.remove(scrcpy_fifo)
+            except OSError:
+                pass
+
+        # Fallback: adb exec-out screenrecord → ffmpeg MJPEG
+        adb_cmd = ["adb"]
+        if serial:
+            adb_cmd += ["-s", serial]
+        adb_cmd += ["exec-out",
+                    f"screenrecord --output-format=h264"
+                    f" --bit-rate {p['bitrate']} --time-limit 179 -"]
         ff_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
                   "-flags", "low_delay", "-probesize", "32768",
-                  # input-rate assumption: without it the h264 demuxer
-                  # emits degenerate timestamps and the fps= filter does
-                  # NOTHING (measured 67fps with fps=30!). With -r 60 the
-                  # filter drops correctly and the encoder is capped.
                   "-r", "60",
                   "-f", "h264", "-i", "pipe:0",
-                  "-vf", ",".join(vf)]
-        # NOTE: -fflags nobuffer silently BREAKS the h264 demuxer on this
-        # input (0 frames decoded, no error). Keep low_delay+probesize.
-        # -strict unofficial must also sit AFTER -i as an output option;
-        # before -i it leaves the mjpeg encoder in strict mode and it
-        # refuses the (limited-range YUV) h264 input -> no frames at all.
-        ff_cmd += ["-strict", "unofficial",
-                   "-an", "-c:v", "mjpeg", "-q:v", str(p["q"]),
-                   "-f", "image2pipe", "pipe:1"]
+                  "-vf", ",".join(vf),
+                  "-strict", "unofficial",
+                  "-an", "-c:v", "mjpeg", "-q:v", str(p["q"]),
+                  "-f", "image2pipe", "pipe:1"]
         try:
             self.adb = subprocess.Popen(adb_cmd, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL)
@@ -724,6 +769,7 @@ class FfmpegSource:
                 self.adb.stdout.close()
         except Exception:
             self.adb = self.ff = None
+        self._scrcpy_fifo = None
         self.last_params = p
         self.spawned_at = time.time()
 
@@ -744,6 +790,13 @@ class FfmpegSource:
                     except Exception:
                         pass
         self.adb = self.ff = None
+        fifo = getattr(self, "_scrcpy_fifo", None)
+        if fifo:
+            try:
+                os.remove(fifo)
+            except OSError:
+                pass
+            self._scrcpy_fifo = None
 
     def run(self):
         while not self._stop:
@@ -904,6 +957,12 @@ class CaptureManager:
 
     def is_stream(self):
         return isinstance(self.source, FfmpegSource)
+
+    def _snapshot_params(self):
+        if self.source and hasattr(self.source, "_snapshot"):
+            return self.source._snapshot()
+        return {"w": self.max_w, "h": self.max_h, "bitrate": self.bitrate,
+                "q": self.q, "scale": self.scale, "fps_cap": self.fps_cap}
 
     # -- stale-frame filler --------------------------------------------------
     # screenrecord on some ROMs only captures frames when the display
@@ -1357,6 +1416,9 @@ def parse_input(data):
         elif c == 0x14:  # Ctrl-T
             events.append(("menu",))
             i += 1
+        elif c == 0x01:  # Ctrl-A
+            events.append(("audio_toggle",))
+            i += 1
         elif c == 0x13:  # Ctrl-S
             events.append(("stream_toggle",))
             i += 1
@@ -1377,19 +1439,19 @@ def parse_input(data):
 
 HELP_ROWS = [
     ("Mouse", "click tap · drag touch · wheel scroll"),
-    ("Type", "text … Enter sends · Backspace deletes"),
+    ("Type", "text … Enter sends · BkSp deletes"),
     ("Keys", "F1 menu · F2 home · F3 back · F4 recents"),
     ("Keys", "F5 power · F6 vol+ · F7 vol- · F8 center"),
-    ("Keys", "F9-12 dpad · arrows dpad · enter/backspace"),
-    ("View", "Ctrl-F fit · Ctrl-S stream ↔ screencap"),
-    ("Menu", "Ctrl-T menu overlay · ? help · Esc×2 quit"),
-    ("Grab", "Ctrl-Alt-G / F12 pass keys to device (Zellij)"),
+    ("Keys", "F9-12 dpad · arrows · Enter"),
+    ("View", "Ctrl-F fit · Ctrl-S cap/stream"),
+    ("Menu", "Ctrl-T menu · ? help · Esc×2 quit"),
+    ("Grab", "Ctrl-Alt-G/F12 grab keys (Zellij)"),
 ]
 
 MENU_ITEMS = []
 
 
-def build_menu(args, m, chrome_on):
+def build_menu(args, m, chrome_on, tui_audio_on=False):
     items = [
         ("fit", "Fit mode", FIT_MODES, args.fit, "%s"),
         ("stream", "Capture", ["stream", "screencap"],
@@ -1404,6 +1466,7 @@ def build_menu(args, m, chrome_on):
          args.colors, "%s"),
         ("chrome", "Chrome bars", ["on", "off"],
          "on" if chrome_on else "off", "%s"),
+        ("audio", "Audio", ["off", "on"], "on" if tui_audio_on else "off", "%s"),
         ("stay", "Stay awake", ["on", "off"],
          "on" if args.stay_awake else "off", "%s"),
         ("wake", "Wake device", None, None, "action"),
@@ -1438,6 +1501,8 @@ class TUI:
         self.last_seq = -1
         self.prev_stream_seq = -1
         self.stall_since = None
+        self.tui_audio_proc = None
+        self.tui_audio_player = None
         self.prev_rows = []
         self.prev_top = None
         self.prev_bottom = None
@@ -1448,6 +1513,74 @@ class TUI:
         self.last_frame_at = 0.0
         self.proc_ms = 0.0
         self.geom = (0, 0)
+        self.last_render_img = None
+        self._prev_dot = None
+
+    def _tui_audio_start(self):
+        if self.tui_audio_proc and self.tui_audio_proc.poll() is None:
+            return True
+        if not HAS_SCRCPY or not self.m.serial:
+            return False
+        try:
+            cmd = ["scrcpy", "-s", self.m.serial, "--no-video",
+                   "--no-window", "--no-playback", "--verbosity=error",
+                   "--audio-codec=opus", "--audio-bit-rate=128000",
+                   "--record-format=opus", "--record=-"]
+            import subprocess as _sp
+            p = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.DEVNULL)
+            q = _sp.Popen(["ffplay", "-nodisp", "-loglevel", "quiet", "-i", "pipe:0"],
+                          stdin=p.stdout, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            if p.stdout:
+                p.stdout.close()
+            self.tui_audio_proc = p
+            self.tui_audio_player = q
+            return True
+        except Exception:
+            self.tui_audio_proc = None
+            self.tui_audio_player = None
+            return False
+
+    def _tui_audio_stop(self):
+        for attr in ("tui_audio_player", "tui_audio_proc"):
+            p = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if p:
+                try:
+                    p.terminate()
+                    p.wait(timeout=1)
+                except Exception:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+
+    def _dot_immediate(self, tx, ty, top_rows):
+        # erase old dot by restoring its underlying half-block cell
+        if self._prev_dot and self._prev_dot != (tx, ty):
+            px, py = self._prev_dot
+            if self.last_render_img is not None:
+                try:
+                    fg = self.last_render_img.getpixel((px-1, (py-1)*2))
+                    bg = self.last_render_img.getpixel((px-1, (py-1)*2+1))
+                    sys.stdout.write(f"\x1b[{py+top_rows};{px}H"
+                                     f"\x1b[38;2;{fg[0]};{fg[1]};{fg[2]}m"
+                                     f"\x1b[48;2;{bg[0]};{bg[1]};{bg[2]}m▀\x1b[0m")
+                except Exception:
+                    sys.stdout.write(f"\x1b[{py+top_rows};{px}H ")
+            else:
+                sys.stdout.write(f"\x1b[{py+top_rows};{px}H ")
+        # draw new dot with sampled bg for transparency
+        if self.last_render_img is not None:
+            try:
+                bg = self.last_render_img.getpixel((tx-1, (ty-1)*2+1))
+                sys.stdout.write(f"\x1b[{ty+top_rows};{tx}H"
+                                 f"\x1b[38;5;45m\x1b[48;2;{bg[0]};{bg[1]};{bg[2]}m●\x1b[0m")
+            except Exception:
+                sys.stdout.write(f"\x1b[{ty+top_rows};{tx}H\x1b[38;5;45m●\x1b[0m")
+        else:
+            sys.stdout.write(f"\x1b[{ty+top_rows};{tx}H\x1b[38;5;45m●\x1b[0m")
+        sys.stdout.flush()
+        self._prev_dot = (tx, ty)
 
     # ------------------------------------------------------------------ bar
     def top_bar(self, cols, rows, dev, rend, ms, fps, cap_mode):
@@ -1469,6 +1602,8 @@ class TUI:
             parts.append(style(f" bat {bat}% ", fg=batc))
         if self.grab:
             parts.append(style(" GRAB ", fg=(0, 0, 0), bg=ACCENT2, bold=True))
+        if self.tui_audio_proc and self.tui_audio_proc.poll() is None:
+            parts.append(style(" ♪ ", fg=(0,0,0), bg=(52,211,153), bold=True))
         return fit_line(parts, cols)
 
     def bottom_bar(self, cols, m):
@@ -1557,6 +1692,11 @@ class TUI:
                 self.last_seq = -1
                 self.prev_rows = []  # force a full redraw in the new mode
                 self.prev_top = None
+            elif kind == "audio_toggle":
+                if self.tui_audio_proc and self.tui_audio_proc.poll() is None:
+                    self._tui_audio_stop()
+                else:
+                    self._tui_audio_start()
             elif kind == "stream_toggle":
                 m.set_stream_mode(not m.is_stream())
                 self.last_seq = -1
@@ -1650,7 +1790,8 @@ class TUI:
                 self._mouse(ev, cols, rows, m)
 
     def _menu_nav(self, kind, ev, m, args):
-        items = build_menu(args, m, self.chrome)
+        audio_on = bool(self.tui_audio_proc and self.tui_audio_proc.poll() is None)
+        items = build_menu(args, m, self.chrome, tui_audio_on=audio_on)
         n = len(items)
         if kind == "dpad":
             if ev[1] == "up":
@@ -1698,6 +1839,11 @@ class TUI:
             args.colors = opts[(opts.index(args.colors) + 1) % len(opts)]
             self.truecolor = (args.colors == "truecolor"
                               or (args.colors == "auto" and supports_truecolor()))
+        elif key_ == "audio":
+            if self.tui_audio_proc and self.tui_audio_proc.poll() is None:
+                self._tui_audio_stop()
+            else:
+                self._tui_audio_start()
         elif key_ == "chrome":
             self.chrome = not self.chrome
         elif key_ == "stay":
@@ -1723,7 +1869,27 @@ class TUI:
         # canvas rows start below chrome bars
         top_rows = 1 if self.chrome else 0
         cy = my - top_rows
-        if cy < 1 or cy > rows:
+        # release must always lift the finger even if outside the canvas
+        is_release = (btn == 0 and released and self.press is not None)
+        is_motion = (motion and btn == 0 and self.press is not None)
+        if not is_release and not is_motion and (cy < 1 or cy > rows):
+            return
+        if is_release:
+            # release outside: use last valid pending/move, then clean up
+            try:
+                tx, ty = (self.pending_tap or map_to_device(
+                    (dw, dh), self.move[0], self.move[1], cols, rows, self.fit))
+                touch_up(m.inp, tx, ty)
+            except Exception:
+                try:
+                    touch_up(m.inp, dw // 2, dh // 2)
+                except Exception:
+                    pass
+            self.press = None
+            self.move = None
+            self.dragged = False
+            self.last_touch_ts = None
+            self.pending_tap = None
             return
         if wheel:
             if self.text_buf:
@@ -1735,7 +1901,16 @@ class TUI:
             else:
                 swipe(m.inp, cx, int(dh * 0.65), cx, int(dh * 0.35), 90)
             return
-        if btn == 0 and not released:
+        if btn == 0 and not released and not motion:
+            # New finger-down: send touch_down immediately (glass-on-glass feel).
+            # Only matches pure press events (b=0), NOT drag moves (b=32).
+            if self.press is not None:
+                # if a previous drag never got its UP, lift it first
+                try:
+                    tx0, ty0 = self.pending_tap or (dw // 2, dh // 2)
+                    touch_up(m.inp, tx0, ty0)
+                except Exception:
+                    pass
             if self.text_buf:
                 send_text(m.inp, "".join(self.text_buf))
                 self.text_buf.clear()
@@ -1745,22 +1920,30 @@ class TUI:
             self.press = (mx, cy)
             self.move = (mx, cy)
             self.dragged = False
-            self.last_seq = -1
+            try:
+                tx, ty = device_to_term((dw, dh), x, y, cols, rows, self.fit)
+                self._dot_immediate(tx, ty, top_rows)
+            except Exception:
+                pass
             # finger on the glass: DOWN immediately, so the app reacts live
             touch_down(m.inp, x, y)
             self.last_touch_ts = time.time()
-        elif motion and btn == 0 and self.press:
+        elif self.press and btn == 0 and not released:
+            # drag (with or without explicit motion flag — some terms omit 32)
+            if (mx, cy) == self.press and not motion:
+                return
             x, y = map_to_device((dw, dh), mx, cy, cols, rows, self.fit)
             self.pending_tap = (x, y)
             self.pending_until = time.time() + 4.0
             self.move = (mx, cy)
             self.dragged = True
-            self.last_seq = -1
-            # stream MOVE events at ~35 Hz max — the shell pipe is fast, but
-            # terminal mouse floods at up to 125 Hz which apps can't use
+            try:
+                tx, ty = device_to_term((dw, dh), x, y, cols, rows, self.fit)
+                self._dot_immediate(tx, ty, top_rows)
+            except Exception:
+                pass
             now = time.time()
-            if self.last_touch_ts is None or \
-                    now - self.last_touch_ts >= 0.028:
+            if self.last_touch_ts is None or now - self.last_touch_ts >= 0.050:
                 touch_move(m.inp, x, y)
                 self.last_touch_ts = now
         elif btn == 0 and released:
@@ -1780,33 +1963,24 @@ class TUI:
         top_rows = 1 if self.chrome else 0
         rows = lines - 1 - top_rows
         out = []
-        # rows changed?
-        changed = []
-        for i, s in enumerate(rows_strs):
-            if i >= len(self.prev_rows) or self.prev_rows[i] != s:
-                changed.append(i)
-        full = True  # was incremental — caused horizontal black bands
-        if full:
-            # start BELOW the chrome top bar (row 1) so a full redraw can't
-            # overwrite it; the top bar is drawn separately afterwards
-            out.append(f"\x1b[{1 + top_rows};1H")
-            for s in rows_strs:
-                out.append(s)
-                out.append("\r\n")
-        elif changed:
-            for i in changed:
-                out.append(f"\x1b[{i + 1 + top_rows};1H{s}")
+        # Always full redraw — incremental caused horizontal black bands,
+        # and Zellij's PTY leaks SGR mouse bytes into stdout which corrupts
+        # ANSI colour codes mid-frame.  Erasing each line first (\x1b[2K)
+        # wipes any leaked bytes before we paint over them.
+        out.append(f"\x1b[{1 + top_rows};1H")
+        for s in rows_strs:
+            out.append("\x1b[2K")
+            out.append(s)
+            out.append("\r\n")
 
         if self.chrome:
             top = self.top_bar(cols, rows, dev, rend, ms, self.proc_fps,
                                cap_mode)
-            if top != self.prev_top:
-                out.append(f"\x1b[1;1H{top}")
-                self.prev_top = top
+            out.append(f"\x1b[1;1H\x1b[2K{top}")
+            self.prev_top = top
         bottom = self.bottom_bar(cols, m)
-        if bottom != self.prev_bottom:
-            out.append(f"\x1b[{lines};1H{bottom}")
-            self.prev_bottom = bottom
+        out.append(f"\x1b[{lines};1H\x1b[2K{bottom}")
+        self.prev_bottom = bottom
 
         # cursor dot — single dot, no trail: erase old, draw new
         if hasattr(self, "_prev_dot") and self._prev_dot and self._prev_dot != self.dot:
@@ -1822,14 +1996,20 @@ class TUI:
             self._prev_dot = None
         # overlays
         if self.menu_open:
-            items = build_menu(self.args, m, self.chrome)
+            audio_on = bool(self.tui_audio_proc and self.tui_audio_proc.poll() is None)
+            items = build_menu(self.args, m, self.chrome, tui_audio_on=audio_on)
             out += self.draw_menu(cols, lines, items, self.menu_idx)
         elif time.time() < self.help_until:
             out += self.draw_help(cols, lines, m)
         if out:
             out.append("\x1b[H")
-            sys.stdout.write("".join(out))
-            sys.stdout.flush()
+            # Single atomic write — prevents Zellij's leaked mouse bytes
+            # from interleaving with our ANSI output mid-frame.
+            buf = "".join(out).encode("utf-8", errors="replace")
+            try:
+                os.write(sys.stdout.fileno(), buf)
+            except OSError:
+                pass
         self.prev_rows = rows_strs
 
     def decode_image(self, img, cols, rows2):
@@ -1894,6 +2074,7 @@ class TUI:
                 pil = self.decode_image(img, cols_now, rows2)
                 render_img, (ow, oh), (ox, oy) = fit_image(
                     pil, cols_now, rows2, self.fit)
+                self.last_render_img = render_img
                 r = Renderer(cols_now, rows, self.truecolor)
                 t0 = time.perf_counter()
                 rows_strs = r.frame(render_img)
@@ -1919,6 +2100,13 @@ class TUI:
                         self.dot = None
                 else:
                     self.dot = None
+                # Drain pending stdin before draw so leaked mouse bytes
+                # don't pile up and corrupt the next frame's stdout.
+                try:
+                    while select.select([sys.stdin], [], [], 0)[0]:
+                        os.read(sys.stdin.fileno(), 4096)
+                except Exception:
+                    pass
                 self.draw(rows_strs, cols_now, lines_now, m, dev,
                           (ow, oh), ms, cap_mode)
             else:
@@ -2010,14 +2198,14 @@ html,body{margin:0;height:100%;background:
   radial-gradient(900px 500px at 10% 110%, #1c1433 0%, transparent 55%), var(--bg);
   color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
 #wrap{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center}
-#v{width:100%;height:100%;object-fit:contain;touch-action:none;-webkit-user-select:none;user-select:none;cursor:crosshair}
-#v.dim{opacity:.25}
+#v,#vimg{width:100%;height:100%;object-fit:contain;touch-action:none;-webkit-user-select:none;user-select:none;cursor:crosshair}
+#v.dim,#vimg.dim{opacity:.25}
 /* ---- top chrome ---- */
 #bar{position:fixed;top:0;left:0;right:0;padding:8px 10px 8px 52px;display:flex;gap:6px;flex-wrap:wrap;
   align-items:center;z-index:10;background:rgba(10,14,19,.72);backdrop-filter:blur(12px) saturate(1.4);
   border-bottom:1px solid var(--line);transform:translateY(-104%);transition:transform .25s ease;min-height:48px}
 #bar.open{transform:translateY(0)}
-#menuBtn{position:fixed;top:8px;left:10px;z-index:13;width:36px;height:36px;border-radius:10px;
+#menuBtn{position:fixed;top:6px;left:10px;z-index:13;width:36px;height:36px;border-radius:10px;
   background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04121a;border:none;
   font-size:17px;font-weight:700;display:flex;align-items:center;justify-content:center;
   backdrop-filter:blur(8px);box-shadow:0 2px 12px rgba(34,211,238,.25)}
@@ -2087,15 +2275,16 @@ select.ctl{background:var(--panel);color:var(--text);border:1px solid var(--line
   <button class="ctl" id=grabBtn onclick="toggleGrab()">🎯 Capture keys</button>
   <button class="ctl" id=abtn onclick="toggleAudio()" style="display:none">🔈 Audio off</button>
   <button class="ctl" onclick="openPicker()">📱 Devices</button>
-  <button class="ctl" onclick="toggleFS()">⛶ Fullscreen</button>
+  <button class="ctl" id=pinBtn onclick="togglePin()" title="Pin bar open">📌</button>
+   <button class="ctl" onclick="toggleFS()">⛶ Fullscreen</button>
+  <div class="grp" id=grpFps style="display:inline-flex">FPS <input id=fr type=range min=5 max=60 value=30 step=5 list=fticks><span id=fv>30</span><datalist id=fticks><option value="15"><option value="30"><option value="60"></datalist></div>
+  <div class="grp" id=grpBr>Bitrate <input id=br type=range min=1 max=80 value=8 step=1 list=bticks><span id=bv>8</span> Mb/s<datalist id=bticks><option value="1"><option value="8"><option value="20"><option value="40"><option value="80"></datalist></div>
+  <div class="grp" id=grpQ>Quality <input id=qr type=range min=1 max=10 value=4 step=1 list=qticks><span id=qv>4</span><datalist id=qticks><option value="2"><option value="4"><option value="8"></datalist></div>
+  <div class="grp" id=grpScale>Scale <input id=sr type=range min=25 max=100 value=100 step=5 list=sticks><span id=sv>100</span>%<datalist id=sticks><option value="25"><option value="50"><option value="75"><option value="100"></datalist></div>
+  <div class="grp" id=grpRes>Res <input id=rs type=range min=0 max=3 value=2 step=1 list=rsticks><span id=rv>720p</span><datalist id=rsticks><option value="0" label="360p"><option value="1" label="480p"><option value="2" label="720p"><option value="3" label="1080p"></datalist></div>
+  <div class="grp" id=grpCodec style="display:none">Codec <select id=codecSel class=ctl><option value="h264">H.264</option></select></div>
 </div>
-<div class="grp" style="position:fixed;top:60px;right:10px;z-index:12;flex-direction:column;display:none" id=settings>
-  <div class="grp">FPS <input id=fr type=range min=5 max=60 value=30 step=1><span id=fv>30</span></div>
-  <div class="grp">Bitrate <input id=br type=range min=1 max=80 value=8 step=1><span id=bv>8</span> Mb/s</div>
-  <div class="grp">Quality <input id=qr type=range min=1 max=10 value=4 step=1><span id=qv>4</span></div>
-  <div class="grp">Scale <input id=sr type=range min=25 max=100 value=100 step=5><span id=sv>100</span>%</div>
-</div>
-<div id=wrap><img id=v draggable=false alt="device stream"></div>
+<div id=wrap><video id=v autoplay muted playsinline style="display:none" draggable=false alt="device stream"></video><img id=vimg draggable=false alt="device stream"></div>
 <div id=spinner style="display:none"></div>
 <div id=noconn><b>Stream not started</b><span>choose a device</span><button class="ctl" onclick="openPicker()">Pick device</button></div>
 <div id=hud>
@@ -2120,20 +2309,98 @@ select.ctl{background:var(--panel);color:var(--text);border:1px solid var(--line
 </div></div>
 <div class="toast" id=toast></div>
 <script>
-const img=document.getElementById('v');
+const vEl=document.getElementById('v');
+const imgEl=document.getElementById('vimg');
 const $=id=>document.getElementById(id);
+function disp(){return mseMode?vEl:imgEl;}
 let grab=false,kb=false,targetFps=30,audioOn=false,audioEl=null,lastBattery=null;
-let st=null; // /api/status cache
+let st=null,mseMode=false,mseSrc=null,mseAbort=null;
+/* ---- MSE codec detection ---- */
+const codecs=[
+  {name:'H.264',ct:'video/mp4; codecs="avc1.42E01E"',scrcpy:'h264'},
+  {name:'H.265',ct:'video/mp4; codecs="hev1.1.6.L93.B0"',scrcpy:'hevc'},
+  {name:'AV1',ct:'video/mp4; codecs="av01.0.08M.08"',scrcpy:'av1'}
+];
+const avail=codecs.filter(c=>window.MediaSource&&MediaSource.isTypeSupported(c.ct));
+function initCodecUI(){
+  const g=$('codecSel');if(!g)return;
+  const sel=$('codecSel');
+  sel.innerHTML='';
+  if(!avail.length){$('grpCodec').style.display='none';return;}
+  avail.forEach(c=>{const o=document.createElement('option');o.value=c.scrcpy;o.textContent=c.name;sel.appendChild(o);});
+  $('grpCodec').style.display='inline-flex';
+}
+initCodecUI();
+/* ---- MSE player ---- */
+function startMSE(codec){
+  if(mseAbort){mseAbort.abort();mseAbort=null;}
+  vEl.style.display='block';imgEl.style.display='none';
+  mseMode=true;
+  if(mseSrc&&mseSrc.readyState==='open'){
+    try{mseAbort&&mseAbort.abort();}catch(e){}
+  }
+  mseSrc=new MediaSource();
+  vEl.src=URL.createObjectURL(mseSrc);
+  mseSrc.addEventListener('sourceopen',()=>{
+    const ct=(codecs.find(c=>c.scrcpy===codec)||codecs[0]).ct;
+    try{
+      const sb=mseSrc.addSourceBuffer(ct);
+      sb.mode='segments';
+      mseAbort=new AbortController();
+      fetch('/stream.h264?codec='+codec,{signal:mseAbort.signal}).then(resp=>{
+        const reader=resp.body.getReader();
+        function pump(){
+          reader.read().then(({done,value})=>{
+            if(done||!mseMode)return;
+            if(!sb.updating){
+              try{sb.appendBuffer(value);}catch(e){}
+            }
+            pump();
+          }).catch(()=>{});
+        }
+        pump();
+      }).catch(()=>{
+        mseMode=false;vEl.style.display='none';imgEl.style.display='block';startMJPEG();
+      });
+    }catch(e){
+      toast('Codec not supported: '+ct);stopMSE();
+    }
+  },{once:true});
+}
+function stopMSE(){
+  if(mseAbort){mseAbort.abort();mseAbort=null;}
+  mseMode=false;vEl.style.display='none';imgEl.style.display='block';
+}
+/* ---- MJPEG fallback ---- */
+let mjpgSrc=null;
+function startMJPEG(){
+  if(mjpgSrc)mjpgSrc.src='';
+  vEl.style.display='none';imgEl.style.display='block';
+  imgEl.src='/stream.mjpg';
+  mjpgSrc=imgEl;
+}
+/* ---- auto-select best transport ---- */
+function selectTransport(){
+  const sel=$('codecSel');
+  if(sel&&sel.value&&avail.length){
+    startMSE(sel.value);
+  }else{
+    stopMSE();startMJPEG();
+  }
+}
+if($('codecSel'))$('codecSel').addEventListener('change',selectTransport);
+/* ---- connect ---- */
+selectTransport();
 function toast(t){const e=$('toast');e.textContent=t;e.classList.add('show');
   clearTimeout(toast._t);toast._t=setTimeout(()=>e.classList.remove('show'),1600);}
 function api(p,body){return fetch(p,{method:body?'POST':'GET',
   headers:body?{'Content-Type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined});}
-function k(code){api('/input/key?code='+code);}
+function k(code){api('/input/key',{code:code});}
 /* ---- controls ---- */
 function toggleFS(){if(!document.fullscreenElement)document.documentElement.requestFullscreen?.().catch(()=>{});else document.exitFullscreen();}
 function rot(){api('/settings/rotate',{deg:((st&&st.rot||0)+90)%360}).then(()=>{toast('Rotated');pollStatus();});}
 function toggleGrab(){grab=!grab;const b=$('grabBtn');b.textContent=grab?'🎯 Keys: on':'🎯 Capture keys';
-  b.classList.toggle('on',grab);if(grab)img.requestPointerLock?.();}
+  b.classList.toggle('on',grab);if(grab)disp().requestPointerLock?.();}
 function toggleKB(){kb=!kb;const b=$('kbBtn');b.classList.toggle('on',kb);
   $('touchbar').style.display=kb?'flex':'none';if(kb)$('textin').focus();}
 function toggleFSbtn(){}
@@ -2152,8 +2419,10 @@ $('fr').addEventListener('change',e=>{targetFps=+e.target.value;api('/settings/f
 $('br').addEventListener('change',e=>api('/settings/bitrate',{bitrate:+e.target.value*1e6}));
 $('qr').addEventListener('change',e=>api('/settings/quality',{q:+e.target.value}));
 $('sr').addEventListener('change',e=>api('/settings/scale',{scale:+e.target.value}));
-for(const[inp,out]of[['fr','fv'],['br','bv'],['qr','qv'],['sr','sv']])
-  $(inp).addEventListener('input',e=>$(out).textContent=e.target.value+(inp==='br'?'':''));
+const rs=$('rs'),rv=$('rv');
+if(rs){rs.addEventListener('input',()=>{const m=["360p","480p","720p","1080p"];rv.textContent=m[+rs.value]||rs.value;}); rs.addEventListener('change',()=>{const sizes=[[640,360],[854,480],[1280,720],[1920,1080]]; const [w,h]=sizes[+rs.value]||[1280,720]; api('/settings/res',{w:w,h:h});});}
+for(const[inp,out]of[['fr','fv'],['br','bv'],['qr','qv'],['sr','sv'],['rs','rv']])
+  $(inp).addEventListener('input',e=>{const v=e.target.value; const m={fr:String(v),br:String(v),qr:String(v),sr:String(v),rs:["360p","480p","720p","1080p"][+v]||v}; $(out).textContent=m[inp]||v;});
 /* ---- device picker ---- */
 function closePicker(){$('picker').classList.remove('open');}
 function openPicker(){$('picker').classList.add('open');refreshDevices();}
@@ -2181,9 +2450,9 @@ async function pollStatus(){
 setInterval(pollStatus,3000);pollStatus();
 /* ---- pointer: tap / drag ---- */
 function pos(e){
-  const r=img.getBoundingClientRect();
+  const r=disp().getBoundingClientRect();
   const t=e.touches?e.touches[0]:e;
-  const iw=img.naturalWidth||1920,ih=img.naturalHeight||1080;
+  const iw=disp().videoWidth||disp().naturalWidth||1920,ih=disp().videoHeight||disp().naturalHeight||1080;
   const scale=Math.min(r.width/iw,r.height/ih);
   const cw=iw*scale,ch=ih*scale;
   const ox=r.left+(r.width-cw)/2,oy=r.top+(r.height-ch)/2;
@@ -2194,26 +2463,29 @@ function showCur(x,y){
   if(!dot){dot=document.createElement('div');dot.style.cssText='position:fixed;width:18px;height:18px;border:2px solid '+
     'var(--accent);border-radius:50%;background:rgba(34,211,238,.18);transform:translate(-50%,-50%);'+
     'pointer-events:none;z-index:20;box-shadow:0 0 10px rgba(34,211,238,.5)';document.body.appendChild(dot);}
-  const r=img.getBoundingClientRect(),iw=img.naturalWidth||1920,ih=img.naturalHeight||1080;
+  const r=disp().getBoundingClientRect(),iw=disp().videoWidth||disp().naturalWidth||1920,ih=disp().videoHeight||disp().naturalHeight||1080;
   const scale=Math.min(r.width/iw,r.height/ih),cw=iw*scale,ch=ih*scale;
   const ox=r.left+(r.width-cw)/2,oy=r.top+(r.height-ch)/2;
   dot.style.left=(ox+x*cw)+'px';dot.style.top=(oy+y*ch)+'px';dot.style.display='block';
 }
 function hideCur(){if(dot)dot.style.display='none';}
 let lastMove=0;
-img.addEventListener('pointerdown',e=>{const p=pos(e);a=p;cur=p;showCur(p[0],p[1]);api('/input/touch',{action:'down',x:p[0],y:p[1]});e.preventDefault();});
-img.addEventListener('pointermove',e=>{
-  if(!cur)return;const p=pos(e);cur=p;showCur(p[0],p[1]);
-  const now=performance.now();
-  if(now-lastMove>28){lastMove=now; api('/input/touch',{action:'move',x:p[0],y:p[1]});}
-  e.preventDefault();
-});
-img.addEventListener('pointerup',e=>{
-  if(!cur||!a)return;
-  const p=pos(e);
-  api('/input/touch',{action:'up',x:p[0],y:p[1]});
-  cur=null;a=null;setTimeout(hideCur,350);e.preventDefault();});
-img.addEventListener('pointercancel',()=>{cur=null;a=null;hideCur();});
+function attachPointer(el){
+  el.addEventListener('pointerdown',e=>{const p=pos(e);a=p;cur=p;showCur(p[0],p[1]);api('/input/touch',{action:'down',x:p[0],y:p[1]});e.preventDefault();});
+  el.addEventListener('pointermove',e=>{
+    if(!cur)return;const p=pos(e);cur=p;showCur(p[0],p[1]);
+    const now=performance.now();
+    if(now-lastMove>28){lastMove=now; api('/input/touch',{action:'move',x:p[0],y:p[1]});}
+    e.preventDefault();
+  });
+  el.addEventListener('pointerup',e=>{
+    if(!cur||!a)return;
+    const p=pos(e);
+    api('/input/touch',{action:'up',x:p[0],y:p[1]});
+    cur=null;a=null;setTimeout(hideCur,350);e.preventDefault();});
+  el.addEventListener('pointercancel',()=>{cur=null;a=null;hideCur();});
+}
+attachPointer(imgEl);attachPointer(vEl);
 /* ---- keyboard capture ---- */
 const fmap={F1:131,F2:3,F3:4,F4:187,F5:26,F6:24,F7:25,F8:23,F9:19,F10:20,F11:21,F12:22};
 function isGrabHotkey(e){return e.ctrlKey&&e.altKey&&e.code==='KeyG';}
@@ -2232,12 +2504,13 @@ $('textin').addEventListener('keydown',e=>{
   if(e.key==='Enter'&&e.target.value){api('/input/text',{text:e.target.value});e.target.value='';}
 });
 /* ---- stream ---- */
-img.src='/stream.mjpg';
-img.addEventListener('load',()=>{$('liveC').classList.add('live');$('liveT').textContent='live';});
-/* show settings bar when top bar open on coarse pointers */
-const isCoarse=matchMedia('(pointer:coarse)').matches;
-if(isCoarse)$('settings').style.display='flex';
-document.getElementById('menuBtn').addEventListener('click',()=>document.getElementById('bar').classList.toggle('open'));
+imgEl.src='/stream.mjpg';
+imgEl.addEventListener('load',()=>{$('liveC').classList.add('live');$('liveT').textContent='live';});
+vEl.addEventListener('playing',()=>{$('liveC').classList.add('live');$('liveT').textContent='live';});
+
+let pinned=false;
+function togglePin(){pinned=!pinned;document.getElementById('pinBtn').classList.toggle('on',pinned);if(pinned)document.getElementById('bar').classList.add('open');}
+document.getElementById('menuBtn').addEventListener('click',()=>{if(pinned)return;document.getElementById('bar').classList.toggle('open');});
 </script>
 </body>
 </html>
@@ -2332,7 +2605,7 @@ class WebApp:
                        "--no-window", "--no-playback",
                        "--verbosity=error",
                        "--audio-codec=opus", "--audio-bit-rate=128000",
-                       "--record-format=opus", "--record=/dev/stdout"]
+                       "--record-format=opus", "--record=-"]
                 self.audio_proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 self.audio_ff = None
@@ -2369,6 +2642,12 @@ class WebApp:
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
+            def handle(self):
+                try:
+                    super().handle()
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    pass
+
             # ------------------------------------------------------- helpers
             def _body_json(self):
                 length = int(self.headers.get("Content-Length", 0) or 0)
@@ -2402,6 +2681,8 @@ class WebApp:
                     self.end_headers()
                 elif path == "/stream.mjpg":
                     self._stream_mjpg()
+                elif path == "/stream.h264":
+                    self._stream_h264()
                 elif path == "/audio.ogg":
                     self._stream_audio()
                 elif path == "/api/status":
@@ -2455,7 +2736,94 @@ class WebApp:
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
 
-            def _stream_audio(self):
+            def _stream_h264(self):
+                if not HAS_SCRCPY:
+                    self.send_error(503, "scrcpy not installed")
+                    return
+                serial = app.m.serial
+                if not serial:
+                    self.send_error(503, "no device")
+                    return
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                codec = qs.get("codec", ["h264"])[0]
+                p = app.m._snapshot_params()
+                w, h = p.get("w", 1280), p.get("h", 720)
+                fifo = f"/tmp/scterm_mse_{os.getpid()}.h264"
+                try:
+                    if os.path.exists(fifo):
+                        os.remove(fifo)
+                    os.mkfifo(fifo)
+                except OSError:
+                    self.send_error(500, "mkfifo failed")
+                    return
+                codec_map = {"h264": "h264", "hevc": "hevc", "av1": "av1"}
+                scrcpy_codec = codec_map.get(codec, "h264")
+                scrcpy_cmd = ["scrcpy", "-n", "-N",
+                              f"--max-size={max(w, h)}",
+                              f"--record={fifo}",
+                              "--record-format=mkv",
+                              f"--video-codec={scrcpy_codec}",
+                              "-V=error"]
+                if serial:
+                    scrcpy_cmd += ["-s", serial]
+                if p.get("bitrate"):
+                    scrcpy_cmd += [f"--video-bit-rate={p['bitrate']}"]
+                if p.get("fps_cap"):
+                    scrcpy_cmd += [f"--max-fps={p['fps_cap']}"]
+                ct_map = {"h264": "avc1.42E01E", "hevc": "hev1.1.6.L93.B0", "av1": "av01.0.08M.08"}
+                ct = "video/mp4; codecs=\"" + ct_map.get(scrcpy_codec, ct_map["h264"]) + "\""
+                ff_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                          "-fflags", "nobuffer+discardcorrupt",
+                          "-flags", "low_delay",
+                          "-probesize", "32768", "-analyzeduration", "0",
+                          "-f", "matroska", "-i", fifo,
+                          "-c", "copy",
+                          "-movflags", "frag+empty_moov+default_base_moof",
+                          "-f", "mp4", "pipe:1"]
+                scrcpy_proc = None
+                ff_proc = None
+                try:
+                    scrcpy_proc = subprocess.Popen(scrcpy_cmd,
+                                                   stdout=subprocess.DEVNULL,
+                                                   stderr=subprocess.DEVNULL)
+                    ff_proc = subprocess.Popen(ff_cmd,
+                                               stdout=subprocess.PIPE,
+                                               stderr=subprocess.DEVNULL)
+                    self.send_response(200)
+                    self.send_header("Content-Type", ct)
+                    self.send_header("Cache-Control", "no-cache, no-store")
+                    self.send_header("Connection", "keep-alive")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    while True:
+                        chunk = ff_proc.stdout.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(f"{len(chunk):x}\r\n".encode())
+                        self.wfile.write(chunk)
+                        self.wfile.write(b"\r\n")
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                finally:
+                    for proc in (ff_proc, scrcpy_proc):
+                        if proc:
+                            try:
+                                proc.terminate()
+                            except Exception:
+                                pass
+                        if proc:
+                            try:
+                                proc.wait(timeout=2)
+                            except Exception:
+                                try:
+                                    proc.kill()
+                                except Exception:
+                                    pass
+                    try:
+                        os.remove(fifo)
+                    except OSError:
+                        pass
                 if not app.audio_proc or app.audio_proc.poll() is not None:
                     if not app._audio_start():
                         self.send_error(404)
@@ -2535,13 +2903,19 @@ class WebApp:
                 elif path == "/settings/fps":
                     v = int(j.get("fps", 0))
                     if v:
-                        app.fps_cap = max(5, min(60, v))
+                        v = max(5, min(60, v))
+                        app.fps_cap = v
                         if m.is_stream():
-                            m.source.set_fps_cap(0)  # pacing is client-side
+                            m.source.set_fps_cap(v)
                 elif path == "/settings/quality":
                     v = j.get("q", 0)
                     if v and m.is_stream():
                         m.source.set_quality(v)
+                        m.restart()
+                elif path == "/settings/res":
+                    w = int(j.get("w", 0)); h = int(j.get("h", 0))
+                    if w and h and m.is_stream():
+                        m.source.set_size(w, h)
                         m.restart()
                 elif path == "/settings/scale":
                     v = j.get("scale", 0)
@@ -2649,6 +3023,11 @@ def run_tui(args, m):
             sys.stdout.flush()
         except Exception:
             pass
+        try:
+            # stop TUI audio if running (ffplay)
+            ui._tui_audio_stop()
+        except Exception:
+            pass
         m.close()
         if os.environ.get("ZELLIJ"):
             try:
@@ -2672,6 +3051,16 @@ def run_tui(args, m):
         sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h"
                          "\x1b[?1006h\x1b[?7l\x1b[2J")
     sys.stdout.flush()
+
+    # Drain any pending stdin (echoed mouse reports from terminal setup)
+    # and re-apply raw mode in case the escape sequences reset settings.
+    if has_tty:
+        try:
+            if select.select([sys.stdin], [], [], 0.05)[0]:
+                os.read(fd, 4096)
+            tty.setraw(fd)
+        except Exception:
+            pass
 
     ui = TUI(args, m)
     ui.geom = get_term()

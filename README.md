@@ -1,36 +1,38 @@
 # scterm — control an Android device, fast
 
-Two front-ends share **one** high-performance capture pipeline:
+**Go rewrite (v3)** — single static binary, scrcpy-engine capture:
 
 ```
-device screen ─adb screenrecord→ H264 ─ffmpeg→ MJPEG frames
-     ├── TUI   numpy-vectorised half-block renderer · incremental redraw
-     └── WEB   single persistent MJPEG stream · zero re-encode · JSON API
+device screen ─scrcpy (hw H.264+Opus, low latency)─→ mkv FIFO ─ffmpeg→
+     ├─ pipe:1 MJPEG  → TUI half-block renderer · incremental redraw
+     ├─ pipe:3 fMP4   → web MSE <video> (H.264, 2s keyframes)
+     └─ pipe:4 Ogg    → web <audio> (live Opus)
 ```
 
-That means the browser receives the **exact JPEG bytes ffmpeg produces** (no
-second encode), and the terminal decodes with PIL's draft-scaling — the whole
-frame pipeline costs ~3 ms at a 100×38 terminal.
+One ffmpeg decode feeds all three consumers; the terminal and the browser
+share a single capture pipeline with scrcpy-class latency. A screencap
+filler keeps static screens fresh when the display stalls (damage-tracking
+ROMs). Fallback to `screenrecord` when scrcpy is not installed (no audio).
 
-## Quick start
+## Quick start (Go)
 
 ```bash
-# terminal UI (default when launched on a TTY)
-python3 scterm.py
+go build -o scterm .          # needs Go 1.21+, ffmpeg, adb, scrcpy 4.x
 
-# headless web server — view + control from any browser (phone over
-# Tailscale, desktop over LAN, or your future native app)
-python3 scterm.py --web 8000
-
-# both at the same time
-python3 scterm.py --both 8000
-# or: python3 scterm.py --tui --web 8000
+./scterm --tui                # terminal UI (Zellij-auto-aware)
+./scterm --web 8000           # headless web server (MSE + MJPEG fallback)
+./scterm --both 8000          # TUI + web on one pipeline
+./scterm --window             # standalone scrcpy-style window
 ```
 
-Dependencies: **Python 3.10+**, **Pillow**, **adb** with an authorized
-device. Optional but strongly recommended: **ffmpeg** (enables the 30–60 fps
-H264 stream; without it a raw `screencap` fallback runs at ~1–3 fps) and
-**numpy** (vectorises the renderer; pure-Python fallback included). **scrcpy**
+The legacy Python single-file app remains as `scterm.py` (v2) for
+reference; the Go version supersedes it.
+
+## Dependencies
+
+**Go 1.21+** · **ffmpeg** · **adb** · **scrcpy 4.x** (optional but strongly
+recommended — hardware encode + audio; without it a screenrecord fallback
+runs at reduced quality and no audio).
 is optional and only needed for the web audio toggle.
 
 ## Running modes — one, the other, or both
