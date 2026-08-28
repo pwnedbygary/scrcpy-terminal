@@ -738,14 +738,8 @@ func (c *Capture) spawnPipeline() {
 					stdin.Close()
 					return
 				}
-				t0 := time.Now()
 				if _, err := stdin.Write(pkt.Data); err != nil {
 					return
-				}
-				if time.Since(t0) > 60*time.Millisecond {
-					// consumer can't keep up: drop stale frames until the
-					// socket is momentarily idle, then resume fresh
-					ses.Video.DropStaleUntilIdle(400*time.Millisecond, 90*time.Millisecond)
 				}
 			}
 		}()
@@ -1158,10 +1152,14 @@ func (c *Capture) filler() {
 		case <-time.After(200 * time.Millisecond):
 		}
 		c.mu.Lock()
-		stale := c.latest == nil || time.Since(c.lastPub) > 250*time.Millisecond
+		// This ROM's encoder only emits on display damage, so a static
+		// screen stalls the STREAM entirely (~1-2fps). The screencap
+		// filler keeps the viewers alive at ~5fps on static screens —
+		// slower than the old 3fps-only-when-stale (fresher, less laggy).
+		stale := c.latest == nil || time.Since(c.lastPub) > 800*time.Millisecond
 		c.mu.Unlock()
 		if !stale || c.serial == "" {
-			time.Sleep(60 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 			continue
 		}
 		w, h := c.termW, c.termH
