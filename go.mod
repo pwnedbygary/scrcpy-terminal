@@ -7,4 +7,6 @@ require (
 	scterm/engine v0.0.0
 )
 
+require github.com/gorilla/websocket v1.5.3 // indirect
+
 replace scterm/engine => ./engine

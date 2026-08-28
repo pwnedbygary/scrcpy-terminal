@@ -230,11 +230,38 @@ func (p *ProtoInput) Key(code int) {
 	p.ctrl.Key(1, code)
 }
 func (p *ProtoInput) Text(s string) {
-	// best-effort: ASCII via key codes would need a mapping; send the
-	// clipboard route instead (set + paste) — engine control supports it
-	p.ctrl.SetClipboard(s)
+	// INJECT_TEXT (same message the scrcpy client sends) types the text
+	// through the device IME — the old clipboard-without-paste did
+	// nothing visible.
+	p.ctrl.Text(s)
 }
 func (p *ProtoInput) Close() {}
+
+// SwitchInput routes input to the engine's control socket when the
+// capture runs in engine mode (fastest path, no adb process per event),
+// and to the persistent adb shell pipe otherwise. The active sink can
+// change at runtime (^S/menu source cycle), so every call dispatches.
+type SwitchInput struct {
+	cap *Capture
+	pi  *ProtoInput
+	ai  *AdbInput
+}
+
+func (s *SwitchInput) active() Input {
+	if s.cap.useEngine && s.pi.ctrl != nil {
+		return s.pi
+	}
+	return s.ai
+}
+
+func (s *SwitchInput) Tap(x, y int)                  { s.active().Tap(x, y) }
+func (s *SwitchInput) Swipe(x1, y1, x2, y2, ms int)  { s.active().Swipe(x1, y1, x2, y2, ms) }
+func (s *SwitchInput) TouchDown(x, y int)            { s.active().TouchDown(x, y) }
+func (s *SwitchInput) TouchMove(x, y int)            { s.active().TouchMove(x, y) }
+func (s *SwitchInput) TouchUp(x, y int)              { s.active().TouchUp(x, y) }
+func (s *SwitchInput) Key(code int)  { s.active().Key(code) }
+func (s *SwitchInput) Text(t string) { s.active().Text(t) }
+func (s *SwitchInput) Close()        { s.ai.Close() }
 
 // gamepadFeed pushes viewer gamepads to the device. Engine mode: a UHID
 // gamepad (lazy create on first report). No-op without the engine.
@@ -420,27 +447,41 @@ func minF(a, b float64) float64 {
 // replace old ones; the pump always drains the source pipe so ffmpeg never
 // blocks on a missing reader.
 type StreamSlot struct {
-	mu sync.Mutex
-	ch chan []byte
+	mu      sync.Mutex
+	chs     map[chan []byte]struct{} // broadcast to all live subscribers
 }
 
 func (s *StreamSlot) Sub() chan []byte {
+	ch := make(chan []byte, 64)
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ch = make(chan []byte, 256)
-	return s.ch
+	if s.chs == nil {
+		s.chs = map[chan []byte]struct{}{}
+	}
+	s.chs[ch] = struct{}{}
+	s.mu.Unlock()
+	return ch
+}
+
+func (s *StreamSlot) Unsub(ch chan []byte) {
+	s.mu.Lock()
+	delete(s.chs, ch)
+	s.mu.Unlock()
+	close(ch)
 }
 
 func (s *StreamSlot) Publish(b []byte) {
 	s.mu.Lock()
-	ch := s.ch
-	s.mu.Unlock()
-	if ch == nil {
-		return
+	chs := make([]chan []byte, 0, len(s.chs))
+	for ch := range s.chs {
+		chs = append(chs, ch)
 	}
-	select {
-	case ch <- b:
-	default:
+	s.mu.Unlock()
+	for _, ch := range chs {
+		select {
+		case ch <- b:
+		default:
+			// subscriber is slow; drop. They can use a fresh keyframe.
+		}
 	}
 }
 
@@ -461,12 +502,14 @@ type Capture struct {
 	ff   *exec.Cmd
 	stop chan struct{}
 
-	// mjpeg latest-frame cache (TUI-sized pipe:1)
+	// raw yuv420p latest-frame cache (TUI-sized pipe:1)
 	mu         sync.Mutex
 	latest     []byte
+	latestW    int
+	latestH    int
 	seq        uint64
 	lastPub    time.Time
-	streamLast time.Time // last STREAM (readMJPEG) publish, not filler
+	streamLast time.Time // last STREAM (readRaw) publish, not filler
 	firstPub   time.Time
 	pubFPS     float64
 	pubWin     []time.Time
@@ -485,6 +528,8 @@ type Capture struct {
 	codec    string
 	fmp4Init []byte
 	oggInit  []byte
+	fmp4Mux  *engine.FMP4Muxer // only set in engine mode once SPS/PPS are seen
+	fmp4Mu   sync.Mutex        // guards fmp4Mux + fmp4Init writes during config settle
 
 	termW, termH int
 
@@ -525,7 +570,9 @@ func (c *Capture) Start() {
 }
 
 func (c *Capture) spawnPipeline() {
+	logf("spawnPipeline: enter")
 	c.teardown()
+	logf("spawnPipeline: teardown done")
 	c.fmp4 = &StreamSlot{}
 	c.ogg = &StreamSlot{}
 	c.fmp4Init = nil
@@ -537,6 +584,8 @@ func (c *Capture) spawnPipeline() {
 	var ses *engine.Session
 
 	if c.useEngine {
+		logf("spawnPipeline: useEngine path")
+		logf("spawnPipeline: calling engine.Open")
 		// NATIVE ENGINE: raw protocol session (no scrcpy, no mkv)
 		var err error
 		ms := c.maxSize
@@ -549,22 +598,41 @@ func (c *Capture) spawnPipeline() {
 			CodecOptions:     "i-frame-interval=2",
 			ClipboardAutosync: false,
 		})
+		logf("spawnPipeline: engine.Open returned err=%v", err)
 		if err != nil {
-			logf("engine open failed: %v", err)
-			return
+			// Engine failed (push/forward/verify) — don't leave the
+			// viewer on filler-only frames: fall back to the scrcpy
+			// binary path for this session. protoIn.ctrl stays nil, so
+			// input falls back to adb too.
+			logf("engine open failed (%v); falling back to scrcpy binary", err)
+			c.useEngine = false
+			c.protoIn.ctrl = nil
+			if hasScrcpy() {
+				c.engine = "scrcpy"
+			} else {
+				logf("scrcpy binary missing; falling back to screenrecord")
+				c.engine = "screenrecord"
+			}
+		} else {
+			logf("engine: session ready %dx%d codec=%s", ses.Video.Width, ses.Video.Height, ses.Video.Codec)
+			c.ses = ses
+			c.engine = "engine"
+			if c.protoIn != nil {
+				c.protoIn.ctrl = ses.Ctrl
+			}
+			ffArgs = []string{"-hide_banner", "-loglevel", "error",
+				"-flags", "low_delay", "-probesize", "32768", "-analyzeduration", "0",
+				// RAW h264 with wallclock timestamps, NOT mpegts: the Go
+				// TSMuxer's output was rejected by ffmpeg's mpegts demuxer
+				// (garbage frames + "error while decoding MB" — the engine
+				// mode green screen). Annex-B packets fed directly decode
+				// cleanly, and arrival-time PTS stay monotonic through
+				// post-stall bursts (no fake-PTS drops).
+				"-use_wallclock_as_timestamps", "1",
+				"-f", "h264", "-i", "pipe:0"}
 		}
-		// drain the socket backlog accrued during session setup so the
-		// viewer starts at CURRENT content, not old frames
-		ses.Video.DiscardUntilQuiet(250 * time.Millisecond)
-		c.ses = ses
-		c.engine = "engine"
-		if c.protoIn != nil {
-			c.protoIn.ctrl = ses.Ctrl
-		}
-		ffArgs = []string{"-hide_banner", "-loglevel", "error",
-			"-flags", "low_delay", "-probesize", "32768", "-analyzeduration", "0",
-			"-f", "h264", "-i", "pipe:0"}
-	} else if hasScrcpy() {
+	}
+	if ses == nil && !c.useEngine && c.engine == "scrcpy" && hasScrcpy() {
 		fifo := fmt.Sprintf("/tmp/scterm_go_%d.mkv", os.Getpid())
 		os.Remove(fifo)
 		if err := syscall.Mkfifo(fifo, 0o600); err != nil {
@@ -627,17 +695,28 @@ func (c *Capture) spawnPipeline() {
 		}
 	}
 	ffArgs = append(ffArgs,
-		// pipe:1 — TUI-sized mjpeg, fit applied (tiny, instant decodes)
+		// pipe:1 — TUI-sized raw YCbCr 4:2:0, fit applied. No JPEG in
+		// the terminal path at all: decode -> scale -> raw pixels ->
+		// renderer. Faster, lossless, and RLE runs get longer.
 		"-map", "0:v", "-vf", c.mjpegVf(),
-		"-c:v", "mjpeg", "-strict", "unofficial", "-q:v", fmt.Sprint(c.jpegQ),
-		"-f", "image2pipe", "pipe:1",
-		// pipe:3 — fMP4 for MSE (copy)
-		"-map", "0:v", "-c:v", "copy",
-		"-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:3",
-		// pipe:5 — full-size mjpeg for the web viewer
-		"-map", "0:v", "-vf", "scale=960:540",
-		"-c:v", "mjpeg", "-strict", "unofficial", "-q:v", fmt.Sprint(c.jpegQ),
-		"-f", "image2pipe", "pipe:5")
+		"-pix_fmt", "yuv420p", "-f", "rawvideo", "pipe:1")
+	if c.useEngine {
+		// engine mode: ffmpeg decodes for the TUI ONLY. pipe:3 fMP4 is
+		// produced by the Go muxer (runFmp4Pump) and pipe:5 MJPEG is
+		// dropped — the web MSE player owns the browser path, and the
+		// 960x540 JPEG encode per frame was pure CPU stealing frames
+		// from the TUI.
+	} else {
+		ffArgs = append(ffArgs,
+			// pipe:3 — fMP4 for MSE (copy)
+			"-map", "0:v", "-c:v", "copy",
+			"-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:3")
+		ffArgs = append(ffArgs,
+			// pipe:5 — full-size mjpeg for the web viewer (fallback/backdrop)
+			"-map", "0:v", "-vf", "scale=960:540",
+			"-c:v", "mjpeg", "-strict", "unofficial", "-q:v", fmt.Sprint(c.jpegQ),
+			"-f", "image2pipe", "pipe:5")
+	}
 	if c.useEngine {
 		// engine mode: no ogg output from ffmpeg — the engine's opus
 		// packets are muxed to Ogg by us (zero ffmpeg in the audio path)
@@ -652,6 +731,9 @@ func (c *Capture) spawnPipeline() {
 		logf("pipe: %v", err)
 		return
 	}
+	// f4 (fMP4 pipe) exists in BOTH modes so the child's fd numbering is
+	// stable (pipe:3/pipe:4/pipe:5 must keep their fds). Engine mode
+	// closes it right after start — the Go fMP4 muxer owns that path.
 	f4R, f4W, err := os.Pipe()
 	if err != nil {
 		logf("pipe: %v", err)
@@ -707,6 +789,7 @@ func (c *Capture) spawnPipeline() {
 		logf("ffmpeg failed: %v", err)
 		return
 	}
+	logf("ffmpeg started: source=%s", c.sourceLabel())
 	go func(cmd *exec.Cmd) {
 		cmd.Wait()
 		c.engMu.Lock()
@@ -716,17 +799,59 @@ func (c *Capture) spawnPipeline() {
 		c.engMu.Unlock()
 	}(cmd)
 	mjW.Close()
-	f4W.Close()
+	if c.useEngine {
+		// engine mode: ffmpeg never writes fd3 (pipe:3) or fd5 (pipe:5);
+		// the Go fMP4 muxer owns the MSE path and the web MJPEG backdrop
+		// is fed by the screencap filler. Close our copies + skip readers.
+		f4W.Close()
+		f4R.Close()
+		webW.Close()
+		webR.Close()
+	} else {
+		f4W.Close()
+		webW.Close()
+	}
 	if ses == nil {
 		ogW.Close()
 	}
-	webW.Close()
 	c.ff = cmd
 
 	if ses != nil {
-		// engine mode: feed raw H264 to ffmpeg; mux opus->Ogg ourselves
-		stdin := engStdin
+		// engine mode: one Video.Next() reader fans out to two pumps.
+		//
+		// Startup drain: the role-verify shade animation fed the encoder
+		// for ~2s during Open; discard that backlog (full packets, so
+		// framing stays intact) and replay the config packet so decoders
+		// start clean at CURRENT content instead of stale frames.
+		logf("engine: draining startup backlog")
+		config := ses.Video.DrainUntilQuiet(400*time.Millisecond,
+			500*time.Millisecond, 3500*time.Millisecond)
+		if config != nil {
+			logf("engine: drain kept config pkt (%d bytes) for replay", len(config.Data))
+		}
+
+		tsCh := make(chan *engine.Packet, 64)
+		fmp4Ch := make(chan *engine.Packet, 64)
 		go func() {
+			logf("fanout: started")
+			sendTS := func(pkt *engine.Packet) {
+				// Never drop config or keyframes (missing SPS/PPS or a
+				// keyframe = seconds of decoder artifacts). Non-key
+				// frames may drop when the TUI pipe is slow — ffmpeg
+				// recovers on the next keyframe.
+				if !pkt.Config && !pkt.KeyFrame {
+					select {
+					case tsCh <- pkt:
+					default:
+					}
+					return
+				}
+				tsCh <- pkt
+			}
+			if config != nil {
+				sendTS(config)
+				fmp4Ch <- config // blocking: the pump is waiting on it
+			}
 			for {
 				pkt, err := ses.Video.Next()
 				if err != nil {
@@ -735,14 +860,34 @@ func (c *Capture) spawnPipeline() {
 						c.engineDead = true
 					}
 					c.engMu.Unlock()
-					stdin.Close()
+					logf("fanout: video.Next err=%v", err)
+					close(tsCh)
+					close(fmp4Ch)
 					return
 				}
-				if _, err := stdin.Write(pkt.Data); err != nil {
+				if pkt.Config {
+					logf("fanout: got config pkt len=%d", len(pkt.Data))
+				}
+				sendTS(pkt)
+				// fMP4: every frame, BLOCKING. The web MSE needs the
+				// complete stream (real PTS); backpressure here stalls
+				// the socket rather than corrupting playback. The pump
+				// is fast (broadcast to buffered slots), so this only
+				// blocks when a browser is truly stuck.
+				fmp4Ch <- pkt
+			}
+		}()
+		// Pump 1: raw Annex-B H264 straight to ffmpeg's stdin.
+		go func() {
+			for pkt := range tsCh {
+				if _, err := engStdin.Write(pkt.Data); err != nil {
 					return
 				}
 			}
+			engStdin.Close()
 		}()
+		// Pump 2: per-frame fMP4 for the WebSocket / MSE path.
+		go c.runFmp4Pump(fmp4Ch)
 		if ses.Audio != nil {
 			go func() {
 				mux := engine.NewOggMuxer(ogW, 2)
@@ -769,65 +914,70 @@ func (c *Capture) spawnPipeline() {
 		// tap/drag to a wrong position.
 		dw, dh := deviceSize(c.serial)
 		if dw <= 0 || dh <= 0 {
-			dw, dh = ses.Video.Width, ses.Video.Height
+			if ses != nil {
+				dw, dh = ses.Video.Width, ses.Video.Height
+			}
 		}
-		c.protoIn.SetSize(dw, dh)
+		if dw > 0 && dh > 0 {
+			c.protoIn.SetSize(dw, dh)
+		}
 	}
 
-	c.pipesWg.Add(4)
-	go c.readMJPEG(mjR)
-	go c.readCopy(f4R, "fmp4")
+	// reader goroutines: engine mode runs readRaw + ogg only (fMP4 is
+	// the Go muxer, no web JPEG pipe); otherwise all four pipes.
+	if c.useEngine {
+		c.pipesWg.Add(2)
+	} else {
+		c.pipesWg.Add(4)
+	}
+	go c.readRaw(mjR)
+	if !c.useEngine {
+		go c.readCopy(f4R, "fmp4")
+	}
 	go c.readCopy(ogR, "ogg")
-	go c.readWebJpeg(webR)
+	if !c.useEngine {
+		go c.readWebJpeg(webR)
+	}
 }
 
-// readMJPEG splits the image2pipe JPEG stream into frames.
-func (c *Capture) readMJPEG(r *os.File) {
+// readRaw slices fixed-size yuv420p frames out of the pipe:1 byte
+// stream (termW x termH, fit applied by ffmpeg) and publishes them to
+// the TUI. This is the whole TUI video path: no JPEG anywhere.
+func (c *Capture) readRaw(r *os.File) {
 	defer c.pipesWg.Done()
 	defer r.Close()
-	buf := make([]byte, 0, 1<<20)
+	w, h := c.termW, c.termH
+	if w <= 0 || h <= 0 {
+		w, h = 100, 60
+	}
+	w, h = even(w), even(h)
+	frameSize := w * h * 3 / 2 // yuv420p
+	buf := make([]byte, 0, frameSize+65536)
 	tmp := make([]byte, 65536)
-	soi := []byte{0xff, 0xd8}
-	eoi := []byte{0xff, 0xd9}
 	for {
 		n, err := r.Read(tmp)
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
-			if os.Getenv("SCTERM_DEBUG") != "" && c.seq%20 == 0 {
-				dbg("mjpeg reader: +%dB (seq=%d)", n, c.seq)
+			for len(buf) >= frameSize {
+				frame := append([]byte(nil), buf[:frameSize]...)
+				buf = buf[frameSize:]
+				c.publishRaw(frame, w, h, "pipe")
+			}
+			if len(buf) > 2*frameSize {
+				buf = append([]byte(nil), buf[len(buf)-frameSize:]...)
 			}
 		}
 		if err != nil {
-			dbg("mjpeg reader EOF: %v", err)
+			dbg("raw reader EOF: %v", err)
 			return
-		}
-		for {
-			s := indexOf(buf, soi)
-			if s < 0 {
-				break
-			}
-			e := indexOf(buf[s+2:], eoi)
-			if e < 0 {
-				break
-			}
-			e += s + 4
-			frame := append([]byte(nil), buf[s:e]...)
-			buf = buf[e:]
-			c.publishLocked(frame, "pipe")
-		}
-		if len(buf) > 2<<20 {
-			if i := indexOf(buf, soi); i >= 0 {
-				buf = append([]byte(nil), buf[i:]...)
-			} else {
-				buf = buf[:0]
-			}
 		}
 	}
 }
 
-func (c *Capture) publishLocked(frame []byte, srcName string) {
-	// cap: skip if publishing faster than 30fps (the flood is from the
-	// un-throttled mjpeg output; filler is ~2fps and fine)
+// publishRaw publishes one raw yuv420p frame (w x h) to the TUI slot.
+func (c *Capture) publishRaw(frame []byte, w, h int, srcName string) {
+	// cap: skip if publishing faster than ~30fps (the un-throttled
+	// ffmpeg output floods; the filler is ~2fps and fine)
 	c.mu.Lock()
 	last := c.lastPub
 	c.mu.Unlock()
@@ -835,11 +985,12 @@ func (c *Capture) publishLocked(frame []byte, srcName string) {
 		return
 	}
 	if os.Getenv("SCTERM_DEBUG") != "" && c.seq%10 == 0 {
-		dbg("publish seq=%d len=%d src=%s", c.seq, len(frame), srcName)
+		dbg("publish seq=%d %dx%d src=%s", c.seq, w, h, srcName)
 	}
 	now := time.Now()
 	c.mu.Lock()
 	c.latest = frame
+	c.latestW, c.latestH = w, h
 	c.seq++
 	if c.firstPub.IsZero() {
 		c.firstPub = now
@@ -962,9 +1113,15 @@ func (c *Capture) readCopy(r *os.File, kind string) {
 			}
 			if kind == "ogg" && c.oggInit == nil {
 				scan = append(scan, chunk...)
-				if bytes.Count(scan, []byte("OggS")) >= 3 || len(scan) > 1<<20 {
-					// init complete: headers are buffered; the page that
-					// completed them is inside scan, so drop this chunk
+				// init complete once BOTH header pages are buffered
+				// (OpusHead + OpusTags). The engine muxer writes exactly
+				// two pages; counting three OggS markers meant a silent
+				// device (no audio packets yet) never completed init and
+				// /audio.ogg hung forever.
+				if (bytes.Contains(scan, []byte("OpusHead")) &&
+					bytes.Contains(scan, []byte("OpusTags"))) || len(scan) > 1<<20 {
+					// headers are buffered; the page that completed them
+					// is inside scan, so drop this chunk
 					c.oggInit = append([]byte(nil), scan...)
 					continue
 				}
@@ -1040,6 +1197,79 @@ func (c *Capture) SetFit(mode string) {
 	c.spawnPipeline()
 }
 
+// enginePayloadAvailable reports whether the scrcpy server payload is
+// present on the host (the engine's only dependency besides adb). The
+// payload ships with scrcpy; SCRCPY_SERVER overrides the path.
+func enginePayloadAvailable() bool {
+	p := os.Getenv("SCRCPY_SERVER")
+	if p == "" {
+		p = engine.ServerPayloadPath()
+	}
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// setSource switches the capture source and respawns the pipeline.
+// Sources: "engine" (native protocol) | "scrcpy" (binary + mkv) |
+// "screenrecord" (adb). Unavailable sources are refused.
+func (c *Capture) setSource(name string) {
+	switch name {
+	case "engine":
+		if !enginePayloadAvailable() {
+			logf("engine source unavailable (no server payload)")
+			return
+		}
+		c.useEngine = true
+	case "scrcpy":
+		if !hasScrcpy() {
+			logf("scrcpy source unavailable (binary not found)")
+			return
+		}
+		c.useEngine = false
+		c.engine = "scrcpy"
+	case "screenrecord":
+		c.useEngine = false
+		c.engine = "screenrecord"
+	default:
+		return
+	}
+	c.spawnPipeline()
+}
+
+// cycleSource advances to the next available capture source (^S / menu).
+func (c *Capture) cycleSource() {
+	cur := "engine"
+	if !c.useEngine {
+		cur = c.engine
+	}
+	order := []string{"engine", "scrcpy", "screenrecord"}
+	start := 0
+	for i, s := range order {
+		if s == cur {
+			start = i
+			break
+		}
+	}
+	for k := 1; k <= len(order); k++ {
+		next := order[(start+k)%len(order)]
+		switch next {
+		case "engine":
+			if enginePayloadAvailable() {
+				c.setSource(next)
+				return
+			}
+		case "scrcpy":
+			if hasScrcpy() {
+				c.setSource(next)
+				return
+			}
+		case "screenrecord":
+			c.setSource(next)
+			return
+		}
+	}
+}
+
 // ResizeTerm updates the TUI canvas size and respawns the pipeline so
 // ffmpeg fits the pipe:1 output to the new geometry (regex: rare event).
 func (c *Capture) ResizeTerm(w, h int) {
@@ -1059,14 +1289,14 @@ func (c *Capture) RespawnFFMpeg() {
 	c.spawnPipeline()
 }
 
-// Latest returns the most recent complete jpeg frame + seq.
-func (c *Capture) Latest() ([]byte, uint64, bool) {
+// Latest returns the most recent raw yuv420p frame + its size + seq.
+func (c *Capture) Latest() ([]byte, int, int, uint64, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.latest == nil {
-		return nil, 0, false
+		return nil, 0, 0, 0, false
 	}
-	return c.latest, c.seq, true
+	return c.latest, c.latestW, c.latestH, c.seq, true
 }
 
 func (c *Capture) Stats() (fps float64, model string, bat int) {
@@ -1174,12 +1404,7 @@ func (c *Capture) filler() {
 			continue
 		}
 		canvas := fitImage(img, w, h, c.fitMode)
-		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, canvas, &jpeg.Options{Quality: 78}); err != nil {
-			dbg("filler: jpeg encode failed: %v", err)
-			continue
-		}
-		c.publishLocked(buf.Bytes(), "fill")
+		c.publishRaw(toYCbCr420(canvas, w, h), w, h, "fill")
 		// also keep the web cache alive on static screens
 		wimg := fitImage(img, 960, 540, "contain")
 		var wbuf bytes.Buffer
@@ -1190,8 +1415,37 @@ func (c *Capture) filler() {
 			c.webPub = time.Now()
 			c.webMu.Unlock()
 		}
-		dbg("filler: published %d bytes", buf.Len())
+		dbg("filler: published raw frame")
 	}
+}
+
+// toYCbCr420 converts a w×h RGBA image into tightly-packed yuv420p
+// (Y plane, then Cb, then Cr), matching ffmpeg's rawvideo layout so the
+// TUI renderer treats filler frames exactly like stream frames.
+func toYCbCr420(img image.Image, w, h int) []byte {
+	b := img.Bounds()
+	out := make([]byte, w*h*3/2)
+	yp := out[:w*h]
+	cb := out[w*h : w*h+w*h/4]
+	cr := out[w*h+w*h/4:]
+	for y := 0; y < h; y++ {
+		sy := b.Min.Y + (y*(b.Dy()))/h
+		if sy >= b.Max.Y {
+			sy = b.Max.Y - 1
+		}
+		for x := 0; x < w; x++ {
+			sx := b.Min.X + (x*(b.Dx()))/w
+			if sx >= b.Max.X {
+				sx = b.Max.X - 1
+			}
+			r, g, bl, _ := img.At(sx, sy).RGBA()
+			yy, ccb, ccr := color.RGBToYCbCr(uint8(r>>8), uint8(g>>8), uint8(bl>>8))
+			yp[y*w+x] = yy
+			cb[(y/2)*(w/2)+(x/2)] = ccb
+			cr[(y/2)*(w/2)+(x/2)] = ccr
+		}
+	}
+	return out
 }
 
 // grabScreencap pulls a PNG screencap from the device (self-sized).
@@ -1289,6 +1543,116 @@ func (c *Capture) Close() {
 	c.pipesWg.Wait()
 }
 
+// sourceLabel returns a human-readable description of the current capture
+// source for logs/UI. The capture `engine` field is one of
+//   "engine"       — Go native protocol (--engine)
+//   "scrcpy"       — scrcpy binary + mkv FIFO (default, if scrcpy is installed)
+//   "screenrecord" — adb screenrecord + ffmpeg h264 demuxer (fallback)
+func (c *Capture) sourceLabel() string {
+	if c.useEngine {
+		return "engine (native protocol)"
+	}
+	if c.engine == "screenrecord" {
+		return "screenrecord"
+	}
+	return "scrcpy (mkv FIFO)"
+}
+
+// runFmp4Pump consumes H.264 packets from the engine's Video stream and
+// publishes per-frame fragmented-MP4 to the fmp4 slot for the WebSocket
+// transport. The first packet (Config) carries SPS+PPS in Annex-B; we
+// parse those, build the init segment, then push one moof+mdat per
+// subsequent frame. Browsers decode H.264 natively in MSE — there is no
+// server-side re-encode in this path, so latency is bounded by the wire
+// transport (adb forward + TCP), not by ffmpeg's encode.
+func (c *Capture) runFmp4Pump(pktCh <-chan *engine.Packet) {
+	logf("fmp4 pump: started")
+	var w, h int
+	frameCount := 0
+	for pkt := range pktCh {
+		c.fmp4Mu.Lock()
+		mux := c.fmp4Mux
+		c.fmp4Mu.Unlock()
+		if mux == nil {
+			// Wait for the config packet to set up the muxer.
+			if !pkt.Config {
+				continue
+			}
+			sps, pps := engine.ParseSPSPPS(pkt.Data)
+			if len(sps) == 0 || len(pps) == 0 {
+				dbg("fmp4: config packet had no SPS/PPS")
+				continue
+			}
+			w, h = 0, 0
+			if w == 0 || h == 0 {
+				w, h = engine.ExtractSPSDimensions(sps)
+			}
+			if w == 0 || h == 0 {
+				dbg("fmp4: no dimensions; using 1280x720 fallback")
+				w, h = 1280, 720
+			}
+			mux = engine.NewFMP4Muxer()
+			mux.SetSPSPPS(sps, pps, w, h)
+			init := new(bytes.Buffer)
+			if err := mux.WriteInit(init); err != nil {
+				dbg("fmp4 WriteInit: %v", err)
+				continue
+			}
+			c.fmp4Mu.Lock()
+			c.fmp4Mux = mux
+			c.fmp4Init = init.Bytes()
+			c.codec = "avc1." + codecFourCC(sps)
+			c.fmp4Mu.Unlock()
+			dbg("fmp4 ready: %dx%d init=%dB", w, h, init.Len())
+			continue
+		}
+		if pkt.Config {
+			// Re-config mid-stream (resolution change). Reset the muxer.
+			sps, pps := engine.ParseSPSPPS(pkt.Data)
+			if len(sps) == 0 || len(pps) == 0 {
+				continue
+			}
+			if w == 0 || h == 0 {
+				w, h = engine.ExtractSPSDimensions(sps)
+			}
+			if w == 0 || h == 0 {
+				w, h = 1280, 720
+			}
+			newMux := engine.NewFMP4Muxer()
+			newMux.SetSPSPPS(sps, pps, w, h)
+			init := new(bytes.Buffer)
+			if err := newMux.WriteInit(init); err != nil {
+				continue
+			}
+			c.fmp4Mu.Lock()
+			c.fmp4Mux = newMux
+			c.fmp4Init = init.Bytes()
+			c.fmp4Mu.Unlock()
+			mux = newMux
+		}
+		frag := new(bytes.Buffer)
+		if err := mux.WriteFrame(frag, pkt.KeyFrame, pkt.PTS, pkt.Data); err != nil {
+			dbg("fmp4 WriteFrame: %v", err)
+			continue
+		}
+		frameCount++
+		if frameCount%30 == 0 {
+			logf("fmp4 pump: %d frames, last %dB", frameCount, frag.Len())
+		}
+		c.fmp4.Publish(frag.Bytes())
+	}
+}
+
+// codecFourCC returns the avc1 four-character code from an SPS, suitable
+// for the codec string in MediaSource init (e.g. "avc1.640020" for High
+// profile level 3.2). Profile/compat/level are bytes 1,2,3 of the SPS.
+func codecFourCC(sps []byte) string {
+	if len(sps) < 4 {
+		return "42E01E" // baseline 3.0 fallback
+	}
+	return fmt.Sprintf("%02X%02X%02X", sps[1], sps[2], sps[3])
+}
+
 func hasScrcpy() bool {
 	_, err := exec.LookPath("scrcpy")
 	return err == nil
@@ -1312,65 +1676,43 @@ type Renderer struct {
 
 func (r *Renderer) Reset() { r.prev = nil }
 
+// RenderRaw renders a tightly-packed yuv420p frame (as produced by
+// ffmpeg rawvideo and the screencap filler) directly — no image.Decode,
+// no intermediate object. This is the hot TUI path.
+func (r *Renderer) RenderRaw(data []byte, w, h, cols, rows int) []string {
+	if len(data) < w*h*3/2 {
+		return r.blank(cols, rows)
+	}
+	img := &image.YCbCr{
+		Y:              data[:w*h],
+		Cb:             data[w*h : w*h+w*h/4],
+		Cr:             data[w*h+w*h/4:],
+		YStride:        w,
+		CStride:        w / 2,
+		SubsampleRatio: image.YCbCrSubsampleRatio420,
+		Rect:           image.Rect(0, 0, w, h),
+	}
+	return r.renderYCbCr(img, cols, rows)
+}
+
+func (r *Renderer) blank(cols, rows int) []string {
+	out := make([]string, rows)
+	key := "\x1b[38;2;8;8;8m\x1b[48;2;8;8;8m"
+	for i := 0; i < rows; i++ {
+		out[i] = key + strings.Repeat(BLOCK, cols)
+	}
+	return out
+}
+
 // Render converts an image (already scaled to cols x rows*2) into RLE rows.
 func (r *Renderer) Render(img image.Image, cols, rows int) []string {
 	b := img.Bounds()
-	out := make([]string, rows)
 	// fast path: YCbCr planes
 	if yc, ok := img.(*image.YCbCr); ok {
-		ys := yc.Y
-		ysStride := yc.YStride
-		cb := yc.Cb
-		cr := yc.Cr
-		cs := yc.CStride
-		sw, sh := b.Dx(), b.Dy()
-		var top, bot [3]uint8
-		for y := 0; y < rows; y++ {
-			var sb strings.Builder
-			sb.Grow(cols * 10)
-			prevKey := ""
-			run := 0
-			emit := func() {
-				if run > 0 {
-					sb.WriteString(prevKey)
-					for i := 0; i < run; i++ {
-						sb.WriteString(BLOCK)
-					}
-					run = 0
-				}
-			}
-			for x := 0; x < cols; x++ {
-				// proportional + clamped sampling: any source size is safe
-				// (a stale pre-resize frame must never panic the renderer)
-				sx := b.Min.X + (x*sw)/cols
-				if sx >= b.Max.X {
-					sx = b.Max.X - 1
-				}
-				y0 := b.Min.Y + (y*2*sh)/(rows*2)
-				y1 := b.Min.Y + ((y*2+1)*sh)/(rows*2)
-				if y0 >= b.Max.Y {
-					y0 = b.Max.Y - 1
-				}
-				if y1 >= b.Max.Y {
-					y1 = b.Max.Y - 1
-				}
-				top = ycbcrAt(ys, ysStride, cb, cr, cs, sx, y0, b.Min)
-				bot = ycbcrAt(ys, ysStride, cb, cr, cs, sx, y1, b.Min)
-				k := escKey(top, bot)
-				if k == prevKey {
-					run++
-				} else {
-					emit()
-					prevKey = k
-					run = 1
-				}
-			}
-			emit()
-			out[y] = sb.String()
-		}
-		return out
+		return r.renderYCbCr(yc, cols, rows)
 	}
 	// generic path
+	out := make([]string, rows)
 	for y := 0; y < rows; y++ {
 		var sb strings.Builder
 		sb.Grow(cols * 10)
@@ -1403,6 +1745,64 @@ func (r *Renderer) Render(img image.Image, cols, rows int) []string {
 			br, bg, bb, _ := img.At(sx, y1).RGBA()
 			k := escKey([3]uint8{uint8(tr >> 8), uint8(tg >> 8), uint8(tb >> 8)},
 				[3]uint8{uint8(br >> 8), uint8(bg >> 8), uint8(bb >> 8)})
+			if k == prevKey {
+				run++
+			} else {
+				emit()
+				prevKey = k
+				run = 1
+			}
+		}
+		emit()
+		out[y] = sb.String()
+	}
+	return out
+}
+
+// renderYCbCr is the shared YCbCr fast path used by both Render and
+// RenderRaw.
+func (r *Renderer) renderYCbCr(yc *image.YCbCr, cols, rows int) []string {
+	b := yc.Bounds()
+	out := make([]string, rows)
+	ys := yc.Y
+	ysStride := yc.YStride
+	cb := yc.Cb
+	cr := yc.Cr
+	cs := yc.CStride
+	sw, sh := b.Dx(), b.Dy()
+	var top, bot [3]uint8
+	for y := 0; y < rows; y++ {
+		var sb strings.Builder
+		sb.Grow(cols * 10)
+		prevKey := ""
+		run := 0
+		emit := func() {
+			if run > 0 {
+				sb.WriteString(prevKey)
+				for i := 0; i < run; i++ {
+					sb.WriteString(BLOCK)
+				}
+				run = 0
+			}
+		}
+		for x := 0; x < cols; x++ {
+			// proportional + clamped sampling: any source size is safe
+			// (a stale pre-resize frame must never panic the renderer)
+			sx := b.Min.X + (x*sw)/cols
+			if sx >= b.Max.X {
+				sx = b.Max.X - 1
+			}
+			y0 := b.Min.Y + (y*2*sh)/(rows*2)
+			y1 := b.Min.Y + ((y*2+1)*sh)/(rows*2)
+			if y0 >= b.Max.Y {
+				y0 = b.Max.Y - 1
+			}
+			if y1 >= b.Max.Y {
+				y1 = b.Max.Y - 1
+			}
+			top = ycbcrAt(ys, ysStride, cb, cr, cs, sx, y0, b.Min)
+			bot = ycbcrAt(ys, ysStride, cb, cr, cs, sx, y1, b.Min)
+			k := escKey(top, bot)
 			if k == prevKey {
 				run++
 			} else {
@@ -1618,6 +2018,47 @@ func chip(s, fg, bg string) string {
 	return sb.String()
 }
 
+// truncateVisible cuts s to at most cols VISIBLE runes, skipping ANSI
+// escape sequences (counting raw runes truncates on color codes and
+// hides half the status bar).
+func truncateVisible(s string, cols int) string {
+	if cols <= 0 {
+		return ""
+	}
+	visible := 0
+	end := len(s)
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			// ESC [ ... final byte (0x40-0x7e), or a 2-byte seq
+			j := i + 1
+			if j < len(s) && s[j] == '[' {
+				j++
+				for j < len(s) && !(s[j] >= 0x40 && s[j] <= 0x7e) {
+					j++
+				}
+				if j < len(s) {
+					j++
+				}
+			} else if j < len(s) {
+				j++
+			}
+			i = j
+			continue
+		}
+		_, sz := utf8.DecodeRuneInString(s[i:])
+		if sz <= 0 {
+			sz = 1
+		}
+		visible++
+		if visible > cols {
+			end = i
+			break
+		}
+		i += sz
+	}
+	return s[:end]
+}
+
 func (t *TUI) topBar(cols, canvasRows int, ms float64, capMode string) string {
 	fps, model, bat := t.cap.Stats()
 	var sb strings.Builder
@@ -1643,10 +2084,7 @@ func (t *TUI) topBar(cols, canvasRows int, ms float64, capMode string) string {
 		sb.WriteString(" " + chip(fmt.Sprintf("bat %d%%", bat), bcol, ""))
 	}
 	s := sb.String()
-	if len([]rune(s)) > cols {
-		s = string([]rune(s)[:cols])
-	}
-	return s
+	return truncateVisible(s, cols)
 }
 
 func (t *TUI) bottomBar(cols int) string {
@@ -1670,10 +2108,7 @@ func (t *TUI) bottomBar(cols int) string {
 			sb.WriteString(string(SPARK[idx]))
 		}
 	}
-	s := sb.String() + RESET
-	if len([]rune(s)) > cols {
-		s = string([]rune(s)[:cols])
-	}
+	s := truncateVisible(sb.String(), cols) + RESET
 	return s
 }
 
@@ -1683,7 +2118,7 @@ func (t *TUI) helpOverlay(cols, lines int) string {
 		" Click / drag / wheel .. tap / live touch / scroll",
 		" Typing + Enter ........ text input",
 		" F1..F12 ............... menu home back recents power vol dpad",
-		" ^T menu · ^F fit · ^S stream toggle",
+		" ^T menu · ^F fit · ^S source cycle",
 		" F12 / Ctrl-Alt-G ...... grab mode (keys to device)",
 		" Esc ×2 ................ quit",
 	}
@@ -1694,7 +2129,7 @@ func (t *TUI) menuOverlay(cols, lines int) string {
 	items := []string{
 		fmt.Sprintf("Fit mode ............ %s", t.fit),
 		fmt.Sprintf("TUI fps ............. %d", t.cap.fpsCap),
-		fmt.Sprintf("Engine .............. %s", t.cap.engine),
+		fmt.Sprintf("Source .............. %s", t.cap.sourceLabel()),
 	}
 	lines2 := []string{
 		C_ACCENT + " ── menu (arrows, enter, esc) ──" + RESET,
@@ -1918,13 +2353,8 @@ func (t *TUI) handle(ev event) {
 		t.cap.SetFit(t.fit)
 		t.prevRows = nil
 	case evStream:
-		// scrcpy -> screenrecord fallback toggle
-		if t.cap.engine == "scrcpy" {
-			t.cap.engine = "screenrecord"
-		} else {
-			t.cap.engine = "scrcpy"
-		}
-		t.cap.spawnPipeline()
+		// cycle the capture source: engine -> scrcpy -> screenrecord
+		t.cap.cycleSource()
 		t.prevRows = nil
 	case evGrab:
 		t.toggleGrab()
@@ -2031,13 +2461,8 @@ func (t *TUI) menuSelect() {
 			fps = 8
 		}
 		t.cap.fpsCap = fps
-	case 2: // engine
-		if t.cap.engine == "scrcpy" {
-			t.cap.engine = "screenrecord"
-		} else {
-			t.cap.engine = "scrcpy"
-		}
-		t.cap.spawnPipeline()
+	case 2: // source
+		t.cap.cycleSource()
 		t.prevRows = nil
 	}
 	t.menuOpen = false
@@ -2176,9 +2601,11 @@ func (t *TUI) Run() {
 		// after it stays stable ~400ms (window drags fire many SIGWINCHes
 		// and each apply respawns the pipeline)
 		cols, lines := getTermSize()
-		if cols != t.cols || lines != t.lines {
-			t.resizeAt = time.Now()
-			t.resizeW, t.resizeH = cols, lines
+		if cols >= 20 && lines >= 8 { // ignore unsized ptys (0x0)
+			if cols != t.cols || lines != t.lines {
+				t.resizeAt = time.Now()
+				t.resizeW, t.resizeH = cols, lines
+			}
 		}
 		if t.resizeW > 0 && !t.resizeAt.IsZero() &&
 			time.Since(t.resizeAt) > 400*time.Millisecond {
@@ -2201,35 +2628,32 @@ func (t *TUI) Run() {
 		if t.rows == 0 {
 			continue
 		}
-		// frame draw at interval — decode, fit (contain/cover/fill), render
-		if img, seq, ok := t.cap.Latest(); ok && seq != frameSeq &&
+		// frame draw at interval — raw yuv420p, no JPEG decode
+		if img, w, h, seq, ok := t.cap.Latest(); ok && seq != frameSeq &&
 			time.Since(lastDraw) >= interval {
 			frameSeq = seq
 			lastDraw = time.Now()
-			img2, err := jpeg.Decode(bytes.NewReader(img))
-			if err == nil {
-				t0 := time.Now()
-				rows := t.renderer.Render(img2, t.cols, t.rows)
-				ms := float64(time.Since(t0).Microseconds()) / 1000.0
+			t0 := time.Now()
+			rows := t.renderer.RenderRaw(img, w, h, t.cols, t.rows)
+			ms := float64(time.Since(t0).Microseconds()) / 1000.0
 
-				// fps EMA
-				dt := time.Since(t.lastFrameT).Seconds()
-				t.lastFrameT = time.Now()
-				if dt > 0 {
-					inst := 1.0 / dt
-					if t.fpsEMA == 0 {
-						t.fpsEMA = inst
-					} else {
-						t.fpsEMA = t.fpsEMA*0.85 + inst*0.15
-					}
+			// fps EMA
+			dt := time.Since(t.lastFrameT).Seconds()
+			t.lastFrameT = time.Now()
+			if dt > 0 {
+				inst := 1.0 / dt
+				if t.fpsEMA == 0 {
+					t.fpsEMA = inst
+				} else {
+					t.fpsEMA = t.fpsEMA*0.85 + inst*0.15
 				}
-				_ = ms
-				t.draw(rows, ms, t.cap.engine)
-				t.frames++
-				t.spark = append(t.spark, minF(1.0, ms/50.0))
-				if len(t.spark) > 24 {
-					t.spark = t.spark[1:]
-				}
+			}
+			_ = ms
+			t.draw(rows, ms, t.cap.engine)
+			t.frames++
+			t.spark = append(t.spark, minF(1.0, ms/50.0))
+			if len(t.spark) > 24 {
+				t.spark = t.spark[1:]
 			}
 		}
 	}
@@ -2259,9 +2683,8 @@ type WebApp struct {
 
 func NewWebApp(c *Capture, inp Input) *WebApp {
 	w := &WebApp{cap: c, inp: inp, fpsCap: 30, quality: 4, scale: 100}
-	if c.useEngine {
-		w.gpad = &gamepadFeed{cap: c}
-	}
+	// gamepad feed is always armed; it no-ops until engine mode is live
+	w.gpad = &gamepadFeed{cap: c}
 	return w
 }
 
@@ -2501,14 +2924,29 @@ func (w *WebApp) setWake(res http.ResponseWriter, req *http.Request) {
 }
 
 // streamFmp4 serves the live fragmented MP4 (one consumer; reconnect on EOF).
+// streamFmp4 serves the live fragmented-MP4 stream for MSE. It waits
+// for the init segment (moov/avcC — the engine muxer builds it from the
+// first SPS/PPS packet) so a browser that connects during startup never
+// gets headerless fragments, mirroring the /audio.ogg init wait.
 func (w *WebApp) streamFmp4(res http.ResponseWriter, req *http.Request) {
 	ch := w.cap.fmp4.Sub()
+	defer w.cap.fmp4.Unsub(ch)
 	fl := res.(http.Flusher)
 	res.Header().Set("Content-Type", "video/mp4")
 	res.Header().Set("Cache-Control", "no-cache")
-	if init := w.cap.fmp4Init; init != nil {
-		res.Write(init)
-		fl.Flush()
+	// wait for init (subscribe FIRST so no frames are missed once we
+	// start reading; the slot buffers ~64 chunks meanwhile)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if init := w.cap.fmp4Init; init != nil {
+			res.Write(init)
+			fl.Flush()
+			break
+		}
+		if req.Context().Err() != nil || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	for {
 		select {
@@ -2691,6 +3129,7 @@ const $=id=>document.getElementById(id);
 let st=null,grab=false,audioOn=false,usingMSE=false;
 async function api(p,body){try{await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});}catch(e){}}
 /* ---- status ---- */
+let transportDecided=false;
 async function pollStatus(){
   try{
     const j=await(await fetch('/api/status')).json();st=j;
@@ -2703,6 +3142,15 @@ async function pollStatus(){
     $('src').textContent=j.source||'-';
     if(j.serial){$('noconn').classList.add('hide');$('liveC').classList.add('live');$('liveT').textContent='LIVE';}
     else{$('noconn').classList.remove('hide');$('liveC').classList.remove('live');$('liveT').textContent='connecting';}
+    // DEFAULT TRANSPORT: MSE h264 when the server reports an avc1 codec
+    // (engine/scrcpy paths), else MJPEG. Decided on the FIRST status that
+    // carries a codec — at page load st is still null, so the decision
+    // must not be made before this point (the old code always fell back
+    // to the laggy MJPEG transport).
+    if(!transportDecided){
+      if(j.codec&&j.codec.startsWith('avc1')){transportDecided=true;useMSE();}
+      else if(j.serial){transportDecided=true;useMJPEG();}
+    }
   }catch(e){}
 }
 setInterval(pollStatus,2500);pollStatus();
@@ -2735,12 +3183,6 @@ function useMSE(){
 }
 function useMJPEG(){usingMSE=false;$('v').classList.remove('on');$('vimg').classList.remove('off');$('vimg').src='/stream.mjpg';}
 function fallbackMJPEG(){try{$('v').src='';}catch(e){}useMJPEG();}
-// DEFAULT TRANSPORT: MJPEG. The MSE fMP4 path only delivers fragments
-// at keyframes (2s, and some ROMs ignore the option entirely), so during
-// a drag the <video> froze while the live mjpg backdrop ran at 28fps —
-// that was the 2-3s feedback lag. MJPEG updates every frame (~35ms).
-// (MSE remains available for a future smooth-playback toggle.)
-useMJPEG();
 /* ---- pointer: live touch ---- */
 function pos(e){
   const el=usingMSE?$('v'):$('vimg');
@@ -2863,19 +3305,20 @@ func listDevices() []string {
 
 func main() {
 	var (
-		tui     bool
-		web     bool
-		webPort = 8000
-		window  bool
-		serial  string
-		fps     int
-		fit     string
-		maxSize int
-		bitrate int
-		jpegQ   int
-		wake    bool
-		stay    bool
+		tui       bool
+		web       bool
+		webPort   = 8000
+		window    bool
+		serial    string
+		fps       int
+		fit       string
+		maxSize   int
+		bitrate   int
+		jpegQ     int
+		wake      = true // scrcpy turns the screen on by default; --no-wake disables
+		stay      bool
 		useEngine bool
+		noEngine  bool
 	)
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -2890,6 +3333,8 @@ func main() {
 		switch {
 		case a == "--engine":
 			useEngine = true
+		case a == "--no-engine":
+			noEngine = true
 		case a == "--tui":
 			tui = true
 		case a == "--web":
@@ -2943,7 +3388,7 @@ func main() {
 		}
 	}
 	if fps == 0 {
-		fps = 18
+		fps = 30
 	}
 	if maxSize == 0 {
 		maxSize = 1280
@@ -2984,23 +3429,54 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The native engine (reverse-engineered scrcpy wire protocol) is the
+	// default capture for the TUI and web: no scrcpy binary, no mkv FIFO,
+	// no ffmpeg remux hop. Falls back per-source via the ^S/menu cycle.
+	if noEngine {
+		useEngine = false
+	} else if !useEngine {
+		useEngine = enginePayloadAvailable()
+	}
+	if useEngine {
+		logf("capture: engine (native scrcpy protocol)")
+	} else if hasScrcpy() {
+		logf("capture: scrcpy binary (--no-engine)")
+	} else {
+		logf("capture: screenrecord fallback")
+	}
+
 	cap := NewCapture(serial, maxSize, bitrate, jpegQ)
 	cap.fpsCap = fps
 	cap.fitMode = fit
 	cap.useEngine = useEngine
-	var inp Input
-	if useEngine {
-		pi := &ProtoInput{serial: serial, ctrl: nil}
-		cap.protoIn = pi
-		inp = pi
-	} else {
-		inp = NewAdbInput(serial)
-	}
+	pi := &ProtoInput{serial: serial, ctrl: nil}
+	cap.protoIn = pi
+	inp := &SwitchInput{cap: cap, pi: pi, ai: NewAdbInput(serial)}
 
 	if wake {
 		wakeUnlock(serial, stay)
 	}
 	setRotation(serial, 0)
+
+	// Set the TUI canvas size BEFORE the first pipeline spawns so the
+	// engine session and ffmpeg start at the final geometry (a startup
+	// resize used to respawn everything and waste a full session).
+	tuiMode := tui || !web
+	if tuiMode {
+		cols, lines := getTermSize()
+		if cols < 20 {
+			cols = 80 // some ptys report 0 until the window is sized
+		}
+		if lines < 10 {
+			lines = 24
+		}
+		cap.termW, cap.termH = cols, (lines-2)*2
+		if cap.termH < 8 {
+			cap.termH = 8
+		}
+	} else {
+		cap.termW, cap.termH = 640, 360 // web-only default canvas
+	}
 	cap.Start()
 
 	if useEngine {
@@ -3031,16 +3507,20 @@ func main() {
 		}()
 	}
 
-	if tui || !web {
+	if tuiMode {
 		t := NewTUI(cap, inp, fit, true)
-		// capture must know the terminal size for the mjpeg vf
 		cols, lines := getTermSize()
+		if cols < 20 {
+			cols = 80
+		}
+		if lines < 10 {
+			lines = 24
+		}
 		t.cols, t.lines = cols, lines
 		t.rows = lines - 2
 		if t.rows < 4 {
 			t.rows = 4
 		}
-		cap.ResizeTerm(cols, t.rows*2)
 		defer t.exit()
 		t.Run()
 	} else {
@@ -3062,15 +3542,19 @@ Usage: scterm [flags]
   --web[=PORT]     web viewer only (default port 8000)
   --both[=PORT]    TUI + web
   --window         standalone scrcpy-style window (passthrough to scrcpy)
+  --engine         force the native engine (default when the scrcpy
+                   server payload is present)
+  --no-engine      force the scrcpy-binary path (or screenrecord fallback)
   -s SERIAL        device serial (default: first adb device)
   --fps N          TUI refresh cap (default 30)
   --fit MODE       contain | cover | fill (default contain)
   --max-size N     stream max dimension (default 1280)
   --bit-rate N     video bitrate in bps (default 8000000)
-  -q N             MJPEG quality 1-10 (default 4)
+  -q N             web JPEG quality 1-10 (default 4)
   --no-wake        don't wake the device on start
   --version        print version
 
-Env: SCRCPY_ARGS — extra args passed to the scrcpy engine.
+Env: SCRCPY_ARGS — extra args passed to the scrcpy engine (--window).
+     SCRCPY_SERVER — alternate path to the scrcpy-server payload.
 `)
 }

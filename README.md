@@ -1,28 +1,32 @@
 # scterm — control an Android device, fast
 
-**Go rewrite (v3)** — single static binary, scrcpy-engine capture:
+**Go rewrite (v3)** — single static binary, **native scrcpy wire protocol**
+engine (reverse-engineered scrcpy 4.1, no scrcpy binary needed):
 
 ```
-device screen ─scrcpy (hw H.264+Opus, low latency)─→ mkv FIFO ─ffmpeg→
-     ├─ pipe:1 MJPEG  → TUI half-block renderer · incremental redraw
-     ├─ pipe:3 fMP4   → web MSE <video> (H.264, 2s keyframes)
-     └─ pipe:4 Ogg    → web <audio> (live Opus)
+device screen ─engine (hw H.264+Opus, scrcpy wire protocol)─→ fanout
+     ├─ raw Annex-B H264 → ffmpeg decode → raw YCbCr → TUI half-block renderer
+     ├─ per-frame fMP4 (Go muxer, real PTS) → web MSE <video>
+     └─ Ogg Opus (Go muxer) → web <audio>
 ```
 
-One ffmpeg decode feeds all three consumers; the terminal and the browser
-share a single capture pipeline with scrcpy-class latency. A screencap
-filler keeps static screens fresh when the display stalls (damage-tracking
-ROMs). Fallback to `screenrecord` when scrcpy is not installed (no audio).
+The TUI path has **no JPEG anywhere**: ffmpeg decodes and scales to the
+terminal size, and the renderer draws raw YUV pixels directly. One ffmpeg
+decode feeds the terminal; the web gets browser-native H.264 decode via
+MSE. Fallbacks: scrcpy binary → mkv FIFO when the engine payload is
+missing, adb screenrecord when neither exists. A screencap filler keeps
+static screens fresh (damage-tracking ROMs).
 
 ## Quick start (Go)
 
 ```bash
-go build -o scterm .          # needs Go 1.21+, ffmpeg, adb, scrcpy 4.x
+go build -o scterm .          # needs Go 1.21+, ffmpeg, adb, scrcpy-server payload
 
-./scterm --tui                # terminal UI (Zellij-auto-aware)
-./scterm --web 8000           # headless web server (MSE + MJPEG fallback)
+./scterm --tui                # terminal UI (Zellij-auto-aware) — engine default
+./scterm --web 8000           # headless web server (MSE H264 + audio)
 ./scterm --both 8000          # TUI + web on one pipeline
-./scterm --window             # standalone scrcpy-style window
+./scterm --window             # standalone scrcpy-style window (passthrough)
+./scterm --no-engine          # force the scrcpy-binary path
 ```
 
 The legacy Python single-file app remains as `scterm.py` (v2) for
@@ -30,54 +34,56 @@ reference; the Go version supersedes it.
 
 ## Dependencies
 
-**Go 1.21+** · **ffmpeg** · **adb** · **scrcpy 4.x** (optional but strongly
-recommended — hardware encode + audio; without it a screenrecord fallback
-runs at reduced quality and no audio).
-is optional and only needed for the web audio toggle.
+**Go 1.21+** · **ffmpeg** · **adb** · **scrcpy-server payload** at
+`/usr/share/scrcpy/scrcpy-server` (ships with scrcpy; the `scrcpy`
+binary itself is optional — only needed for `--window` and the
+`--no-engine` fallback).
 
-## Running modes — one, the other, or both
+## Capture sources
 
-| Flag | What it runs |
-|------|--------------|
-| `--tui` | terminal UI only |
-| `--web [PORT]` | web viewer only (headless, default port 8000) |
-| `--both [PORT]` | terminal UI **and** web viewer |
+| Source | How | When |
+|---|---|---|
+| `engine` | native Go scrcpy-4.1-protocol client (default) | server payload present |
+| `scrcpy` | scrcpy binary → mkv FIFO → ffmpeg | `--no-engine`, or engine fails |
+| `screenrecord` | adb screenrecord → h264 pipe | neither available |
 
-With no flags: TUI when stdin is a TTY, otherwise a clear error. `--both`
-with no TTY silently drops to web-only.
+Cycle with `Ctrl-S` or the menu (`Ctrl-T` → Source). The engine is a
+reverse-engineering of the scrcpy 4.1 server protocol (see
+`engine/PROTOCOL.md`): the same server payload, the same wire framing —
+no scrcpy process, no mkv remux, no SDL.
 
 ## Flags
 
 ```
 -s, --serial SERIAL      device serial (default: first adb device)
-    --pick               interactive device picker (USB + WiFi scan + IP)
-    --fps N              TUI refresh cap (default 20; 60 ≈ screen feed rate)
-    --web-fps N          web stream frame cap (default 30)
+    --tui                terminal UI (default if stdin is a tty)
+    --web[=PORT]         web viewer only (default port 8000)
+    --both[=PORT]        TUI + web
+    --window             standalone scrcpy-style window (passthrough)
+    --engine             force the native engine (default when the
+                         server payload is present)
+    --no-engine          force the scrcpy-binary path (or screenrecord)
+    --fps N              TUI refresh cap (default 30)
     --fit MODE           contain | cover | fill (default contain)
-    --colors MODE        auto | truecolor | 256
-    --stream / --no-stream    H264 stream (default if ffmpeg present) vs raw
-    --max-size WxH       stream cap, aspect preserved (default 1280x1280)
-    --bitrate N          screenrecord bit rate, bps (default 6 Mbps)
-    --jpeg-quality Q     MJPEG quality 1–10 (default 4)
-    --web-scale PCT      stream downscale % (default 100)
-    --bind ADDR          web bind address (default 0.0.0.0)
-    --zellij             Zellij/phone-friendly mode (no alt-screen, no mouse)
-    --chrome-bars        TUI status bars on/off (default on in TTY)
+    --max-size WxH       stream cap, aspect preserved (default 1280)
+    --bit-rate N         screenrecord bit rate, bps (default 8 Mbps)
+    -q N                 web MJPEG quality 1–10 (default 4)
     --no-wake            don't wake/unlock the device on launch
     --no-stay-awake      don't keep the device screen on while running
-    --debug              diagnostics to /tmp/scterm_debug.log
+    --version
+Env: SCRCPY_ARGS — extra args for the scrcpy engine (--window).
+     SCRCPY_SERVER — alternate path to the scrcpy-server payload.
 ```
 
 ## Terminal UI
 
 ```
-┌─ Retroid Pocket 6  49016109  1080×1920  stream  33.8 fps  0.9 ms  fit contain  bat 80%
+┌─ Retroid Pocket 6  49016109  1920×1080  engine  33.8 fps  0.9 ms  fit contain  bat 80%
 │  ▀▀▀▀▀▀▀▀ device screen renders here ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-│  ┌─ scterm 2.0.0 ───────────────────────────┐
+│  ┌─ scterm 3.0.0 ───────────────────────────┐
 │  │ ▶ Fit mode                        contain │   ← Ctrl-T menu
-│  │    Capture                          stream│
-│  │    TUI fps                              20│
-│  │    Bitrate                          6 Mb/s│
+│  │    TUI fps                              30│
+│  │    Source                      engine    │   ← cycle engine/scrcpy/screenrecord
 │  │    ...                                   │
 └─ Click=tap  Drag=touch  Wheel=scroll  Type=text  ?=help  ^T=menu  Esc×2=quit ▁▂▃▅▆▇█
 ```
@@ -85,100 +91,75 @@ with no TTY silently drops to web-only.
 | Input | Action |
 |---|---|
 | Click / drag / wheel | tap / live touch drag / scroll |
-| Typing + Enter | text input (`input text`) |
+| Typing + Enter | text input (`INJECT_TEXT` in engine mode — real IME text) |
 | F1–F12, arrows | menu, home, back, recents, power, volume, dpad |
 | `?` | help overlay (press again to close) |
 | `Ctrl-T` | menu overlay (arrows + Enter, Esc/^T/Tab closes) |
 | `Ctrl-F` | cycle fit mode |
-| `Ctrl-S` / `F12` | toggle stream ↔ screencap |
+| `Ctrl-S` | cycle capture source |
 | `Ctrl-Alt-G` / `F12` | grab mode — keys go straight to the device (also locks Zellij) |
 | `Esc` ×2 | quit |
-| click, hold, arrows | "pending tap": preview + nudge ±12 px, Enter confirms |
 
-Dragging acts exactly like a finger: the device receives `DOWN` the instant
-the button is pressed, live `MOVE` events as you drag (throttled to ~35 Hz),
-and `UP` on release — apps react in real time, and long-press works by
-holding the button.
-
-Rendering is incremental: only changed rows are re-emitted, so slow links
-and tmux/ssh sessions stay fluid. A live sparkline on the status bar shows
-recent frame-render time.
+Rendering is raw-YCbCr: ffmpeg decodes the H.264 stream, scales to the
+terminal size, and the renderer draws half-blocks directly (~1ms/frame).
+Incremental redraw (only changed rows) keeps slow links fluid.
 
 ## Web viewer
 
-One `<img src="/stream.mjpg">` — a single multipart stream, no polling, no
-per-frame HTTP overhead. Features:
+MSE H.264 by default (engine path): the browser decodes the device's
+hardware H.264 natively from per-frame fragmented MP4 with real PTS —
+sub-frame glass-to-glass, no server-side re-encode. MJPEG fallback when
+no avc1 codec is reported. Features:
 
 - tap / drag-to-swipe with a cursor dot, pinch-safe pointer handling
 - pointer-lock keyboard capture (`Ctrl-Alt-G`) with Android F-key mapping
 - on-screen keyboard + text bar on touch devices
-- device picker (USB list, WiFi/Tailscale scan, manual IP) with **live
-  switching** without restarting the server
-- sliders that actually work: FPS pacing, screenrecord bitrate, JPEG
-  quality, stream scale — each restarts the pipeline with the new params
-- rotate device, wake, stay-awake, audio (via scrcpy, if installed)
 - HUD chips: live/fps/resolution/battery · glass UI, dark theme
+- audio toggle (Ogg Opus, live)
 
 ## JSON API (the future native-app surface)
 
-The API is deliberately REST-shaped and dependency-free, so a Rust/Go
-daemon or an Android client can reuse the exact same endpoints:
-
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/status` | serial, model, size, battery, wake, source, bitrate/q/scale, devices |
-| `GET /api/devices` | USB devices from `adb devices` |
-| `POST /api/scan` | scan WiFi/Tailscale for adb (port 5555) |
-| `POST /api/connect` | `{"serial": "…"}` — hot-switch device |
+| `GET /api/status` | serial, model, size, battery, source, codec, fps |
 | `POST /input/tap` | `{"x": 0.5, "y": 0.5}` — **normalised** 0–1 coords |
 | `POST /input/swipe` | `{"x1","y1","x2","y2"}` normalised |
+| `POST /input/touch` | `{"act":"down|move|up","x","y"}` — live drag |
 | `POST /input/key` | `{"code": 82}` or `?code=82` |
-| `POST /input/text` | `{"text": "hello world"}` (auto-chunked) |
-| `POST /input/audio` | `{"enabled": true}` (requires scrcpy; live **Ogg Opus** at `/audio.ogg`) |
-| `GET /audio.ogg` | live Ogg Opus stream from the device (browser-plays via 🔊) |
-| `POST /settings/bitrate` | `{"bitrate": 8000000}` |
-| `POST /settings/fps` | `{"fps": 30}` |
-| `POST /settings/quality` | `{"q": 4}` — MJPEG quality 1–10 |
-| `POST /settings/scale` | `{"scale": 75}` — stream downscale % |
-| `POST /settings/rotate` | `{"deg": 90}` |
-| `POST /settings/wake` | wake + dismiss keyguard |
-| `GET /stream.mjpg` | multipart MJPEG live stream |
+| `POST /input/text` | `{"text": "hello world"}` (INJECT_TEXT in engine mode) |
+| `POST /input/scroll` | `{"x","y","dx","dy"}` |
+| `POST /input/gamepad` | viewer gamepad state → UHID gamepad on device |
+| `POST /input/audio` | `{"enabled": true}` |
+| `GET /stream.fmp4` | live fragmented MP4 (MSE) |
+| `GET /stream.mjpg` | multipart MJPEG fallback |
+| `GET /audio.ogg` | live Ogg Opus stream |
+| `POST /settings/fps` · `/quality` · `/scale` · `/rotate` · `/wake` | live settings |
 
 ## Performance notes
 
-- **Input**: one persistent `adb shell` pipe replaces per-event `adb`
-  process spawns — event latency drops from ~80 ms to ~2 ms.
-- **Capture**: `screenrecord` → `ffmpeg -flags low_delay -probesize 32768
-  -strict unofficial -c:v mjpeg -f image2pipe`. The `-fflags nobuffer
-  -probesize 32` combo that appears in most scripts **starves the h264
-  demuxer on live pipes** — 32 KB probe + low_delay streams at full rate
-  with the first frame in ~1 s.
-- **Raw fallback** (`--no-stream`, no ffmpeg): raw RGBA `screencap` (16-byte
-  header-aware) skips device-side PNG encoding — ~2× the old `-p` path's
-  speed; the web downscales to ≤1280 before encoding JPEG.
-- **Stale pipelines**: the app `pkill`s orphaned on-device `screenrecord`s
-  before starting, and a watchdog respawns a stalled stream or falls back
-  to raw capture, so the two front-ends never silently freeze.
-- The TUI decodes JPEG with `Image.draft()` — decompress only at the
-  resolution the terminal needs.
+- **Engine**: one `adb forward` tunnel carries video + audio + control
+  sockets; input is a single persistent control socket (TCP_NODELAY) —
+  no per-event adb process spawns.
+- **Startup drain**: the role-verify animation backlog is discarded
+  (framing-safe, full packets) and the SPS/PPS config packet replayed, so
+  viewers start at current content instead of ~2s of stale frames.
+- **TUI**: ffmpeg `-f h264 -use_wallclock_as_timestamps 1` (arrival-time
+  PTS survive post-stall bursts — the fake-PTS demux dropped them) →
+  raw yuv420p → direct renderer. No JPEG encode/decode in the path.
+- **Fanout**: config + keyframes are never dropped; only non-key frames
+  may drop when the terminal pipe is slow (recover on the next keyframe).
+- **Static screens**: this ROM's encoder is damage-tracking — a static
+  screen stalls ANY stream (scrcpy --window freezes too). A screencap
+  filler refreshes the viewers at ~5fps.
+- **Fallbacks**: engine → scrcpy binary → screenrecord, automatic; the
+  watchdog respawns only when a process actually dies.
 
 ## Scenarios
 
+- **Zellij**: `scterm --tui` — F12/Ctrl-G locks the pane and passes keys
+  through; detach/reattach keeps content.
+- **Termux / CLI**: the engine needs no scrcpy binary and no windowing —
+  just adb + the server payload.
 - **USB**: `scterm.py` — instant, zero-config.
-- **WiFi adb**: `adb tcpip 5555`, `adb connect IP`, then `--serial IP:5555`.
-- **Tailscale / anywhere**: run `scterm.py --web 8000` on the host, open
-  `http://<tailscale-ip>:8000` from any device. The TUI keeps running
-  locally with `--both` if you want both.
-- **Zellij**: `scterm.py --zellij` — stays on the normal screen (detach/
-  reattach keeps content), `Ctrl-Alt-G` locks Zellij and passes keys
-  through to the Android device.
-
-## Roadmap (porting)
-
-The pipeline is deliberately small and side-effect-light: `AdbInput`
-(persistent shell), `CaptureManager` + `FfmpegSource` (screenrecord →
-ffmpeg → MJPEG frames), `TUI` (render/draw), `WebApp` (HTTP). All params
-flow through one `params` dict under one lock — a Rust/Go port can take the
-ffmpeg command line and the JSON API as the specification, and the web page
-is already a self-contained client the Android app can wrap in a WebView or
-replace with the API calls directly.
+- **Tailscale / anywhere**: `scterm --web 8000` on the host, open
+  `http://<tailscale-ip>:8000` from any device.

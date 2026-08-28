@@ -20,6 +20,15 @@ import (
 const serverPayload = "/usr/share/scrcpy/scrcpy-server"
 const DeviceServerPath = "/data/local/tmp/scrcpy-server"
 
+// ServerPayloadPath returns the host-side scrcpy server payload path
+// (SCRCPY_SERVER env override supported).
+func ServerPayloadPath() string {
+	if p := os.Getenv("SCRCPY_SERVER"); p != "" {
+		return p
+	}
+	return serverPayload
+}
+
 // Session owns one live scrcpy server session.
 type Session struct {
 	Serial string
@@ -45,7 +54,7 @@ type Options struct {
 // control (role-verified; full-session redial on misrouting).
 func Open(serial string, opts Options) (*Session, error) {
 	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < 2; attempt++ {
 		s, err := openOnce(serial, opts)
 		if err == nil {
 			return s, nil
@@ -434,6 +443,29 @@ func (c *Control) SetClipboard(text string) {
 	c.send(m.b.Bytes())
 }
 
+// Text injects text via the IME (TYPE_INJECT_TEXT) — the same message the
+// scrcpy client sends for its text field. The server's TextInputMapper
+// types the string on the focused view, exactly like typing on the device.
+func (c *Control) Text(s string) {
+	if s == "" {
+		return
+	}
+	const chunk = 500 // keep control messages small (server buffer limits)
+	for len(s) > chunk {
+		var m W
+		m.u8(TypeInjectText)
+		m.u32(uint32(chunk))
+		m.str(s[:chunk])
+		c.send(m.b.Bytes())
+		s = s[chunk:]
+	}
+	var m W
+	m.u8(TypeInjectText)
+	m.u32(uint32(len(s)))
+	m.str(s)
+	c.send(m.b.Bytes())
+}
+
 // GamepadDesc is scrcpy's stock 81-byte HID gamepad report descriptor.
 var GamepadDesc = []byte{
 	0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0xa1, 0x00, 0x05, 0x01, 0x09, 0x30,
@@ -490,43 +522,130 @@ func GamepadReport(lx, ly, rx, ry, buttons uint16, hat uint8) []byte {
 
 // verifyControl proves this socket is THE control channel. The shade
 // test animates the screen for ~1-2s, but the viewer/ffmpeg only start
-// AFTER Open + DiscardUntilQuiet, so the animation and its video backlog
+// AFTER Open + DrainUntilQuiet, so the animation and its video backlog
 // are discarded before anything displays (and the old backlog was the
 // ~2s permanent video lag).
 func (c *Control) verifyControl(serial string) bool {
+	// retry: concurrent device input can race the shade animation and
+	// make the focus check miss (the shade still opens, just later)
+	for attempt := 0; attempt < 2; attempt++ {
+		c.CollapsePanels()
+		time.Sleep(200 * time.Millisecond)
+		c.ExpandPanels()
+		time.Sleep(700 * time.Millisecond)
+		out := runAdb(serial, "shell",
+			"dumpsys window | grep mCurrentFocus | head -1")
+		if strings.Contains(strings.ToLower(out), "notification") {
+			c.CollapsePanels()
+			time.Sleep(300 * time.Millisecond)
+			return true
+		}
+	}
 	c.CollapsePanels()
-	time.Sleep(250 * time.Millisecond)
-	c.ExpandPanels()
-	time.Sleep(900 * time.Millisecond)
-	out := runAdb(serial, "shell",
-		"dumpsys window | grep mCurrentFocus | head -1")
-	ok := strings.Contains(strings.ToLower(out), "notification")
-	c.CollapsePanels()
-	time.Sleep(350 * time.Millisecond)
-	return ok
+	time.Sleep(300 * time.Millisecond)
+	return false
 }
 
-// DiscardUntilQuiet drains the video socket until no packet has arrived
-// for ~quiet (the encoder's damage-tracking pauses between bursts). Call
-// before handing the stream to a late consumer so it starts at CURRENT
-// content instead of playing the startup backlog.
-func (v *VideoStream) DiscardUntilQuiet(quiet time.Duration) error {
-	// drain the startup backlog (accrued during session setup / the
-	// control verification) — bounded by wall clock because animating
-	// screens never quiet down; reads RAW headers so a silent socket
-	// idles in `quiet`, not Next()'s 12s timeout
-	const maxDrain = 2500 * time.Millisecond
+// DrainUntilQuiet discards the video backlog accrued during session
+// setup (the control role-verify animation feeds the encoder ~2s of
+// frames) so late consumers start at CURRENT content instead of playing
+// stale frames. It reads FULL packets (header + payload), unlike the old
+// raw-byte drain that corrupted socket framing. The last CONFIG packet
+// seen is returned so the caller can replay it after the drain (the
+// encoder only emits SPS/PPS once per session — without the replay,
+// decoders stay green until the next keyframe).
+//
+// Phase 1: discard until the socket idles for `quiet`.
+// Phase 2: keep discarding until the first KEY_FRAME (or `keyWait`)
+//          so the stream resumes on a clean decodable point.
+// Bounded by `maxDrain` wall time; returns whatever it has.
+func (v *VideoStream) DrainUntilQuiet(quiet, keyWait, maxDrain time.Duration) *Packet {
+	var config *Packet
 	deadline := time.Now().Add(maxDrain)
+	quietAt := time.Time{}
 	pkt := make([]byte, 12)
 	for time.Now().Before(deadline) {
 		v.conn.SetReadDeadline(time.Now().Add(quiet))
-		_, err := v.conn.Read(pkt)
-		v.conn.SetReadDeadline(time.Time{})
+		n, err := v.conn.Read(pkt)
 		if err != nil {
-			return nil // idle: caught up
+			// quiet: caught up (or a stale re-session raced us; stop)
+			if !quietAt.IsZero() {
+				// phase 2 keyframe wait: keep reading for keyWait
+				phase2 := time.Now().Add(keyWait)
+				for time.Now().Before(phase2) && time.Now().Before(deadline) {
+					p, err2 := v.readOne()
+					if err2 != nil {
+						return config
+					}
+					if p.Config {
+						config = p
+					}
+					if p.KeyFrame {
+						return config
+					}
+				}
+				return config
+			}
+			quietAt = time.Now()
+			continue
+		}
+		if n != len(pkt) {
+			return config // framing confused; stop draining
+		}
+		if pkt[0]&0x80 != 0 {
+			// session (re)header: 12 bytes, then a real packet header
+			if _, err := v.conn.Read(pkt); err != nil {
+				return config
+			}
+		}
+		ln := binary.BigEndian.Uint32(pkt[8:])
+		if ln == 0 || ln > 64<<20 {
+			return config
+		}
+		data := make([]byte, ln)
+		if err := readFullN(v.conn, data); err != nil {
+			return config
+		}
+		quietAt = time.Time{}
+		ptsFlags := binary.BigEndian.Uint64(pkt)
+		if ptsFlags&PacketFlagConfig != 0 {
+			config = &Packet{PTS: ptsFlags & (PacketFlagKeyFrame - 1),
+				Config: true, KeyFrame: ptsFlags&PacketFlagKeyFrame != 0, Data: data}
 		}
 	}
-	return nil
+	return config
+}
+
+// readOne reads exactly one full video packet (header + payload),
+// handling mid-stream session headers. Returns the packet.
+func (v *VideoStream) readOne() (*Packet, error) {
+	hdr := make([]byte, 12)
+	if err := readFullN(v.conn, hdr); err != nil {
+		return nil, err
+	}
+	if hdr[0]&0x80 != 0 {
+		// (re)session message: update dims, read the real header
+		v.Width = int(binary.BigEndian.Uint32(hdr[4:]))
+		v.Height = int(binary.BigEndian.Uint32(hdr[8:]))
+		if err := readFullN(v.conn, hdr); err != nil {
+			return nil, err
+		}
+	}
+	ptsFlags := binary.BigEndian.Uint64(hdr)
+	ln := binary.BigEndian.Uint32(hdr[8:])
+	if ln == 0 || ln > 64<<20 {
+		return nil, fmt.Errorf("bad packet len %d", ln)
+	}
+	data := make([]byte, ln)
+	if err := readFullN(v.conn, data); err != nil {
+		return nil, err
+	}
+	return &Packet{
+		PTS:      ptsFlags & (PacketFlagKeyFrame - 1),
+		Config:   ptsFlags&PacketFlagConfig != 0,
+		KeyFrame: ptsFlags&PacketFlagKeyFrame != 0,
+		Data:     data,
+	}, nil
 }
 
 var _ = io.Copy
@@ -650,20 +769,4 @@ func (g *GamepadState) Report() []byte {
 	}
 	return GamepadReport(rescale(g.LX), rescale(g.LY), rescale(g.RX), rescale(g.RY),
 		buttons, uint8(g.Hat))
-}
-
-// DropStaleUntilIdle discards buffered video until the socket is briefly
-// idle (or maxDrop elapses). Used when the consumer falls behind so the
-// viewer stays near real-time instead of accruing unbounded backlog.
-func (v *VideoStream) DropStaleUntilIdle(maxDrop, idle time.Duration) {
-	deadline := time.Now().Add(maxDrop)
-	scratch := make([]byte, 4096)
-	for time.Now().Before(deadline) {
-		v.conn.SetReadDeadline(time.Now().Add(idle))
-		_, err := v.conn.Read(scratch)
-		v.conn.SetReadDeadline(time.Time{})
-		if err != nil {
-			return
-		}
-	}
 }
