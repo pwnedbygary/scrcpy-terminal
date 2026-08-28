@@ -35,9 +35,10 @@ type Session struct {
 
 // Options mirror the subset of server options we need.
 type Options struct {
-	Audio        bool
-	MaxSize      int    // 0 = native
-	CodecOptions string // e.g. "i-frame-interval=2" (comma-separated)
+	Audio             bool
+	MaxSize           int    // 0 = native
+	CodecOptions      string // e.g. "i-frame-interval=2" (comma-separated)
+	ClipboardAutosync bool   // false => GET_CLIPBOARD elicits a reply
 }
 
 // Open creates a session: push server, forward, launch, connect video +
@@ -88,6 +89,9 @@ func openOnce(serial string, opts Options) (*Session, error) {
 	if opts.MaxSize > 0 {
 		args += fmt.Sprintf(" max_size=%d", opts.MaxSize)
 	}
+	if !opts.ClipboardAutosync {
+		args += " clipboard_autosync=false"
+	}
 	cmd := exec.Command("adb", "-s", serial, "shell", args)
 	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	cmd.Stdout = devNull
@@ -124,6 +128,9 @@ func openOnce(serial string, opts Options) (*Session, error) {
 		}
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("control connect: %w", err)
+	}
+	if tc, ok := ctrl.(*net.TCPConn); ok {
+		tc.SetNoDelay(true) // tiny input messages must not Nagle-batch
 	}
 
 	vs := &VideoStream{conn: video}
@@ -242,8 +249,8 @@ func runAdb(serial string, args ...string) string {
 type VideoStream struct {
 	conn net.Conn
 	// Media identity from the handshake
-	Codec    string
-	Device   string
+	Codec         string
+	Device        string
 	handshakeDone bool
 	Width, Height int
 }
@@ -326,12 +333,12 @@ var _ = readFullN
 
 type W struct{ b bytes.Buffer }
 
-func (w *W) u8(v uint8)       { w.b.WriteByte(v) }
-func (w *W) u16(v uint16)     { var b [2]byte; binary.BigEndian.PutUint16(b[:], v); w.b.Write(b[:]) }
-func (w *W) u32(v uint32)     { var b [4]byte; binary.BigEndian.PutUint32(b[:], v); w.b.Write(b[:]) }
-func (w *W) u64(v uint64)     { var b [8]byte; binary.BigEndian.PutUint64(b[:], v); w.b.Write(b[:]) }
-func (w *W) str(s string)     { w.b.WriteString(s) }
-func (w *W) raw(p []byte)     { w.b.Write(p) }
+func (w *W) u8(v uint8)   { w.b.WriteByte(v) }
+func (w *W) u16(v uint16) { var b [2]byte; binary.BigEndian.PutUint16(b[:], v); w.b.Write(b[:]) }
+func (w *W) u32(v uint32) { var b [4]byte; binary.BigEndian.PutUint32(b[:], v); w.b.Write(b[:]) }
+func (w *W) u64(v uint64) { var b [8]byte; binary.BigEndian.PutUint64(b[:], v); w.b.Write(b[:]) }
+func (w *W) str(s string) { w.b.WriteString(s) }
+func (w *W) raw(p []byte) { w.b.Write(p) }
 
 const (
 	TypeInjectKeycode  = 0
@@ -371,8 +378,8 @@ func (c *Control) Power() {
 	time.Sleep(50 * time.Millisecond)
 	c.Key(1, 26)
 }
-func (c *Control) ExpandPanels()  { c.send([]byte{TypeExpandPanel}) }
-func (c *Control) CollapsePanels(){ c.send([]byte{TypeCollapsePanels}) }
+func (c *Control) ExpandPanels()   { c.send([]byte{TypeExpandPanel}) }
+func (c *Control) CollapsePanels() { c.send([]byte{TypeCollapsePanels}) }
 
 func (c *Control) Touch(action int, x, y, w, h int) {
 	var m W
@@ -384,8 +391,8 @@ func (c *Control) Touch(action int, x, y, w, h int) {
 	m.u16(uint16(w))
 	m.u16(uint16(h))
 	m.u16(0xffff) // pressure 1.0
-	m.u32(0)     // actionButton
-	m.u32(1)     // buttons
+	m.u32(0)      // actionButton
+	m.u32(1)      // buttons
 	c.send(m.b.Bytes())
 }
 
@@ -393,6 +400,22 @@ func (c *Control) Tap(x, y, w, h int) {
 	c.Touch(0, x, y, w, h)
 	time.Sleep(60 * time.Millisecond)
 	c.Touch(1, x, y, w, h)
+}
+
+func msgSetClipboard(text string) []byte {
+	var m W
+	m.u8(TypeSetClipboard)
+	var lb []byte
+	if len(text) < 0x100 {
+		lb = []byte{byte(len(text))}
+	} else {
+		lb = []byte{byte(len(text) >> 8), byte(len(text))}
+	}
+	m.u8(uint8(len(lb)))
+	m.raw(lb)
+	m.str(text)
+	m.u8(0)
+	return m.b.Bytes()
 }
 
 func (c *Control) SetClipboard(text string) {
@@ -413,13 +436,13 @@ func (c *Control) SetClipboard(text string) {
 
 // GamepadDesc is scrcpy's stock 81-byte HID gamepad report descriptor.
 var GamepadDesc = []byte{
-0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0xa1, 0x00, 0x05, 0x01, 0x09, 0x30,
-0x09, 0x31, 0x09, 0x33, 0x09, 0x34, 0x15, 0x00, 0x27, 0xff, 0xff, 0x00,
-0x00, 0x75, 0x10, 0x95, 0x04, 0x81, 0x02, 0x05, 0x01, 0x09, 0x32, 0x09,
-0x35, 0x15, 0x00, 0x26, 0xff, 0x7f, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02,
-0x05, 0x09, 0x19, 0x01, 0x29, 0x10, 0x15, 0x00, 0x25, 0x01, 0x95, 0x10,
-0x75, 0x01, 0x81, 0x02, 0x05, 0x01, 0x09, 0x39, 0x15, 0x01, 0x25, 0x08,
-0x75, 0x04, 0x95, 0x01, 0x81, 0x42, 0xc0, 0xc0,
+	0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0xa1, 0x00, 0x05, 0x01, 0x09, 0x30,
+	0x09, 0x31, 0x09, 0x33, 0x09, 0x34, 0x15, 0x00, 0x27, 0xff, 0xff, 0x00,
+	0x00, 0x75, 0x10, 0x95, 0x04, 0x81, 0x02, 0x05, 0x01, 0x09, 0x32, 0x09,
+	0x35, 0x15, 0x00, 0x26, 0xff, 0x7f, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02,
+	0x05, 0x09, 0x19, 0x01, 0x29, 0x10, 0x15, 0x00, 0x25, 0x01, 0x95, 0x10,
+	0x75, 0x01, 0x81, 0x02, 0x05, 0x01, 0x09, 0x39, 0x15, 0x01, 0x25, 0x08,
+	0x75, 0x04, 0x95, 0x01, 0x81, 0x42, 0xc0, 0xc0,
 }
 
 func (c *Control) UhidCreate(id uint16, vendor, product uint16, name string, desc []byte) {
@@ -465,19 +488,45 @@ func GamepadReport(lx, ly, rx, ry, buttons uint16, hat uint8) []byte {
 	return r
 }
 
-// verifyControl proves this socket is the real control channel: EXPAND
-// must steal focus to the notification shade.
+// verifyControl proves this socket is THE control channel. The shade
+// test animates the screen for ~1-2s, but the viewer/ffmpeg only start
+// AFTER Open + DiscardUntilQuiet, so the animation and its video backlog
+// are discarded before anything displays (and the old backlog was the
+// ~2s permanent video lag).
 func (c *Control) verifyControl(serial string) bool {
 	c.CollapsePanels()
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(250 * time.Millisecond)
 	c.ExpandPanels()
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(900 * time.Millisecond)
 	out := runAdb(serial, "shell",
 		"dumpsys window | grep mCurrentFocus | head -1")
 	ok := strings.Contains(strings.ToLower(out), "notification")
 	c.CollapsePanels()
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(350 * time.Millisecond)
 	return ok
+}
+
+// DiscardUntilQuiet drains the video socket until no packet has arrived
+// for ~quiet (the encoder's damage-tracking pauses between bursts). Call
+// before handing the stream to a late consumer so it starts at CURRENT
+// content instead of playing the startup backlog.
+func (v *VideoStream) DiscardUntilQuiet(quiet time.Duration) error {
+	// drain the startup backlog (accrued during session setup / the
+	// control verification) — bounded by wall clock because animating
+	// screens never quiet down; reads RAW headers so a silent socket
+	// idles in `quiet`, not Next()'s 12s timeout
+	const maxDrain = 2500 * time.Millisecond
+	deadline := time.Now().Add(maxDrain)
+	pkt := make([]byte, 12)
+	for time.Now().Before(deadline) {
+		v.conn.SetReadDeadline(time.Now().Add(quiet))
+		_, err := v.conn.Read(pkt)
+		v.conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			return nil // idle: caught up
+		}
+	}
+	return nil
 }
 
 var _ = io.Copy
@@ -487,7 +536,7 @@ var _ = io.Copy
 // AudioStream reads the raw Opus packet stream (same framing as video,
 // codec id first: 'opus' 0x6f707573).
 type AudioStream struct {
-	conn net.Conn
+	conn  net.Conn
 	Codec string
 }
 

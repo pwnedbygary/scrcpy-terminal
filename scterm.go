@@ -540,13 +540,18 @@ func (c *Capture) spawnPipeline() {
 		// NATIVE ENGINE: raw protocol session (no scrcpy, no mkv)
 		var err error
 		ses, err = engine.Open(c.serial, engine.Options{
-			Audio:        true,
-			CodecOptions: "i-frame-interval=2",
+			Audio:            true,
+			MaxSize:          1280, // ~720p: halves ffmpeg's decode cost
+			CodecOptions:     "i-frame-interval=2",
+			ClipboardAutosync: false,
 		})
 		if err != nil {
 			logf("engine open failed: %v", err)
 			return
 		}
+		// drain the socket backlog accrued during session setup so the
+		// viewer starts at CURRENT content, not old frames
+		ses.Video.DiscardUntilQuiet(250 * time.Millisecond)
 		c.ses = ses
 		c.engine = "engine"
 		if c.protoIn != nil {
@@ -1159,6 +1164,16 @@ func (c *Capture) filler() {
 			continue
 		}
 		c.publishLocked(buf.Bytes(), "fill")
+		// also keep the web cache alive on static screens
+		wimg := fitImage(img, 960, 540, "contain")
+		var wbuf bytes.Buffer
+		if err := jpeg.Encode(&wbuf, wimg, &jpeg.Options{Quality: 70}); err == nil {
+			c.webMu.Lock()
+			c.webJpg = wbuf.Bytes()
+			c.webSeq++
+			c.webPub = time.Now()
+			c.webMu.Unlock()
+		}
 		dbg("filler: published %d bytes", buf.Len())
 	}
 }
