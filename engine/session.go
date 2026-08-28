@@ -651,3 +651,19 @@ func (g *GamepadState) Report() []byte {
 	return GamepadReport(rescale(g.LX), rescale(g.LY), rescale(g.RX), rescale(g.RY),
 		buttons, uint8(g.Hat))
 }
+
+// DropStaleUntilIdle discards buffered video until the socket is briefly
+// idle (or maxDrop elapses). Used when the consumer falls behind so the
+// viewer stays near real-time instead of accruing unbounded backlog.
+func (v *VideoStream) DropStaleUntilIdle(maxDrop, idle time.Duration) {
+	deadline := time.Now().Add(maxDrop)
+	scratch := make([]byte, 4096)
+	for time.Now().Before(deadline) {
+		v.conn.SetReadDeadline(time.Now().Add(idle))
+		_, err := v.conn.Read(scratch)
+		v.conn.SetReadDeadline(time.Time{})
+		if err != nil {
+			return
+		}
+	}
+}

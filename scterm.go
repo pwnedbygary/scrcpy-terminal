@@ -539,9 +539,13 @@ func (c *Capture) spawnPipeline() {
 	if c.useEngine {
 		// NATIVE ENGINE: raw protocol session (no scrcpy, no mkv)
 		var err error
+		ms := c.maxSize
+		if ms <= 0 {
+			ms = 1280 // engine default ~720p (halves ffmpeg decode cost)
+		}
 		ses, err = engine.Open(c.serial, engine.Options{
 			Audio:            true,
-			MaxSize:          1280, // ~720p: halves ffmpeg's decode cost
+			MaxSize:          ms,
 			CodecOptions:     "i-frame-interval=2",
 			ClipboardAutosync: false,
 		})
@@ -734,8 +738,14 @@ func (c *Capture) spawnPipeline() {
 					stdin.Close()
 					return
 				}
+				t0 := time.Now()
 				if _, err := stdin.Write(pkt.Data); err != nil {
 					return
+				}
+				if time.Since(t0) > 60*time.Millisecond {
+					// consumer can't keep up: drop stale frames until the
+					// socket is momentarily idle, then resume fresh
+					ses.Video.DropStaleUntilIdle(400*time.Millisecond, 90*time.Millisecond)
 				}
 			}
 		}()
@@ -759,7 +769,15 @@ func (c *Capture) spawnPipeline() {
 		}
 	}
 	if c.protoIn != nil {
-		c.protoIn.SetSize(ses.Video.Width, ses.Video.Height)
+		// Touch coordinates must be in PHYSICAL device space (the viewers
+		// normalize to deviceSize); the stream size (e.g. 720p via
+		// max_size) is NOT the device size — using it clamps every
+		// tap/drag to a wrong position.
+		dw, dh := deviceSize(c.serial)
+		if dw <= 0 || dh <= 0 {
+			dw, dh = ses.Video.Width, ses.Video.Height
+		}
+		c.protoIn.SetSize(dw, dh)
 	}
 
 	c.pipesWg.Add(4)
