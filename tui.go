@@ -143,11 +143,17 @@ func (t *tui) draw(rgba []byte) {
 		// copy back the drawn row
 		copy(t.prev[row:row+w], t.keys[row:row+w])
 	}
-	// overlay: paint text rows over the video
+	// overlay: paint text rows over the video. EMPTY rows are skipped so the
+	// video stays visible above the keyboard (the keyboard only paints its
+	// own rows, and each of those has an opaque background).
 	if len(t.overlay) > 0 {
 		for i, ol := range t.overlay {
 			if i >= t.rows {
 				break
+			}
+			if ol.text == "" && (ol.hlFrom < 0 || ol.hlTo <= ol.hlFrom) &&
+				(ol.flFrom < 0 || ol.flTo <= ol.flFrom) {
+				continue // transparent: keep the video visible
 			}
 			line := truncateRunes(ol.text, t.cols)
 			out = ap(out, "\x1b[", strconv.Itoa(i+1), ";1H",

@@ -182,7 +182,7 @@ func (k *keyboard) lines(termRows int) []overlayLine {
 	}
 	out := make([]overlayLine, termRows)
 	for i := range out {
-		out[i] = overlayLine{hlFrom: -1}
+		out[i] = overlayLine{hlFrom: -1, flFrom: -1, flTo: -1}
 	}
 	for ri := n - 1; ri >= 0; ri-- {
 		ov := (n - 1 - ri) + kbTop

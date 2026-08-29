@@ -40,6 +40,9 @@ type app struct {
 	// coalesced drag move state
 	lastMoveNano int64
 	pendingMove  position
+
+	// keyboard auto-grabbed the mouse on open (Zellij); restore on close
+	kbAutoGrabbed bool
 }
 
 type inputEvent struct {
@@ -234,6 +237,13 @@ func (a *app) openKeyboard() {
 		return
 	}
 	a.kb.open = true
+	// In Zellij the app starts ungrabbed (mouse reporting OFF), so clicks
+	// never reach us and the keyboard would be useless. Grab on open so
+	// clicking works immediately; restore the prior state on close.
+	if !a.grabbed {
+		a.setMouse(true)
+		a.kbAutoGrabbed = true
+	}
 	a.refreshKeyboard()
 }
 
@@ -242,6 +252,11 @@ func (a *app) closeKeyboard() {
 		return
 	}
 	a.kb.open = false
+	// Restore the pre-keyboard grab state (Zellij starts ungrabbed).
+	if a.kbAutoGrabbed && a.grabbed {
+		a.setMouse(false)
+	}
+	a.kbAutoGrabbed = false
 	if a.tui != nil {
 		a.tui.setOverlay(nil)
 		a.tui.setStatus(a.statusLine())
