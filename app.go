@@ -180,8 +180,9 @@ func (a *app) runHeadless() error {
 				}
 			}
 		case <-ticker.C:
-			fmt.Fprintf(os.Stdout, "\r[%dx%d fps=%.0f audio=%s]   ",
-				a.frameW, a.frameH, a.stream.currentFPS, audioState(a))
+			fmt.Fprintf(os.Stdout, "\r[%dx%d fps=%.0f audio=%s pcm=%dKB]   ",
+				a.frameW, a.frameH, a.stream.currentFPS, audioState(a),
+				a.stream.audioBytes/1024)
 		}
 	}
 }

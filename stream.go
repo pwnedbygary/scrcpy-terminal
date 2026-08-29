@@ -26,6 +26,9 @@ type streamState struct {
 
 	// fps
 	currentFPS float64
+
+	// audio stat
+	audioBytes int64 // decoded bytes handed to the sink
 }
 
 type videoFrame struct {
@@ -349,6 +352,7 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 			if n == 0 {
 				break
 			}
+			s.audioBytes += int64(n)
 			audioOut.writePCM16(pcm[:n])
 		}
 	}
