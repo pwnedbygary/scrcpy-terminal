@@ -123,25 +123,88 @@ func (a *audioSink) open() {
 }
 
 // audioDevices returns the sink device candidates, in priority order:
-// explicit env override, then physical ALSA sinks, then the default.
+//  1. SCT_AUDIO_DEVICE env override (explicit user choice)
+//  2. the sink currently receiving audio (active sink-inputs) - this is
+//     "the actively selected device" on the user's desktop
+//  3. physical ALSA sinks that are RUNNING (in use by the session)
+//  4. any physical ALSA sink
+//  5. the server default (empty string)
+//
 // The default sink may be a virtual one (e.g. a game-streaming sink)
-// that silently buffers audio nobody hears.
+// that silently buffers audio nobody hears, hence it is last.
 func audioDevices() []string {
 	if d := envOr("SCT_AUDIO_DEVICE", ""); d != "" {
 		return []string{d}
 	}
-	// Physical ALSA sinks are what the user actually hears.
-	var physical []string
+
+	// Which sinks have streams attached right now?
+	type sinkState struct {
+		id      string
+		name    string
+		running bool
+		inputs  int
+	}
+	var sinks []sinkState
 	if out, err := pulseCmd("list", "sinks", "short"); err == nil {
 		for _, line := range splitLines(string(out)) {
 			fields := splitFields(line)
-			if len(fields) >= 2 && hasPrefix(fields[1], "alsa_output.") {
-				physical = append(physical, fields[1])
+			if len(fields) >= 5 {
+				sinks = append(sinks, sinkState{
+					id:      fields[0],
+					name:    fields[1],
+					running: fields[4] == "RUNNING",
+				})
 			}
 		}
 	}
-	// Try physical first, then default (empty string = server default).
-	return append(physical, "")
+
+	byID := map[string]int{}
+	for i, s := range sinks {
+		byID[s.id] = i
+	}
+	if out, err := pulseCmd("list", "sink-inputs", "short"); err == nil {
+		for _, line := range splitLines(string(out)) {
+			fields := splitFields(line)
+			if len(fields) >= 2 {
+				if i, ok := byID[fields[1]]; ok {
+					sinks[i].inputs++
+				}
+			}
+		}
+	}
+
+	// 2) active sinks (have streams) - prefer the one with most inputs
+	var active []string
+	for _, s := range sinks {
+		if s.inputs > 0 {
+			active = append(active, s.name)
+		}
+	}
+	if len(active) > 0 {
+		return active
+	}
+
+	// 3) RUNNING physical ALSA sinks
+	var running []string
+	// 4) all physical ALSA sinks
+	var physical []string
+	for _, s := range sinks {
+		if !hasPrefix(s.name, "alsa_output.") {
+			continue
+		}
+		physical = append(physical, s.name)
+		if s.running {
+			running = append(running, s.name)
+		}
+	}
+	if len(running) > 0 {
+		return running
+	}
+	if len(physical) > 0 {
+		return physical
+	}
+	// 5) server default
+	return []string{""}
 }
 
 func serverOrDefault(s string) string {
