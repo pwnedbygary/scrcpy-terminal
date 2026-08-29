@@ -46,31 +46,10 @@ func (a *app) mapAppFKey(code uint32) {
 // posAt maps terminal cell (1-based) to an Android position using the frame
 // geometry currently displayed (screen_size = frame size, as the C client does).
 func (a *app) posAt(cellX, cellY int) position {
-	cols, rows := termSize()
-	rows--
-	if a.frameW == 0 || a.frameH == 0 {
-		a.frameW = a.stream.videoW
-		a.frameH = a.stream.videoH
+	if a.stream == nil {
+		return position{}
 	}
-	fw, fh := a.frameW, a.frameH
-	// center of the cell in canvas pixels
-	px := float64(cellX-1) + 0.5
-	py := float64(cellY-1) + 0.5
-	x := int32(px * float64(fw) / float64(cols))
-	y := int32(py * float64(fh) / float64(rows))
-	if x < 0 {
-		x = 0
-	}
-	if y < 0 {
-		y = 0
-	}
-	if int(x) >= fw {
-		x = int32(fw - 1)
-	}
-	if int(y) >= fh {
-		y = int32(fh - 1)
-	}
-	return position{x: x, y: y, screenW: uint16(fw), screenH: uint16(fh)}
+	return a.stream.mapCell(cellX, cellY)
 }
 
 // scrollAt sends a scroll wheel event at the cell position.
@@ -88,21 +67,67 @@ func (a *app) scrollAt(cellX, cellY int, delta int) {
 // key palette: Ctrl-K opens a scrollable list of every Android key code
 // ---------------------------------------------------------------------------
 
+const paletteRows = 10
+
 func (a *app) openPalette() {
 	if a.ctrl == nil {
 		return
 	}
 	a.paletteOpen = true
 	a.paletteIdx = 0
-	a.tui.setStatus(a.statusLine())
-	a.drawPalette()
+	a.refreshPalette()
 }
 
 func (a *app) closePalette() {
 	a.paletteOpen = false
+	if a.tui != nil {
+		a.tui.setOverlay(nil)
+		a.tui.setStatus(a.statusLine())
+		a.tui.dirty = true
+	}
+}
+
+func (a *app) refreshPalette() {
+	if a.tui == nil {
+		return
+	}
+	a.tui.setOverlay(a.paletteLines())
 	a.tui.setStatus(a.statusLine())
-	a.tui.dirty = true
-	a.tui.resize() // force full redraw of underlying frame next draw
+}
+
+func (a *app) paletteLines() []string {
+	if !a.paletteOpen || a.ctrl == nil {
+		return nil
+	}
+	n := paletteRows
+	if len(a.paletteKeys) < n {
+		n = len(a.paletteKeys)
+	}
+	start := (a.paletteIdx / paletteRows) * paletteRows
+	if start+n > len(a.paletteKeys) {
+		start = len(a.paletteKeys) - n
+	}
+	if start < 0 {
+		start = 0
+	}
+	lines := make([]string, 0, n+1)
+	for i := 0; i < n; i++ {
+		idx := start + i
+		cursor := "  "
+		if idx == a.paletteIdx {
+			cursor = "> "
+		}
+		if idx < len(a.paletteKeys) {
+			code := a.paletteKeys[idx]
+			name := androidKeycodes[code]
+			lines = append(lines, fmt.Sprintf("%s%3d %s", cursor, code, name))
+		} else {
+			lines = append(lines, "")
+		}
+	}
+	lines = append(lines, fmt.Sprintf("key palette: %d/%d · ↑↓ move, ←→ ±10, Enter send, [a-z] jump, Ctrl-K/Esc close",
+		a.paletteIdx+1, len(a.paletteKeys)))
+	return lines
 }
 
 func (a *app) paletteInput(b []byte) {
@@ -118,13 +143,10 @@ func (a *app) paletteInput(b []byte) {
 			a.paletteIdx--
 		case "\x1b[B":
 			a.paletteIdx++
-		case "\x1b[C", "\x1b[D":
-			// left/right: jump by 10
-			if s == "\x1b[C" {
-				a.paletteIdx += 10
-			} else {
-				a.paletteIdx -= 10
-			}
+		case "\x1b[C":
+			a.paletteIdx += 10
+		case "\x1b[D":
+			a.paletteIdx -= 10
 		default:
 			a.closePalette()
 			return
@@ -156,65 +178,15 @@ func (a *app) paletteInput(b []byte) {
 			}
 		}
 	}
-	if a.paletteIdx < 0 {
-		a.paletteIdx += len(a.paletteKeys)
+	if len(a.paletteKeys) > 0 {
+		if a.paletteIdx < 0 {
+			a.paletteIdx += len(a.paletteKeys)
+		}
+		if a.paletteIdx >= len(a.paletteKeys) {
+			a.paletteIdx -= len(a.paletteKeys)
+		}
 	}
-	if a.paletteIdx >= len(a.paletteKeys) {
-		a.paletteIdx -= len(a.paletteKeys)
-	}
-	a.drawPalette()
+	a.refreshPalette()
 }
 
-// drawPalette renders the palette in the text area (10 rows near the top).
-func (a *app) drawPalette() {
-	if a.tui == nil || a.ctrl == nil {
-		return
-	}
-	cols := a.tui.cols
-	rows := a.tui.rows
-	n := 10
-	if rows < n {
-		n = rows
-	}
-	start := (a.paletteIdx / n) * n
-	if start+n > len(a.paletteKeys) {
-		start = len(a.paletteKeys) - n
-	}
-	if start < 0 {
-		start = 0
-	}
-	out := make([]byte, 0, 4096)
-	out = append(out, "\x1b[1;1H"...)
-	for i := 0; i < n; i++ {
-		out = append(out, "\x1b[K"...)
-		idx := start + i
-		var line string
-		if idx < len(a.paletteKeys) {
-			code := a.paletteKeys[idx]
-			name := androidKeycodes[code]
-			cursor := "  "
-			if idx == a.paletteIdx {
-				cursor = "> "
-			}
-			line = fmt.Sprintf("%s%3d %s", cursor, code, name)
-		}
-		// pad to width for a clean overlay
-		for len(line) < cols-1 && idx < len(a.paletteKeys) {
-			line += " "
-		}
-		out = append(out, line...)
-		if i < n-1 {
-			out = append(out, "\r\n"...)
-		}
-	}
-	out = append(out, "\x1b[K"...)
-	out = append(out, "\r\n\u2500 key palette: \u2191\u2193 move \u2698 \u2190\u2192 \u00b110, Enter send, [a-z] jump, Ctrl-K/Esc close"...)
-	_ = strconv.Itoa
-	osStdoutWrite(out)
-}
-
-func osStdoutWrite(b []byte) {
-	// direct write, bypassing tui mutex (input goroutine only calls this when
-	// palette is active; the draw mutex is held elsewhere)
-	writeStdout(b)
-}
+var _ = strconv.Itoa

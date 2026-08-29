@@ -48,6 +48,9 @@ type tui struct {
 
 	// color resolution helpers
 	sgrBuf []byte
+
+	// palette overlay rendered over the video area (set by the app)
+	overlay []string // one string per screen row (may be shorter)
 }
 
 func newTUI() *tui {
@@ -140,6 +143,22 @@ func (t *tui) draw(rgba []byte) {
 		// copy back the drawn row
 		copy(t.prev[row:row+w], t.keys[row:row+w])
 	}
+	// palette overlay: paint text rows over the video
+	if len(t.overlay) > 0 {
+		for i, line := range t.overlay {
+			if i >= t.rows {
+				break
+			}
+			line = truncateRunes(line, t.cols)
+			out = ap(out, "\x1b[", strconv.Itoa(i+1), ";1H",
+				"\x1b[48;2;0;0;0m\x1b[38;2;220;220;220m")
+			out = append(out, line...)
+			for j := len(line); j < t.cols; j++ {
+				out = append(out, ' ')
+			}
+			out = append(out, "\x1b[0m"...)
+		}
+	}
 	// status bar (redraw only when the status string changed)
 	if t.status != "" {
 		line := truncateRunes(t.status, t.cols)
@@ -166,6 +185,13 @@ func rowEqual(a, b []uint64) bool {
 // rgbStr renders "R;G;B" for a 0x00RRGGBB value (already quantized).
 func rgbStr(c uint32) string {
 	return strconv.Itoa(int(c>>16)&0xFF) + ";" + strconv.Itoa(int(c>>8)&0xFF) + ";" + strconv.Itoa(int(c)&0xFF)
+}
+
+func (t *tui) setOverlay(lines []string) {
+	t.mu.Lock()
+	t.overlay = lines
+	t.dirty = true
+	t.mu.Unlock()
 }
 
 func (t *tui) setStatus(s string) {
