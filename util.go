@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"time"
 	"unsafe"
 )
@@ -61,4 +62,20 @@ func dumpPPM(dir string, idx int, rgba []byte, w, h int) error {
 		}
 	}
 	return nil
+}
+
+// printSortedKeys lists all Android keycodes (for -keys).
+func printSortedKeys() {
+	for _, v := range sortedKeys() {
+		fmt.Fprintf(os.Stdout, "%3d %s\n", v, androidKeycodes[v])
+	}
+}
+
+func sortedKeys() []int {
+	var out []int
+	for k := range androidKeycodes {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
 }

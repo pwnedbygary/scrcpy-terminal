@@ -27,3 +27,6 @@ func parseFlags(cfg *config, mirrorFPS *float64) {
 	}
 	fs.Parse(os.Args[1:])
 }
+
+// keysMode is set by -keys (handled before device connection).
+var keysMode bool

@@ -39,6 +39,10 @@ func main() {
 	}
 	var mirrorFPS float64
 	parseFlags(&cfg, &mirrorFPS)
+	if cfg.keys {
+		printSortedKeys()
+		return
+	}
 
 	serial, err := findDevice(cfg.serial)
 	if err != nil {
