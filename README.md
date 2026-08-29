@@ -57,18 +57,35 @@ and you press F12/Ctrl-G to hand the mouse over.
 | F9 / F10 | Notification / settings shade |
 | F11 | Collapse panels |
 | F12 / Ctrl-G | Toggle grab (Zellij mouse path) |
-| Ctrl-K | Key palette: send *any* of the 284 Android keycodes (arrows navigate, Enter sends, `[a-z]` jumps) |
+| Ctrl-K (or Ctrl-O) | Show/hide the on-screen keyboard |
 | Alt+M | Mute local audio stream |
 | Alt+- / Alt+= | Local playback volume |
-| Ctrl-Q | Quit |
+| Alt+Q | Quit (`Ctrl+Q` is Zellij's session key — intentionally not used) |
 | Mouse left | Tap (down+up) |
-| Mouse left drag | Touch move |
+| Mouse left drag | Touch move (coalesced ~8ms) |
 | Wheel | Scroll |
 | Mouse right | Back |
 | Mouse middle | Home |
 
 Letters/digits type as Android key events (games work); uppercase adds shift
-meta. Other printable characters go through text injection.
+meta; Ctrl+A..Z send keycodes with the ctrl meta. Other printable characters
+go through text injection.
+
+### On-screen keyboard
+
+`Ctrl-K` opens a full software keyboard over the video (bottom-anchored):
+QWERTY, digits, symbols, D-pad, Android nav (Home/Back/Menu/Recents/Power/
+Vol±/Mute), F1–F12, and system actions (Rotate/Notif/Shade/Collapse/Grab/
+Hide/Quit). Mouse-click a key to press it; arrows + Enter navigate; sticky
+Shift/Ctrl/Alt behave like a real keyboard (one-shot after a text key); Esc
+or F12 hides it. Pressed keys flash green. Clicks above the keyboard pass
+through to the device as taps.
+
+### Status bar
+
+The bottom line shows device, resolution, grab state, volume, a live
+frametime sparkline (`▁▂▃▄▅▆▇`) + average ms, and the key hints — the graph
+makes render spikes visible while you play.
 
 ## Flags
 
