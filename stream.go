@@ -29,6 +29,7 @@ type streamState struct {
 
 	// audio stat
 	audioBytes int64 // decoded bytes handed to the sink
+	audioPeak  int16 // max |sample| seen (0 = silence, real audio > 0)
 }
 
 type videoFrame struct {
@@ -49,7 +50,8 @@ func newStreamState(sess *session, cfg config, ctrl *controller) *streamState {
 }
 
 // updateGeometry recomputes canvas + fit after a terminal resize or a video
-// session change.
+// session change. Cheap enough to call per frame (one ioctl); the canvas
+// realloc only happens when the size actually changed.
 func (s *streamState) updateGeometry() {
 	cols, rows := termSize()
 	rows-- // status bar
@@ -215,7 +217,16 @@ func (s *streamState) runVideo() error {
 			if !hasFrame {
 				break
 			}
-			if len(canvas) != canvasW*canvasH*4 {
+			// Terminal may have been resized since the last frame (SIGWINCH).
+			// The stream is the only place that knows the geometry, so check
+			// the terminal size here and re-fit when it changed.
+			s.updateGeometry()
+			ncw, nch := s.canvasSize()
+			if ncw != canvasW || nch != canvasH {
+				canvasW, canvasH = ncw, nch
+				canvas = make([]byte, canvasW*canvasH*4)
+				clear(canvas)
+			} else if len(canvas) != canvasW*canvasH*4 {
 				canvas = make([]byte, canvasW*canvasH*4)
 			}
 			// zero the letterbox region (cheap: only on geometry change)
@@ -353,6 +364,11 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 				break
 			}
 			s.audioBytes += int64(n)
+			if s.cfg.audio {
+				if pk := maxAbsInt16(pcm[:n]); pk > s.audioPeak {
+					s.audioPeak = pk
+				}
+			}
 			audioOut.writePCM16(pcm[:n])
 		}
 	}

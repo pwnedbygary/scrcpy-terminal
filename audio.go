@@ -6,6 +6,7 @@ package main
 #include <pulse/simple.h>
 #include <pulse/error.h>
 #include <stdlib.h>
+#include <string.h>
 
 // audioSink wraps pa_simple.
 typedef struct {
@@ -14,7 +15,7 @@ typedef struct {
     int valid;
 } sct_audio_sink;
 
-static sct_audio_sink *sct_audio_open(const char *app_name) {
+static sct_audio_sink *sct_audio_open_with_server(const char *app_name, const char *server) {
     sct_audio_sink *a = calloc(1, sizeof(*a));
     if (!a) return NULL;
     pa_sample_spec ss;
@@ -27,16 +28,27 @@ static sct_audio_sink *sct_audio_open(const char *app_name) {
     attr.prebuf = (uint32_t) -1;
     attr.minreq = (uint32_t) -1;
     attr.fragsize = (uint32_t) -1;
-    a->s = pa_simple_new(NULL, app_name, PA_STREAM_PLAYBACK, NULL,
+    a->s = pa_simple_new(server, app_name, PA_STREAM_PLAYBACK, NULL,
                          "sct audio", &ss, NULL, &attr, &a->err);
     a->valid = a->s != NULL;
     return a;
+}
+
+static sct_audio_sink *sct_audio_open(const char *app_name) {
+    return sct_audio_open_with_server(app_name, NULL);
 }
 
 static int sct_audio_write(sct_audio_sink *a, const uint8_t *data, int len) {
     if (!a || !a->valid) return -1;
     if (pa_simple_write(a->s, data, (size_t) len, &a->err) < 0) return -1;
     return 0;
+}
+
+// Returns the last pa error string (caller frees). NULL if none.
+static char *sct_audio_last_error(sct_audio_sink *a) {
+    if (!a || !a->err) return NULL;
+    char *s = strdup(pa_strerror(a->err));
+    return s;
 }
 
 static void sct_audio_close(sct_audio_sink *a) {
@@ -51,8 +63,11 @@ static void sct_audio_close(sct_audio_sink *a) {
 import "C"
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
+	"unsafe"
 )
 
 // audioSink plays s16le stereo 48kHz with a software gain (mute = gain 0).
@@ -65,16 +80,56 @@ type audioSink struct {
 
 func newAudioSink() *audioSink {
 	a := &audioSink{gain: 256}
-	sink := C.sct_audio_open(cstr("sct"))
-	if sink == nil || sink.valid == 0 {
-		a.err = errNoAudio()
-		if sink != nil {
-			C.sct_audio_close(sink)
-		}
-	} else {
-		a.sink = sink
-	}
+	a.open()
 	return a
+}
+
+// open (re)connects to PulseAudio. Retries a few times with a backoff since
+// audio servers (PipeWire) may be starting up. Reports the real PA error.
+func (a *audioSink) open() {
+	var lastErr string
+	// First try the default server (respects PULSE_SERVER / the session
+	// socket). If that fails, fall back to the explicit runtime-dir socket
+	// so terminals with a stale PULSE_SERVER still get sound.
+	servers := []string{"", pulseSocketPath()}
+	for _, server := range servers {
+		for attempt := 0; attempt < 3; attempt++ {
+			sink := C.sct_audio_open_with_server(cstr("sct"), cstr(server))
+			if sink != nil && sink.valid != 0 {
+				a.sink = sink
+				a.err = nil
+				return
+			}
+			if sink != nil {
+				if es := C.sct_audio_last_error(sink); es != nil {
+					lastErr = C.GoString(es)
+					C.free(unsafe.Pointer(es))
+				}
+				C.sct_audio_close(sink)
+			}
+			lastErr = fmt.Sprintf("server %q: %s", server, lastErr)
+			time.Sleep(time.Duration(150*(attempt+1)) * time.Millisecond)
+		}
+	}
+	if lastErr == "" {
+		lastErr = "pulseaudio not available"
+	}
+	a.err = fmt.Errorf("audio sink: %s", lastErr)
+}
+
+// pulseSocketPath returns the standard user pulse socket, or "".
+func pulseSocketPath() string {
+	if dir := envOr("XDG_RUNTIME_DIR", ""); dir != "" {
+		return "unix:" + dir + "/pulse/native"
+	}
+	return ""
+}
+
+func (a *audioSink) errString() string {
+	if a.err == nil {
+		return ""
+	}
+	return fmt.Sprintf("%v (check: pipewire or pulseaudio running? `pactl info`)", a.err)
 }
 
 func errNoAudio() error {
@@ -114,6 +169,7 @@ func (a *audioSink) writePCM16(pcm []byte) {
 	}
 	if C.sct_audio_write(a.sink, (*C.uint8_t)(bytePtr(pcm)), C.int(len(pcm))) != 0 {
 		a.err = errPulseLagged{}
+		logOnce("sct: audio sink write failed; audio stopped. Check `pactl list sinks` and your audio server.\n")
 	}
 }
 

@@ -103,8 +103,12 @@ int sct_vdec_scale(void *v, uint8_t *dst, int dst_stride, int dst_w, int dst_h,
     if (d->sws_src_w != f->width || d->sws_src_h != f->height ||
         d->sws_dst_w != dst_w || d->sws_dst_h != dst_h) {
         if (d->sws) sws_freeContext(d->sws);
+        // AV_PIX_FMT_BGR0: memory layout [B,G,R,0]. As a little-endian u32
+        // that is 0x00RRGGBB, exactly the layout sct_mkkey() assumes and
+        // renderer's rgbStr() expects. sws RGBA would make 0x00BBGGRR (R<->B
+        // swap -> shifted colors).
         d->sws = sws_getContext(f->width, f->height, f->format,
-                                dst_w, dst_h, AV_PIX_FMT_RGBA,
+                                dst_w, dst_h, AV_PIX_FMT_BGR0,
                                 SWS_BILINEAR, NULL, NULL, NULL);
         if (!d->sws) return -1;
         d->sws_src_w = f->width;

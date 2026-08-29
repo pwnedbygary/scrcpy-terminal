@@ -88,7 +88,7 @@ func (a *app) run() error {
 	// Print warnings before entering the alternate screen so they don't
 	// corrupt the TUI.
 	if a.cfg.audio && a.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "sct: audio disabled: %v\n", a.audio.err)
+		fmt.Fprintf(stderrWriter(), "sct: audio disabled: %v\n", a.audio.errString())
 	}
 
 	a.tui.shellInit()
@@ -180,9 +180,9 @@ func (a *app) runHeadless() error {
 				}
 			}
 		case <-ticker.C:
-			fmt.Fprintf(os.Stdout, "\r[%dx%d fps=%.0f audio=%s pcm=%dKB]   ",
+			fmt.Fprintf(os.Stdout, "\r[%dx%d fps=%.0f audio=%s pcm=%dKB peak=%d]   ",
 				a.frameW, a.frameH, a.stream.currentFPS, audioState(a),
-				a.stream.audioBytes/1024)
+				a.stream.audioBytes/1024, a.stream.audioPeak)
 		}
 	}
 }
@@ -222,8 +222,12 @@ func (a *app) statusLine() string {
 		return fmt.Sprintf("sct %s · key palette · Ctrl-K/Esc close · Enter send", a.sess.deviceName)
 	}
 	vol := "-"
-	if a.audio != nil && a.cfg.audio && a.audio.err == nil {
-		vol = strconv.Itoa(a.audio.gainPercent()) + "%"
+	if a.audio != nil && a.cfg.audio {
+		if a.audio.err == nil {
+			vol = strconv.Itoa(a.audio.gainPercent()) + "%"
+		} else {
+			vol = "off"
+		}
 	}
 	g := "grab"
 	if !a.grabbed {

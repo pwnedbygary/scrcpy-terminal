@@ -118,13 +118,15 @@ func adecFree(d unsafe.Pointer) {
 // ---------------------------------------------------------------------------
 
 // packCells fills keys with quantized half-block cells from an RGBA canvas of
-// w x h pixels (h even). keys must be len w*(h/2).
-func packCells(rgba []byte, keys []uint64, w, h int) {
+// w x h pixels (h even), unless the buffers don't line up (resize race).
+// Never panics: returns false on mismatch, caller drops the frame.
+func packCells(rgba []byte, keys []uint64, w, h int) bool {
 	if len(rgba) != w*h*4 || len(keys) != w*(h/2) {
-		panic("packCells size mismatch")
+		return false
 	}
 	C.sct_pack_cells((*C.uint8_t)(unsafe.Pointer(&rgba[0])), C.int(w), C.int(h),
 		(*C.uint64_t)(unsafe.Pointer(&keys[0])))
+	return true
 }
 
 // gainS16 applies fixed-point q8 gain (256 = 1.0, 0 = mute) in place.

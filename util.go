@@ -79,3 +79,19 @@ func sortedKeys() []int {
 	sort.Ints(out)
 	return out
 }
+
+// maxAbsInt16 returns the maximum absolute s16 sample in b.
+func maxAbsInt16(b []byte) int16 {
+	var m int16
+	for i := 0; i+1 < len(b); i += 2 {
+		v := int16(b[i]) | int16(b[i+1])<<8
+		if v < 0 {
+			if -v > m {
+				m = -v
+			}
+		} else if v > m {
+			m = v
+		}
+	}
+	return m
+}

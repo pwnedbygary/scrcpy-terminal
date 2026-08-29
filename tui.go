@@ -85,10 +85,9 @@ func (t *tui) draw(rgba []byte) {
 	}
 	w := t.cols
 	h := t.rows * 2 // two vertical pixels per cell
-	if len(rgba) < w*h*4 {
+	if !packCells(rgba, t.keys, w, h) {
 		return // stale canvas (resize in flight); next frame fixes it
 	}
-	packCells(rgba, t.keys, w, h)
 
 	t.frameIdx++
 	forceFull := t.dirty || t.frameIdx%24 == 0
