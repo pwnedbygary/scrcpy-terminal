@@ -369,7 +369,11 @@ func (a *app) statusLine() string {
 			avg += a.ftHist[idx]
 		}
 		avg /= float64(n)
-		ft = fmt.Sprintf("  %s %4.1fms ", a.sparkline(20), avg)
+		fps := 0.0
+		if avg > 0.01 {
+			fps = 1000.0 / avg
+		}
+		ft = fmt.Sprintf("  %s %4.1fms %4.1ffps ", a.sparkline(20), avg, fps)
 	}
 	return fmt.Sprintf("sct %s %dx%d %s vol %s%s%s| Esc back · F1-F4 home/menu/recents/power · F5/F6 dev-vol · F7 mute · F8 rotate · F9/F10 shade · Ctrl-K kb · Alt+M mute · Alt+Q quit",
 		name, a.frameW, a.frameH, g, vol, kb, ft)
