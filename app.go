@@ -310,15 +310,17 @@ func (a *app) sparkline(width int) string {
 	}
 	// max clamp at 100ms so a single giant spike doesn't flatten the graph
 	maxMs := 100.0
-	blocks := " ▁▂▃▄▅▆▇█"
-	out := make([]byte, 0, n)
+	// NOTE: blocks is a []rune. Indexing a string by byte would slice INSIDE
+	// a 3-byte UTF-8 sequence and emit garbage (the garbled-characters bug).
+	blocks := []rune("  ▁▂▃▄▅▆▇█")
+	out := make([]rune, 0, n)
 	for i := 0; i < n; i++ {
 		v := a.ftHist[(start+i)%len(a.ftHist)]
 		if v > maxMs {
 			v = maxMs
 		}
-		// 0..100ms -> 1..8
-		h := int(v / maxMs * 7)
+		// 0..100ms -> 1..7 (lowest bar = after the leading space)
+		h := int(v / maxMs * 7.0)
 		if h < 1 {
 			h = 1
 		}
