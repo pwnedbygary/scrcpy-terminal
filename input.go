@@ -13,6 +13,11 @@ import (
 // ---------------------------------------------------------------------------
 
 func (a *app) inputLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(stderrWriter(), "sct: input loop panic: %v\n", r)
+		}
+	}()
 	buf := make([]byte, 4096)
 	pend := make([]byte, 0, 4096)
 	for {
@@ -99,6 +104,7 @@ func (a *app) decodeInput(pend []byte) ([]byte, int) {
 }
 
 // escSeqLen estimates how many bytes a CSI/SS3 sequence needs.
+// Returns 0 if the sequence is incomplete (wait for more data).
 func escSeqLen(b []byte) int {
 	// b[0] == 0x1b
 	if len(b) < 2 {
@@ -106,10 +112,17 @@ func escSeqLen(b []byte) int {
 	}
 	switch b[1] {
 	case '[': // CSI
-		// ends with 0x40-0x7e final byte
+		// CSI params may contain 0x30-0x3f (numeric/private) and
+		// intermediates 0x20-0x2f; the sequence ends at 0x40-0x7e.
+		// If we see a byte that can never start a CSI sequence, stop and
+		// treat what we have as a bare ESC + raw bytes.
 		for i := 2; i < len(b); i++ {
-			if b[i] >= 0x40 && b[i] <= 0x7e {
+			c := b[i]
+			if c >= 0x40 && c <= 0x7e {
 				return i + 1
+			}
+			if c < 0x20 {
+				return 2 // incomplete/garbage: emit ESC alone
 			}
 		}
 		return 0
@@ -124,8 +137,14 @@ func escSeqLen(b []byte) int {
 	}
 }
 
-// handleInput dispatches decoded input.
+// handleInput dispatches decoded input. It must NEVER panic: any bad byte or
+// transient nil-state swallows the event and keeps the TUI alive.
 func (a *app) handleInput(b []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(stderrWriter(), "sct: input ignored: %v (bytes % x)\n", r, b)
+		}
+	}()
 	if len(b) == 0 {
 		return
 	}
@@ -207,29 +226,29 @@ func (a *app) handleInput(b []byte) {
 
 func (a *app) toggleGrab() {
 	a.setMouse(!a.grabbed)
-	a.tui.setStatus(a.statusLine())
+	a.refreshStatus()
 }
 
 // toggleLocalMute mutes/unmutes the local audio stream (Alt+M).
 func (a *app) toggleLocalMute() {
-	if a.audio == nil {
-		return
+	if a.audio == nil || a.audio.err != nil {
+		return // no sink to mute
 	}
 	if a.audio.gainPercent() == 0 {
 		a.audio.setGain(100)
 	} else {
 		a.audio.setGain(0)
 	}
-	a.tui.setStatus(a.statusLine())
+	a.refreshStatus()
 }
 
 // adjustLocalVolume changes local playback volume (Alt+- / Alt+=).
 func (a *app) adjustLocalVolume(delta int) {
-	if a.audio == nil {
-		return
+	if a.audio == nil || a.audio.err != nil {
+		return // no sink to adjust
 	}
 	a.audio.setGain(a.audio.gainPercent() + delta)
-	a.tui.setStatus(a.statusLine())
+	a.refreshStatus()
 }
 
 func (a *app) sendAndroidKey(code uint32) {
@@ -507,7 +526,12 @@ func (a *app) mouseEvent(b []byte) bool {
 	}
 
 	btn := btnRaw & 0x7f
-	wheel := false
+
+	if a.ctrl == nil {
+		// No control socket (--control=false or not yet connected):
+		// consume mouse events, never crash on them.
+		return true
+	}
 
 	switch {
 	case btn == 64:
@@ -541,7 +565,6 @@ func (a *app) mouseEvent(b []byte) bool {
 			a.ctrl.back()
 		}
 	}
-	_ = wheel
 	return true
 }
 

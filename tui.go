@@ -212,6 +212,9 @@ func (t *tui) shellInit() {
 
 func (t *tui) shellClose() {
 	t.running = false
+	// Always disable mouse reporting + restore the normal screen, so a crash
+	// or quit never leaves SGR garbage pouring into the shell.
+	os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?1015l")
 	os.Stdout.WriteString("\x1b[0m\x1b[?25h\x1b[?1049l")
 }
 

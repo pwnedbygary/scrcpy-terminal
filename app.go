@@ -207,23 +207,34 @@ func (a *app) setMouse(on bool) {
 	a.grabbed = on
 }
 
+// refreshStatus redraws the status line (nil-safe for headless/transient states).
+func (a *app) refreshStatus() {
+	if a.tui != nil {
+		a.tui.setStatus(a.statusLine())
+	}
+}
+
 func (a *app) statusLine() string {
-	if a.tui == nil {
+	if a.tui == nil || a.audio == nil {
 		return ""
 	}
 	if a.paletteOpen {
 		return fmt.Sprintf("sct %s · key palette · Ctrl-K/Esc close · Enter send", a.sess.deviceName)
 	}
 	vol := "-"
-	if a.cfg.audio && a.audio.err == nil {
+	if a.audio != nil && a.cfg.audio && a.audio.err == nil {
 		vol = strconv.Itoa(a.audio.gainPercent()) + "%"
 	}
 	g := "grab"
 	if !a.grabbed {
 		g = "UNGRAB"
 	}
+	name := "device"
+	if a.sess != nil {
+		name = a.sess.deviceName
+	}
 	return fmt.Sprintf("sct %s  %dx%d  %s  vol %s  | Esc back · F1 home · F2 menu · F3 recents · F5/F6 dev-vol · F7 mute · F8 rotate · F9/F10 shade · Ctrl-K keys · Alt+M local-mute · Ctrl-Q quit",
-		a.sess.deviceName, a.frameW, a.frameH, g, vol)
+		name, a.frameW, a.frameH, g, vol)
 }
 
 func (a *app) shutdown() {
