@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -23,15 +22,24 @@ type app struct {
 	// input events channel
 	events chan inputEvent
 
-	// palette state
-	paletteOpen bool
-	paletteIdx  int
-	paletteKeys []int // sorted keycode values
+	// software keyboard
+	kb *keyboard
 
 	mouseDown bool
 
 	// frame geometry for pointer mapping
 	frameW, frameH int
+
+	// frametime history for the status-bar sparkline (latest last)
+	ftHist [96]float64 // ms per frame
+	ftIdx  int
+	ftCnt  int
+
+	lastFrameNano int64
+
+	// coalesced drag move state
+	lastMoveNano int64
+	pendingMove  position
 }
 
 type inputEvent struct {
@@ -62,14 +70,9 @@ func newApp(sess *session, cfg config) *app {
 		a.ctrl = newController(sess.control)
 		go deviceMsgReader(sess.control)
 	}
-	// palette list: all keycodes sorted
-	for k := range androidKeycodes {
-		a.paletteKeys = append(a.paletteKeys, k)
-	}
-	sort.Ints(a.paletteKeys)
-
 	if !cfg.noTUI {
 		a.tui = newTUI()
+		a.kb = newKeyboard()
 	}
 	return a
 }
@@ -140,13 +143,20 @@ func (a *app) run() error {
 				a.tui.resize()
 				a.tui.setStatus(a.statusLine())
 			case evTick:
+				a.flushPendingMove()
 				a.tui.setStatus(a.statusLine())
 			case evBytes:
 				a.handleInput(ev.buf)
 			}
 		case f := <-a.stream.deliver:
+			now := timeNowUnixNano()
+			if a.lastFrameNano != 0 {
+				a.recordFrameTime(float64(now-a.lastFrameNano) / 1e6)
+			}
+			a.lastFrameNano = now
 			a.frameW, a.frameH = f.w, f.h
 			a.tui.draw(f.rgb)
+			a.stream.returnPooled(f.rgb)
 		}
 	}
 }
@@ -214,12 +224,115 @@ func (a *app) refreshStatus() {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// software keyboard open/close + overlay refresh
+// ---------------------------------------------------------------------------
+
+func (a *app) openKeyboard() {
+	if a.kb == nil {
+		return
+	}
+	a.kb.open = true
+	a.refreshKeyboard()
+}
+
+func (a *app) closeKeyboard() {
+	if a.kb == nil {
+		return
+	}
+	a.kb.open = false
+	if a.tui != nil {
+		a.tui.setOverlay(nil)
+		a.tui.setStatus(a.statusLine())
+		a.tui.dirty = true
+	}
+}
+
+func (a *app) toggleKeyboard() {
+	if a.kb == nil {
+		return
+	}
+	if a.kb.open {
+		a.closeKeyboard()
+	} else {
+		a.openKeyboard()
+	}
+}
+
+// refreshKeyboard re-renders the keyboard overlay + status.
+func (a *app) refreshKeyboard() {
+	if a.kb == nil || a.tui == nil {
+		return
+	}
+	if a.kb.open {
+		_, rows := termSize()
+		a.tui.setOverlay(a.kb.lines(rows))
+	} else {
+		a.tui.setOverlay(nil)
+	}
+	a.tui.setStatus(a.statusLine())
+	a.tui.dirty = true
+}
+
+// ---------------------------------------------------------------------------
+// frametime history (status-bar sparkline)
+// ---------------------------------------------------------------------------
+
+// recordFrameTime feeds one rendered-frame interval in milliseconds.
+func (a *app) recordFrameTime(ms float64) {
+	if ms < 0 {
+		ms = 0
+	}
+	if ms > 5000 {
+		ms = 5000
+	}
+	a.ftHist[a.ftIdx] = ms
+	a.ftIdx = (a.ftIdx + 1) % len(a.ftHist)
+	if a.ftCnt < len(a.ftHist) {
+		a.ftCnt++
+	}
+}
+
+// sparkline renders the frametime history as a tiny bar graph. Target is the
+// display refresh target (e.g. 16.7ms at 60Hz); taller than ~60ms = spike.
+func (a *app) sparkline(width int) string {
+	if a.ftCnt == 0 || width <= 0 {
+		return ""
+	}
+	n := a.ftCnt
+	if n > width {
+		n = width
+	}
+	// take the latest n samples, oldest first
+	start := a.ftIdx - n
+	if start < 0 {
+		start += len(a.ftHist)
+	}
+	// max clamp at 100ms so a single giant spike doesn't flatten the graph
+	maxMs := 100.0
+	blocks := " ▁▂▃▄▅▆▇█"
+	out := make([]byte, 0, n)
+	for i := 0; i < n; i++ {
+		v := a.ftHist[(start+i)%len(a.ftHist)]
+		if v > maxMs {
+			v = maxMs
+		}
+		// 0..100ms -> 1..8
+		h := int(v / maxMs * 7)
+		if h < 1 {
+			h = 1
+		}
+		if h > 7 {
+			h = 7
+		}
+		out = append(out, blocks[h])
+	}
+	return string(out)
+}
+
 func (a *app) statusLine() string {
 	if a.tui == nil || a.audio == nil {
 		return ""
-	}
-	if a.paletteOpen {
-		return fmt.Sprintf("sct %s · key palette · Ctrl-K/Esc close · Enter send", a.sess.deviceName)
 	}
 	vol := "-"
 	if a.audio != nil && a.cfg.audio {
@@ -237,8 +350,26 @@ func (a *app) statusLine() string {
 	if a.sess != nil {
 		name = a.sess.deviceName
 	}
-	return fmt.Sprintf("sct %s  %dx%d  %s  vol %s  | Esc back · F1 home · F2 menu · F3 recents · F5/F6 dev-vol · F7 mute · F8 rotate · F9/F10 shade · Ctrl-K keys · Alt+M local-mute · Ctrl-Q quit",
-		name, a.frameW, a.frameH, g, vol)
+	kb := ""
+	if a.kb != nil && a.kb.open {
+		kb = "  [KB]"
+	}
+	var ft string
+	if a.ftCnt > 0 {
+		avg := 0.0
+		n := a.ftCnt
+		if n > 32 {
+			n = 32
+		}
+		for i := 0; i < n; i++ {
+			idx := (a.ftIdx - 1 - i + len(a.ftHist)) % len(a.ftHist)
+			avg += a.ftHist[idx]
+		}
+		avg /= float64(n)
+		ft = fmt.Sprintf("  %s %4.1fms ", a.sparkline(20), avg)
+	}
+	return fmt.Sprintf("sct %s %dx%d %s vol %s%s%s| Esc back · F1-F4 home/menu/recents/power · F5/F6 dev-vol · F7 mute · F8 rotate · F9/F10 shade · Ctrl-K kb · Alt+M mute · Alt+Q quit",
+		name, a.frameW, a.frameH, g, vol, kb, ft)
 }
 
 func (a *app) shutdown() {

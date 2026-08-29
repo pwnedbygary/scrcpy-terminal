@@ -7,12 +7,12 @@ import (
 // TestInputFuzz drives the real dispatch path with adversarial sequences.
 func TestInputFuzz(t *testing.T) {
 	a := &app{
-		events:      make(chan inputEvent, 64),
-		paletteKeys: []int{3, 4, 82, 187, 24, 25, 91},
-		grabbed:     true,
-		audio:       &audioSink{gain: 256},
-		tui:         &tui{cols: 80, rows: 39, keys: make([]uint64, 80*39), prev: make([]uint64, 80*39)},
-		stream:      &streamState{videoW: 1280, videoH: 720},
+		events:  make(chan inputEvent, 64),
+		kb:      newKeyboard(),
+		grabbed: true,
+		audio:   &audioSink{gain: 256},
+		tui:     &tui{cols: 80, rows: 39, keys: make([]uint64, 80*39), prev: make([]uint64, 80*39)},
+		stream:  &streamState{videoW: 1280, videoH: 720},
 	}
 	a.stream.updateGeometry()
 

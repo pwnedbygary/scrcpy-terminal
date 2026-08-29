@@ -148,38 +148,37 @@ func (a *app) handleInput(b []byte) {
 	if len(b) == 0 {
 		return
 	}
-	// palette open: local navigation only
-	if a.paletteOpen {
-		a.paletteInput(b)
-		return
+	// global keys (work even when grabbed, before the keyboard consumes input).
+	// NOTE: no Ctrl-Q! Zellij owns it (quits the session) — use Alt+Q.
+	if len(b) == 1 {
+		switch b[0] {
+		case 0x07: // Ctrl-G
+			a.toggleGrab()
+			return
+		case 0x0b: // Ctrl-K: show/hide the software keyboard
+			a.toggleKeyboard()
+			return
+		case 0x0f: // Ctrl-O: also toggle the keyboard
+			a.toggleKeyboard()
+			return
+		}
+	}
+	// keyboard open: consume keys for navigation, and mouse clicks for keys
+	if a.kb != nil && a.kb.open {
+		if a.keyboardInput(b) {
+			return
+		}
 	}
 	// mouse (SGR) sequences take priority
 	if a.mouseEvent(b) {
 		return
-	}
-	// global keys (work even when grabbed)
-	if len(b) == 1 {
-		switch b[0] {
-		case 0x11: // Ctrl-Q
-			a.events <- inputEvent{kind: evQuit}
-			return
-		case 0x07: // Ctrl-G
-			a.toggleGrab()
-			return
-		case 0x0b: // Ctrl-K
-			a.openPalette()
-			return
-		case 0x1b: // bare Alt-Esc? treat as Esc (back)
-		}
-		// bare ESC (single byte) came through as 0x1b only if there is no
-		// sequence; decodeInput only returns 0x1b with a following char.
 	}
 	// F12 = grab toggle
 	if isFKey(b, 12) {
 		a.toggleGrab()
 		return
 	}
-	// Alt+key: local controls (Alt+M mute, Alt+- / Alt+= volume)
+	// Alt+key: local controls (Alt+M mute, Alt+- / Alt+= volume, Alt+Q quit)
 	if len(b) == 2 && b[0] == 0x1b && b[1] != '[' && b[1] != 'O' {
 		switch b[1] {
 		case 'm', 'M':
@@ -190,6 +189,9 @@ func (a *app) handleInput(b []byte) {
 			return
 		case '=', '+':
 			a.adjustLocalVolume(10)
+			return
+		case 'q', 'Q':
+			a.events <- inputEvent{kind: evQuit}
 			return
 		}
 	}
@@ -266,15 +268,20 @@ func (a *app) sendAndroidKeyMeta(code uint32, meta uint32) {
 
 // handleByte: one raw byte (printable or control).
 func (a *app) handleByte(c byte) {
-	switch c {
-	case 0x0d: // Enter
-		a.sendAndroidKeyMeta(66, metaCtrlOn&0) // ENTER
-	case 0x7f: // Backspace
+	switch {
+	case c == 0x0d: // Enter
+		a.sendAndroidKeyMeta(66, 0) // ENTER
+	case c == 0x7f: // Backspace
 		a.sendAndroidKeyMeta(67, 0) // DEL
-	default:
-		if c >= 0x20 && c <= 0x7e {
-			a.injectChar(c)
-		}
+	case c == 0x09: // Tab
+		a.sendAndroidKeyMeta(61, 0) // TAB
+	case c >= 0x01 && c <= 0x1a:
+		// Ctrl+A..Z -> keycode with AMETA_CTRL_ON (0x1000).
+		// 0x01='A' ... 0x1a='Z'; letters are keycodes 29..54.
+		letter := c - 1
+		a.sendAndroidKeyMeta(uint32(29+letter), metaCtrlOn)
+	case c >= 0x20 && c <= 0x7e:
+		a.injectChar(c)
 	}
 }
 
@@ -521,6 +528,23 @@ func (a *app) mouseEvent(b []byte) bool {
 		cellY = 1
 	}
 
+	// Keyboard open: clicks inside the keyboard area press keys, clicks
+	// above it pass through to the device (tap-through).
+	if a.kb != nil && a.kb.open {
+		_, rows := termSize()
+		if key, ok := a.kb.hitTest(cellX, cellY, rows); ok {
+			if pressed && btnRaw&0x07 == 0 { // left button only
+				// flash the pressed key (we need its grid position: re-hit)
+				if kc, ok2 := a.kb.hitTestKeyCell(cellX, cellY, rows); ok2 {
+					a.kb.flash(kc.row, kc.col)
+				}
+				a.kb.act(a, key)
+				a.refreshKeyboard()
+			}
+			return true
+		}
+	}
+
 	if !a.grabbed {
 		return true
 	}
@@ -542,7 +566,7 @@ func (a *app) mouseEvent(b []byte) bool {
 		return true
 	case btnRaw&32 != 0 && pressed: // motion
 		if a.mouseDown {
-			a.ctrl.touchMove(a.posAt(cellX, cellY))
+			a.coalescedMove(a.posAt(cellX, cellY))
 		}
 		return true
 	}

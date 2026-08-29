@@ -95,3 +95,30 @@ func maxAbsInt16(b []byte) int16 {
 	}
 	return m
 }
+
+// overlayLine is one row of TUI overlay text with optional highlight spans
+// (byte offsets into text, in rune-aligned columns; -1 = none).
+// hl = cursor (reverse video), fl = press flash (green background).
+type overlayLine struct {
+	text   string
+	hlFrom int
+	hlTo   int
+	flFrom int
+	flTo   int
+}
+
+// runeByteIndex converts a rune-column offset into a byte offset of s.
+// Returns -1 if the offset is past the end.
+func runeByteIndex(s string, col int) int {
+	if col <= 0 {
+		return 0
+	}
+	count := 0
+	for i := range s {
+		if count == col {
+			return i
+		}
+		count++
+	}
+	return -1
+}

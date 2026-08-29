@@ -49,8 +49,9 @@ type tui struct {
 	// color resolution helpers
 	sgrBuf []byte
 
-	// palette overlay rendered over the video area (set by the app)
-	overlay []string // one string per screen row (may be shorter)
+	// overlay rendered over the video area (set by the app): palette text or
+	// the software keyboard. Each line may carry a highlight span (cursor).
+	overlay []overlayLine
 }
 
 func newTUI() *tui {
@@ -142,17 +143,79 @@ func (t *tui) draw(rgba []byte) {
 		// copy back the drawn row
 		copy(t.prev[row:row+w], t.keys[row:row+w])
 	}
-	// palette overlay: paint text rows over the video
+	// overlay: paint text rows over the video
 	if len(t.overlay) > 0 {
-		for i, line := range t.overlay {
+		for i, ol := range t.overlay {
 			if i >= t.rows {
 				break
 			}
-			line = truncateRunes(line, t.cols)
+			line := truncateRunes(ol.text, t.cols)
 			out = ap(out, "\x1b[", strconv.Itoa(i+1), ";1H",
 				"\x1b[48;2;0;0;0m\x1b[38;2;220;220;220m")
-			out = append(out, line...)
-			for j := len(line); j < t.cols; j++ {
+			// Segment-based emission: cursor (reverse video) and press-flash
+			// (green bg) spans are sorted and emitted without overlap.
+			hb := []byte(line)
+			bFrom := runeByteIndex(line, ol.hlFrom)
+			bTo := runeByteIndex(line, ol.hlTo)
+			if bFrom < 0 {
+				bFrom = len(hb)
+			}
+			if bTo < 0 || bTo > len(hb) {
+				bTo = len(hb)
+			}
+			gFrom := runeByteIndex(line, ol.flFrom)
+			gTo := runeByteIndex(line, ol.flTo)
+			if gFrom < 0 {
+				gFrom = len(hb)
+			}
+			if gTo < 0 || gTo > len(hb) {
+				gTo = len(hb)
+			}
+			type span struct {
+				from, to int
+				code     string
+				reset    string
+			}
+			var spans []span
+			if bFrom < bTo {
+				spans = append(spans, span{bFrom, bTo, "\x1b[7m", "\x1b[27m"})
+			}
+			if gFrom < gTo {
+				spans = append(spans, span{gFrom, gTo,
+					"\x1b[48;2;0;150;0m\x1b[38;2;255;255;255m",
+					"\x1b[0m\x1b[48;2;0;0;0m\x1b[38;2;220;220;220m"})
+			}
+			if len(spans) == 0 {
+				out = append(out, hb...)
+			} else {
+				// sort by start
+				if len(spans) == 2 && spans[1].from < spans[0].from {
+					spans[0], spans[1] = spans[1], spans[0]
+				}
+				pos := 0
+				for _, sp := range spans {
+					if sp.from > pos {
+						out = append(out, hb[pos:sp.from]...)
+					}
+					// clamp in case of overlap
+					f := sp.from
+					t := sp.to
+					if f < pos {
+						f = pos
+					}
+					if t <= f {
+						continue
+					}
+					out = append(out, sp.code...)
+					out = append(out, hb[f:t]...)
+					out = append(out, sp.reset...)
+					pos = t
+				}
+				if pos < len(hb) {
+					out = append(out, hb[pos:]...)
+				}
+			}
+			for j := len(ol.text); j < t.cols; j++ {
 				out = append(out, ' ')
 			}
 			out = append(out, "\x1b[0m"...)
@@ -186,7 +249,7 @@ func rgbStr(c uint32) string {
 	return strconv.Itoa(int(c>>16)&0xFF) + ";" + strconv.Itoa(int(c>>8)&0xFF) + ";" + strconv.Itoa(int(c)&0xFF)
 }
 
-func (t *tui) setOverlay(lines []string) {
+func (t *tui) setOverlay(lines []overlayLine) {
 	t.mu.Lock()
 	t.overlay = lines
 	t.dirty = true

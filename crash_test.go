@@ -6,15 +6,15 @@ import "testing"
 // Ctrl+= in Konsole sends `\x1b[27;5;61~` (CSI-u) or `\x1b[61;5u` (kitty).
 func TestCtrlBracketEquals(t *testing.T) {
 	a := &app{
-		events:      make(chan inputEvent, 64),
-		paletteKeys: []int{3},
-		grabbed:     true,
-		audio:       &audioSink{gain: 256},
-		cfg:         config{audio: true},
-		tui:         &tui{cols: 80, rows: 39, keys: make([]uint64, 80*39), prev: make([]uint64, 80*39)},
-		stream:      &streamState{videoW: 1280, videoH: 720},
-		sess:        &session{deviceName: "test"},
-		ctrl:        &controller{},
+		events:  make(chan inputEvent, 64),
+		kb:      newKeyboard(),
+		grabbed: true,
+		audio:   &audioSink{gain: 256},
+		cfg:     config{audio: true},
+		tui:     &tui{cols: 80, rows: 39, keys: make([]uint64, 80*39), prev: make([]uint64, 80*39)},
+		stream:  &streamState{videoW: 1280, videoH: 720},
+		sess:    &session{deviceName: "test"},
+		ctrl:    &controller{},
 	}
 	a.stream.updateGeometry()
 

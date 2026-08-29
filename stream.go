@@ -28,6 +28,10 @@ type streamState struct {
 	// fps
 	currentFPS float64
 
+	// canvas pool: hand the renderer its own buffer so the decoder can
+	// immediately reuse its scratch canvas without an alloc+copy per frame.
+	canvasPool [2][]byte
+
 	// audio stat
 	audioBytes int64       // decoded bytes handed to the sink
 	audioPeak  int16       // max |sample| seen (0 = silence, real audio > 0)
@@ -242,7 +246,7 @@ func (s *streamState) runVideo() error {
 			if s.cfg.dumpFrames != "" {
 				full := make([]byte, s.videoW*s.videoH*4)
 				if _, _, err := vdecScaleStride(dec, full, s.videoW*4, s.videoW, s.videoH); err == nil {
-					cpy := make([]byte, len(full))
+					cpy := s.takePooled(len(full))
 					copy(cpy, full)
 					s.deliver <- &videoFrame{rgb: cpy, w: s.videoW, h: s.videoH,
 						cw: s.videoW, ch: s.videoH, fps: fps()}
@@ -253,8 +257,9 @@ func (s *streamState) runVideo() error {
 			if _, _, err := vdecScaleStride(dec, reg, canvasW*4, s.fitW, s.fitH); err != nil {
 				continue
 			}
-			// copy so the next decode cannot race the renderer
-			cpy := make([]byte, len(canvas))
+			// hand the renderer a pooled copy of the canvas so the decoder
+			// can keep decoding into its scratch buffer immediately
+			cpy := s.takePooled(len(canvas))
 			copy(cpy, canvas)
 			frame := &videoFrame{rgb: cpy, w: s.videoW, h: s.videoH,
 				cw: canvasW, ch: canvasH, fps: fps()}
@@ -389,6 +394,31 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 				}
 			}
 			audioOut.writePCM16(pcm[:n])
+		}
+	}
+}
+
+// takePooled returns a buffer of at least n bytes, reusing pooled canvases
+// when available (frames freed by the renderer via returnPooled).
+func (s *streamState) takePooled(n int) []byte {
+	for i, b := range s.canvasPool {
+		if b != nil && cap(b) >= n {
+			s.canvasPool[i] = nil
+			return b[:n]
+		}
+	}
+	return make([]byte, n)
+}
+
+// returnPooled gives a buffer back for reuse.
+func (s *streamState) returnPooled(b []byte) {
+	if b == nil {
+		return
+	}
+	for i := range s.canvasPool {
+		if s.canvasPool[i] == nil {
+			s.canvasPool[i] = b
+			return
 		}
 	}
 }
