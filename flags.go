@@ -19,6 +19,8 @@ func parseFlags(cfg *config, mirrorFPS *float64) {
 	fs.BoolVar(&cfg.noTUI, "no-tui", cfg.noTUI, "run without the TUI (headless stats)")
 	fs.BoolVar(&cfg.keys, "keys", cfg.keys, "print all supported Android keys and exit")
 	fs.StringVar(&cfg.dumpFrames, "dump-frames", "", "dump first frames as PPM to this dir (verification)")
+	fs.StringVar(&cfg.audioDump, "dump-audio", "", "dump raw audio wire packets to this file (verification)")
+	fs.BoolVar(&cfg.audioDup, "audio-dup", cfg.audioDup, "keep device audio playing while capturing (duplicates to device)")
 	fs.Float64Var(mirrorFPS, "mirror-fps", 0, "cap display framerate (0 = uncapped)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "sct - scrcpy in your terminal\n\n")

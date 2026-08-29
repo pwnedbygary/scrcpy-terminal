@@ -15,7 +15,7 @@ typedef struct {
     int valid;
 } sct_audio_sink;
 
-static sct_audio_sink *sct_audio_open_with_server(const char *app_name, const char *server) {
+static sct_audio_sink *sct_audio_open_with_server(const char *app_name, const char *server, const char *device) {
     sct_audio_sink *a = calloc(1, sizeof(*a));
     if (!a) return NULL;
     pa_sample_spec ss;
@@ -28,14 +28,14 @@ static sct_audio_sink *sct_audio_open_with_server(const char *app_name, const ch
     attr.prebuf = (uint32_t) -1;
     attr.minreq = (uint32_t) -1;
     attr.fragsize = (uint32_t) -1;
-    a->s = pa_simple_new(server, app_name, PA_STREAM_PLAYBACK, NULL,
+    a->s = pa_simple_new(server, app_name, PA_STREAM_PLAYBACK, device,
                          "sct audio", &ss, NULL, &attr, &a->err);
     a->valid = a->s != NULL;
     return a;
 }
 
 static sct_audio_sink *sct_audio_open(const char *app_name) {
-    return sct_audio_open_with_server(app_name, NULL);
+    return sct_audio_open_with_server(app_name, NULL, NULL);
 }
 
 static int sct_audio_write(sct_audio_sink *a, const uint8_t *data, int len) {
@@ -92,29 +92,70 @@ func (a *audioSink) open() {
 	// socket). If that fails, fall back to the explicit runtime-dir socket
 	// so terminals with a stale PULSE_SERVER still get sound.
 	servers := []string{"", pulseSocketPath()}
+	devices := audioDevices()
 	for _, server := range servers {
-		for attempt := 0; attempt < 3; attempt++ {
-			sink := C.sct_audio_open_with_server(cstr("sct"), cstr(server))
-			if sink != nil && sink.valid != 0 {
-				a.sink = sink
-				a.err = nil
-				return
-			}
-			if sink != nil {
-				if es := C.sct_audio_last_error(sink); es != nil {
-					lastErr = C.GoString(es)
-					C.free(unsafe.Pointer(es))
+		for _, device := range devices {
+			for attempt := 0; attempt < 3; attempt++ {
+				sink := C.sct_audio_open_with_server(cstr("sct"), cstr(server), cstr(device))
+				if sink != nil && sink.valid != 0 {
+					fmt.Fprintf(stderrWriter(), "sct: audio sink: %s (device %q)\n",
+						serverOrDefault(server), deviceOrDefault(device))
+					a.sink = sink
+					a.err = nil
+					return
 				}
-				C.sct_audio_close(sink)
+				if sink != nil {
+					if es := C.sct_audio_last_error(sink); es != nil {
+						lastErr = C.GoString(es)
+						C.free(unsafe.Pointer(es))
+					}
+					C.sct_audio_close(sink)
+				}
+				time.Sleep(time.Duration(150*(attempt+1)) * time.Millisecond)
 			}
-			lastErr = fmt.Sprintf("server %q: %s", server, lastErr)
-			time.Sleep(time.Duration(150*(attempt+1)) * time.Millisecond)
+			lastErr = fmt.Sprintf("server %q device %q: %s", serverOrDefault(server), deviceOrDefault(device), lastErr)
 		}
 	}
 	if lastErr == "" {
 		lastErr = "pulseaudio not available"
 	}
 	a.err = fmt.Errorf("audio sink: %s", lastErr)
+}
+
+// audioDevices returns the sink device candidates, in priority order:
+// explicit env override, then physical ALSA sinks, then the default.
+// The default sink may be a virtual one (e.g. a game-streaming sink)
+// that silently buffers audio nobody hears.
+func audioDevices() []string {
+	if d := envOr("SCT_AUDIO_DEVICE", ""); d != "" {
+		return []string{d}
+	}
+	// Physical ALSA sinks are what the user actually hears.
+	var physical []string
+	if out, err := pulseCmd("list", "sinks", "short"); err == nil {
+		for _, line := range splitLines(string(out)) {
+			fields := splitFields(line)
+			if len(fields) >= 2 && hasPrefix(fields[1], "alsa_output.") {
+				physical = append(physical, fields[1])
+			}
+		}
+	}
+	// Try physical first, then default (empty string = server default).
+	return append(physical, "")
+}
+
+func serverOrDefault(s string) string {
+	if s == "" {
+		return "default"
+	}
+	return s
+}
+
+func deviceOrDefault(d string) string {
+	if d == "" {
+		return "default"
+	}
+	return d
 }
 
 // pulseSocketPath returns the standard user pulse socket, or "".

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
 	"io"
 )
@@ -28,8 +29,11 @@ type streamState struct {
 	currentFPS float64
 
 	// audio stat
-	audioBytes int64 // decoded bytes handed to the sink
-	audioPeak  int16 // max |sample| seen (0 = silence, real audio > 0)
+	audioBytes int64       // decoded bytes handed to the sink
+	audioPeak  int16       // max |sample| seen (0 = silence, real audio > 0)
+	opusPeak   int16       // peak right after opus decode (before resample)
+	packets    int64       // audio media packets received
+	pktSizes   map[int]int // histogram: config/first packets
 }
 
 type videoFrame struct {
@@ -348,9 +352,24 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 			return fmt.Errorf("audio packet: %w", err)
 		}
 		if isConfig {
-			// opus/aac/flac: config packets (OpusHead etc.) are not needed
-			// because we hardcode 48k stereo like scrcpy does; skip them.
+			// opus: the config packet contains OpusHead; libavcodec does NOT
+			// need it as extradata (we hardcode 48k stereo), but keep the
+			// stats honest.
+			if s.pktSizes != nil {
+				s.pktSizes[len(payload)]++
+			}
 			continue
+		}
+		s.packets++
+		if s.cfg.audioDump != "" {
+			// raw wire capture: 4-byte size + payload, for offline analysis
+			f := audioDumpFile(s.cfg.audioDump)
+			if f != nil {
+				var sz [4]byte
+				binary.BigEndian.PutUint32(sz[:], uint32(len(payload)))
+				f.Write(sz[:])
+				f.Write(payload)
+			}
 		}
 		if err := adecSend(dec, payload, ptsUs); err != nil {
 			continue

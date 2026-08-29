@@ -273,6 +273,9 @@ func serverParams(video, audio, control bool, cfg config) []string {
 	if cfg.maxFps != 0 {
 		p = append(p, fmt.Sprintf("max_fps=%s", fmtFPS(cfg.maxFps)))
 	}
+	if cfg.audioDup {
+		p = append(p, "audio_dup=true")
+	}
 	return p
 }
 

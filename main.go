@@ -26,6 +26,8 @@ type config struct {
 	noTUI        bool // headless test mode (dump stats only)
 	keys         bool
 	dumpFrames   string // dir to dump first frames as PPM (verification)
+	audioDump    string // file to dump raw opus wire packets (verification)
+	audioDup     bool   // keep audio playing on the device while capturing
 }
 
 func main() {
