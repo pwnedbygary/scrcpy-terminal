@@ -132,6 +132,7 @@ func (a *app) run() error {
 			a.events <- inputEvent{kind: evTick}
 		}
 	}()
+	go a.followAudioSink()
 
 	for {
 		select {

@@ -32,3 +32,36 @@ func splitLines(s string) []string {
 func splitFields(s string) []string { return strings.Fields(s) }
 
 func hasPrefix(s, p string) bool { return strings.HasPrefix(s, p) }
+
+// pulseDefaultSink returns the desktop-selected default sink name (what KDE's
+// Audio Volume panel selects). Empty on error.
+func pulseDefaultSink() string {
+	out, err := pulseCmd("get-default-sink")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// sctSinkInputs parses `pactl list sink-inputs` and returns the sink-input ids
+// whose application.name is "sct" (our streams).
+func sctSinkInputs() []string {
+	out, err := pulseCmd("list", "sink-inputs")
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	var curID string
+	for _, line := range splitLines(string(out)) {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Sink Input #") {
+			curID = strings.TrimPrefix(line, "Sink Input #")
+			continue
+		}
+		if curID != "" && strings.HasPrefix(trimmed, "application.name") && strings.Contains(trimmed, `"sct"`) {
+			ids = append(ids, curID)
+			curID = ""
+		}
+	}
+	return ids
+}

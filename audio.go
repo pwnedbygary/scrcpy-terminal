@@ -137,6 +137,16 @@ func audioDevices() []string {
 		return []string{d}
 	}
 
+	// 1) The desktop-selected default is the strongest signal of intent:
+	//    it is what KDE's Audio Volume panel sets when you click a device.
+	//    Prefer it (if physical; a virtual streaming sink default still
+	//    means "route to what I'm using" - but only if it has streams).
+	if def := pulseDefaultSink(); def != "" {
+		if hasPrefix(def, "alsa_output.") {
+			return []string{def}
+		}
+	}
+
 	// Which sinks have streams attached right now?
 	type sinkState struct {
 		id      string
