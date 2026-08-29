@@ -532,7 +532,14 @@ func (a *app) mouseEvent(b []byte) bool {
 	// above it pass through to the device (tap-through).
 	if a.kb != nil && a.kb.open {
 		_, rows := termSize()
-		if key, ok := a.kb.hitTest(cellX, cellY, rows); ok {
+		if dbgControl != "" {
+			fmt.Fprintf(stderrWriter(), "sct: kb hit-test click (%d,%d) rows=%d open=%v\n", cellX, cellY, rows, a.kb.open)
+		}
+		key, ok := a.kb.hitTest(cellX, cellY, rows)
+		if dbgControl != "" {
+			fmt.Fprintf(stderrWriter(), "sct: kb hit-test (%d,%d) -> key=%v ok=%v\n", cellX, cellY, key.label, ok)
+		}
+		if ok {
 			if pressed && btnRaw&0x07 == 0 { // left button only
 				// flash the pressed key (we need its grid position: re-hit)
 				if kc, ok2 := a.kb.hitTestKeyCell(cellX, cellY, rows); ok2 {

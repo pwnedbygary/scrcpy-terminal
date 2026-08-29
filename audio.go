@@ -5,6 +5,7 @@ package main
 #cgo pkg-config: libpulse-simple
 #include <pulse/simple.h>
 #include <pulse/error.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,6 +45,78 @@ static int sct_audio_write(sct_audio_sink *a, const uint8_t *data, int len) {
     return 0;
 }
 
+// Kill all sink-inputs belonging to a given application name (kills leftover
+// streams from dead or stray sct processes). Returns #killed.
+#include <pulse/introspect.h>
+#include <pulse/mainloop.h>
+
+typedef struct {
+    const char *app;
+    int killed;
+} sct_killer;
+
+static void sct_killer_cb(pa_context *c, const pa_sink_input_info *i, int eol, void *ud) {
+    sct_killer *k = ud;
+    if (eol > 0) return; // end of list: the operation finishes naturally
+    if (!eol && i && i->proplist) {
+        const char *name = pa_proplist_gets(i->proplist, PA_PROP_APPLICATION_NAME);
+        if (name && strcmp(name, k->app) == 0) {
+            // Runs before our own stream opens, so any "sct" stream found
+            // here belongs to a previous/dead/stray instance: silence it.
+            pa_context_kill_sink_input(c, i->index, NULL, NULL);
+            k->killed++;
+        }
+    }
+}
+
+// Kills all sink-inputs whose application.name == app. Returns count killed,
+// -1 on connection failure. Runs a private mainloop; no shared state.
+static int sct_audio_kill_streams(const char *server, const char *app) {
+    pa_mainloop *ml = pa_mainloop_new();
+    if (!ml) return -1;
+    pa_mainloop_api *api = pa_mainloop_get_api(ml);
+    pa_context *ctx = pa_context_new(api, "sct-cleanup");
+    if (!ctx) { pa_mainloop_free(ml); return -1; }
+    if (server == NULL || server[0] == '\0') server = NULL;
+    if (pa_context_connect(ctx, server, PA_CONTEXT_NOFLAGS, NULL) < 0) {
+        pa_context_unref(ctx); pa_mainloop_free(ml); return -1;
+    }
+    sct_killer kk = { app, 0 };
+    // Wait until READY (bounded)
+    for (int i = 0; i < 300; i++) {
+        pa_context_state_t st = pa_context_get_state(ctx);
+        if (st == PA_CONTEXT_READY) break;
+        if (st == PA_CONTEXT_FAILED || st == PA_CONTEXT_TERMINATED) {
+            pa_context_disconnect(ctx); pa_context_unref(ctx); pa_mainloop_free(ml);
+            return -1;
+        }
+        pa_mainloop_iterate(ml, 1, NULL);
+    }
+    if (pa_context_get_state(ctx) != PA_CONTEXT_READY) {
+        pa_context_disconnect(ctx); pa_context_unref(ctx); pa_mainloop_free(ml);
+        return -1;
+    }
+    pa_operation *op = pa_context_get_sink_input_info_list(ctx, sct_killer_cb, &kk);
+    if (op) {
+        while (pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
+            pa_mainloop_iterate(ml, 1, NULL);
+        }
+        pa_operation_unref(op);
+    }
+    // The kill-sink-input requests are queued in libpulse's send buffer;
+    // tearing the mainloop down now would discard them and the stranded
+    // stream would keep playing. Pump non-blocking for a moment so the
+    // kills actually reach the server.
+    for (int i = 0; i < 30; i++) {
+        pa_mainloop_iterate(ml, 0, NULL);
+        usleep(10000); // 300ms total
+    }
+    pa_context_disconnect(ctx);
+    pa_context_unref(ctx);
+    pa_mainloop_free(ml);
+    return kk.killed;
+}
+
 // Returns the last pa error string (caller frees). NULL if none.
 static char *sct_audio_last_error(sct_audio_sink *a) {
     if (!a || !a->err) return NULL;
@@ -54,7 +127,11 @@ static char *sct_audio_last_error(sct_audio_sink *a) {
 static void sct_audio_close(sct_audio_sink *a) {
     if (!a) return;
     if (a->s) {
-        pa_simple_drain(a->s, &a->err);
+        // NOTE: no pa_simple_drain here. If the sink is suspended (HDMI TV
+        // off, etc.) drain blocks forever, the process never exits and the
+        // stream keeps playing. pa_simple_free drops the buffer and closes
+        // the connection immediately - that is what "stop the sound now"
+        // must mean when the app quits.
         pa_simple_free(a->s);
     }
     free(a);
@@ -304,6 +381,20 @@ func (a *audioSink) setGain(pct int) {
 
 func (a *audioSink) gainPercent() int {
 	return int(atomic.LoadInt32(&a.gain)) * 100 / 256
+}
+
+// cleanupStaleStreams: if sct was killed hard (SIGKILL, pane death) or a
+// stray instance is still alive in another pane, its sink-input keeps
+// playing audio and no amount of quitting the visible instance stops it
+// ("the app is killed but the sound still plays"). On startup, kill every
+// leftover sct sink-input BEFORE opening our own stream, so the new
+// instance is the only audio source. (pactl has no kill-sink-input;
+// the libpulse control API does.)
+func cleanupStaleStreams() {
+	n := int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("sct")))
+	if n > 0 {
+		fmt.Fprintf(stderrWriter(), "sct: silenced %d leftover audio stream(s)\n", n)
+	}
 }
 
 func (a *audioSink) close() {

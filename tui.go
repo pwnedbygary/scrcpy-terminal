@@ -160,6 +160,7 @@ func (t *tui) draw(rgba []byte) {
 				"\x1b[48;2;0;0;0m\x1b[38;2;220;220;220m")
 			// Segment-based emission: cursor (reverse video) and press-flash
 			// (green bg) spans are sorted and emitted without overlap.
+			// Keyboard button segments (segs) paint the whole row first.
 			hb := []byte(line)
 			bFrom := runeByteIndex(line, ol.hlFrom)
 			bTo := runeByteIndex(line, ol.hlTo)
@@ -191,7 +192,34 @@ func (t *tui) draw(rgba []byte) {
 					"\x1b[48;2;0;150;0m\x1b[38;2;255;255;255m",
 					"\x1b[0m\x1b[48;2;0;0;0m\x1b[38;2;220;220;220m"})
 			}
-			if len(spans) == 0 {
+			// Keyboard button spans: paint with their own SGR before the
+			// cursor/flash overlays (which take priority when overlapping).
+			if len(ol.segs) > 0 {
+				pos := 0
+				for _, s := range ol.segs {
+					sf := runeByteIndex(line, s.from)
+					st := runeByteIndex(line, s.to)
+					if sf < 0 {
+						sf = len(hb)
+					}
+					if st < 0 || st > len(hb) {
+						st = len(hb)
+					}
+					if sf > pos {
+						out = append(out, hb[pos:sf]...)
+					}
+					if st > sf {
+						out = append(out, s.code...)
+						out = append(out, hb[sf:st]...)
+						out = append(out, btnReset...)
+						out = append(out, "\x1b[48;2;0;0;0m\x1b[38;2;220;220;220m"...)
+					}
+					pos = st
+				}
+				if pos < len(hb) {
+					out = append(out, hb[pos:]...)
+				}
+			} else if len(spans) == 0 {
 				out = append(out, hb...)
 			} else {
 				// sort by start

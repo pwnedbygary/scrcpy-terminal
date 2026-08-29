@@ -1,9 +1,10 @@
 package main
 
 // ---------------------------------------------------------------------------
-// on-screen keyboard: a bottom-anchored grid of clickable keys rendered as an
-// overlay over the video. Toggle with Ctrl-O. Mouse clicks hit-test keys;
-// arrows+Enter navigate; modifiers are sticky (persist until another key).
+// on-screen software keyboard: bottom-anchored overlay with button-style
+// keys (colored backgrounds = visual boundaries), staggered rows like a
+// phone keyboard, and a top action bar. Mouse clicks press keys directly
+// (hit zones = the rendered button). Toggle with Ctrl-K / Ctrl-O.
 // ---------------------------------------------------------------------------
 
 type kbKeyType int
@@ -19,6 +20,7 @@ type kbKey struct {
 	label string
 	key   uint32
 	kind  kbKeyType
+	wide  int // extra width in cells beyond the standard width (spacebar etc.)
 }
 
 type kbModifierState struct {
@@ -42,9 +44,12 @@ func (m kbModifierState) androidMeta() uint32 {
 	return v
 }
 
+// standard key button width in cells (label + padding)
+const kbPad = 2
+
 type kbCell struct {
 	key   kbKey
-	col   int
+	col   int // 0-based column where the button starts (in overlay line space)
 	width int
 }
 
@@ -59,11 +64,11 @@ type keyboard struct {
 	curCol int
 	mods   kbModifierState
 
-	// press flash: which key flashed last, in (row,col) of the grid
+	// press flash
 	flashRow, flashCol int
 }
 
-const kbRowSpace = 1 // blank row between kb top and video
+const kbRowSpace = 1 // blank row between keyboard and the status bar
 
 func newKeyboard() *keyboard {
 	k := &keyboard{}
@@ -72,11 +77,11 @@ func newKeyboard() *keyboard {
 }
 
 func keyTextWidth(key kbKey) int {
-	w := len(key.label) + 2
-	if w < 3 {
-		w = 3
+	w := len(key.label) + kbPad
+	if w < 4 {
+		w = 4
 	}
-	return w
+	return w + key.wide
 }
 
 func (k *keyboard) rebuild() {
@@ -88,7 +93,7 @@ func (k *keyboard) rebuild() {
 		for _, key := range row {
 			w := keyTextWidth(key)
 			m.cells = append(m.cells, kbCell{key: key, col: col, width: w})
-			col += w + 1 // +1 gap
+			col += w + 2 // +2 gap between buttons
 		}
 		k.rows = append(k.rows, m)
 	}
@@ -96,35 +101,58 @@ func (k *keyboard) rebuild() {
 	k.curCol = 0
 }
 
-// kbLayout returns rows bottom-to-top: rows[0] is the bottom row (SPACE),
-// rows[len-1] is the top row (system actions).
+// kbLayout: bottom-to-top rows. Looks like a phone/tablet software keyboard:
+// bottom = space+modifiers, then 3 letter rows (staggered), digits, then a
+// nav row, function row, and the top action bar.
 func kbLayout() [][]kbKey {
 	return [][]kbKey{
-		{ // bottom: space + modifiers
-			{label: "SPACE", key: 62, kind: kbText},
+		{ // bottom: space + modifier cluster
+			{label: "SPACE", key: 62, kind: kbText, wide: 8},
 			{label: "SHIFT", key: metaShiftOn, kind: kbModifier},
 			{label: "CTRL", key: metaCtrlOn, kind: kbModifier},
 			{label: "ALT", key: metaAltOn, kind: kbModifier},
-			{label: "DL", key: 67, kind: kbText},  // DEL / backspace
-			{label: "ENT", key: 66, kind: kbText}, // enter
 			{label: "TAB", key: 61, kind: kbText},
-			{label: "ESC", key: 111, kind: kbText},
+			{label: "BCK", key: 67, kind: kbText},
+			{label: "ENT", key: 66, kind: kbText},
 		},
-		{ // qwerty home row
-			{label: "A", key: 29, kind: kbText}, {label: "S", key: 47, kind: kbText},
-			{label: "D", key: 32, kind: kbText}, {label: "F", key: 34, kind: kbText},
-			{label: "G", key: 35, kind: kbText}, {label: "H", key: 36, kind: kbText},
-			{label: "J", key: 38, kind: kbText}, {label: "K", key: 40, kind: kbText},
-			{label: "L", key: 41, kind: kbText}, {label: ";", key: 74, kind: kbText},
-			{label: "'", key: 75, kind: kbText}, {label: "\\", key: 73, kind: kbText},
+		{ // letter row 3 (bottom letters)
+			{label: "Z", key: 54, kind: kbText},
+			{label: "X", key: 52, kind: kbText},
+			{label: "C", key: 31, kind: kbText},
+			{label: "V", key: 50, kind: kbText},
+			{label: "B", key: 30, kind: kbText},
+			{label: "N", key: 42, kind: kbText},
+			{label: "M", key: 46, kind: kbText},
+			{label: ",", key: 55, kind: kbText},
+			{label: ".", key: 56, kind: kbText},
+			{label: "/", key: 76, kind: kbText},
 		},
-		{ // qwerty top row
-			{label: "Q", key: 45, kind: kbText}, {label: "W", key: 51, kind: kbText},
-			{label: "E", key: 33, kind: kbText}, {label: "R", key: 46, kind: kbText},
-			{label: "T", key: 48, kind: kbText}, {label: "Y", key: 53, kind: kbText},
-			{label: "U", key: 49, kind: kbText}, {label: "I", key: 37, kind: kbText},
-			{label: "O", key: 43, kind: kbText}, {label: "P", key: 44, kind: kbText},
-			{label: "[", key: 71, kind: kbText}, {label: "]", key: 72, kind: kbText},
+		{ // letter row 2 (home row)
+			{label: "A", key: 29, kind: kbText},
+			{label: "S", key: 47, kind: kbText},
+			{label: "D", key: 32, kind: kbText},
+			{label: "F", key: 34, kind: kbText},
+			{label: "G", key: 35, kind: kbText},
+			{label: "H", key: 36, kind: kbText},
+			{label: "J", key: 38, kind: kbText},
+			{label: "K", key: 40, kind: kbText},
+			{label: "L", key: 41, kind: kbText},
+			{label: ";", key: 74, kind: kbText},
+			{label: "'", key: 75, kind: kbText},
+		},
+		{ // letter row 1 (top letters)
+			{label: "Q", key: 45, kind: kbText},
+			{label: "W", key: 51, kind: kbText},
+			{label: "E", key: 33, kind: kbText},
+			{label: "R", key: 46, kind: kbText},
+			{label: "T", key: 48, kind: kbText},
+			{label: "Y", key: 53, kind: kbText},
+			{label: "U", key: 49, kind: kbText},
+			{label: "I", key: 37, kind: kbText},
+			{label: "O", key: 43, kind: kbText},
+			{label: "P", key: 44, kind: kbText},
+			{label: "[", key: 71, kind: kbText},
+			{label: "]", key: 72, kind: kbText},
 		},
 		{ // digits
 			{label: "1", key: 8, kind: kbText}, {label: "2", key: 9, kind: kbText},
@@ -133,21 +161,22 @@ func kbLayout() [][]kbKey {
 			{label: "7", key: 14, kind: kbText}, {label: "8", key: 15, kind: kbText},
 			{label: "9", key: 16, kind: kbText}, {label: "0", key: 7, kind: kbText},
 			{label: "-", key: 69, kind: kbText}, {label: "=", key: 70, kind: kbText},
+			{label: "\\", key: 73, kind: kbText},
 		},
-		{ // nav: d-pad + android keys
-			{label: "Home", key: 3, kind: kbText},
-			{label: "Back", key: 4, kind: kbText},
-			{label: "Menu", key: 82, kind: kbText},
-			{label: "Rec", key: 187, kind: kbText},
-			{label: "Pwr", key: 26, kind: kbText},
-			{label: "Up", key: 19, kind: kbText},
-			{label: "Dn", key: 20, kind: kbText},
-			{label: "Lt", key: 21, kind: kbText},
-			{label: "Rt", key: 22, kind: kbText},
+		{ // nav row: dpad + android system keys
+			{label: "HOME", key: 3, kind: kbText},
+			{label: "BACK", key: 4, kind: kbText},
+			{label: "MENU", key: 82, kind: kbText},
+			{label: "REC", key: 187, kind: kbText},
+			{label: "PWR", key: 26, kind: kbText},
+			{label: "UP", key: 19, kind: kbText},
+			{label: "DN", key: 20, kind: kbText},
+			{label: "LT", key: 21, kind: kbText},
+			{label: "RT", key: 22, kind: kbText},
 			{label: "OK", key: 23, kind: kbText},
-			{label: "VolU", key: 24, kind: kbText},
-			{label: "VolD", key: 25, kind: kbText},
-			{label: "Mute", key: 91, kind: kbText},
+			{label: "VOL+", key: 24, kind: kbText},
+			{label: "VOL-", key: 25, kind: kbText},
+			{label: "MUTE", key: 91, kind: kbText},
 		},
 		{ // function keys F1..F12
 			{label: "F1", key: 131, kind: kbFunc}, {label: "F2", key: 132, kind: kbFunc},
@@ -157,32 +186,37 @@ func kbLayout() [][]kbKey {
 			{label: "F9", key: 139, kind: kbFunc}, {label: "F10", key: 140, kind: kbFunc},
 			{label: "F11", key: 141, kind: kbFunc}, {label: "F12", key: 142, kind: kbFunc},
 		},
-		{ // top: system actions
-			{label: "Rotate", key: 1, kind: kbAction},
-			{label: "Notif", key: 2, kind: kbAction},
-			{label: "Shade", key: 3, kind: kbAction},
-			{label: "Collap", key: 4, kind: kbAction},
-			{label: "Grab", key: 5, kind: kbAction},
-			{label: "Hide", key: 6, kind: kbAction}, // close keyboard
-			{label: "Quit", key: 7, kind: kbAction}, // quit sct (Alt+Q equivalent)
+		{ // top action bar
+			{label: "ROTATE", key: 1, kind: kbAction},
+			{label: "NOTIF", key: 2, kind: kbAction},
+			{label: "SHADE", key: 3, kind: kbAction},
+			{label: "COLLAPSE", key: 4, kind: kbAction},
+			{label: "GRAB", key: 5, kind: kbAction},
+			{label: "HIDE", key: 6, kind: kbAction},
+			{label: "QUIT", key: 7, kind: kbAction},
 		},
 	}
 }
 
 // ---------------------------------------------------------------------------
-// rendering: returns overlay lines (row 0 = top of screen), with the kb
-// anchored at the bottom. The cursor key gets a highlight segment.
+// rendering: button-style keys. Each button is a colored pill span in the
+// overlay line; gaps between buttons are transparent. The cursor key is
+// reverse-video, the flash key is green.
 // ---------------------------------------------------------------------------
 
+func (k *keyboard) rowHeight() int { return len(k.rows) }
+
+// lines returns overlay lines for the whole terminal (termRows tall),
+// anchored at the bottom. Only the keyboard rows carry buttons.
 func (k *keyboard) lines(termRows int) []overlayLine {
-	n := len(k.rows)
-	kbTop := termRows - n - kbRowSpace - 2 // -2: one for status bar, one spacer
+	n := k.rowHeight()
+	kbTop := termRows - n - kbRowSpace - 2 // -2: status bar + spacer
 	if kbTop < 0 {
 		kbTop = 0
 	}
 	out := make([]overlayLine, termRows)
 	for i := range out {
-		out[i] = overlayLine{hlFrom: -1, flFrom: -1, flTo: -1}
+		out[i] = overlayLine{hlFrom: -1}
 	}
 	for ri := n - 1; ri >= 0; ri-- {
 		ov := (n - 1 - ri) + kbTop
@@ -194,66 +228,79 @@ func (k *keyboard) lines(termRows int) []overlayLine {
 	return out
 }
 
+// button colors
+const (
+	btnReset    = "\x1b[0m"
+	btnBg       = "\x1b[48;2;52;52;60m\x1b[38;2;235;235;245m"  // dark gray pill
+	btnBgActive = "\x1b[48;2;90;90;130m\x1b[38;2;255;255;255m" // active modifier
+	btnBgFlash  = "\x1b[48;2;0;120;60m\x1b[38;2;255;255;255m"  // pressed flash
+)
+
+type kbSeg = overlaySeg
+
 func (k *keyboard) renderRow(ri int) overlayLine {
 	row := k.rows[ri]
-	line := overlayLine{hlFrom: -1, flFrom: -1}
 	var b []byte
+	var segs []kbSeg
 	for ci := range row.cells {
 		c := row.cells[ci]
 		label := keyLabel(c.key, k.mods)
 		start := len(b)
-		if ci == k.curCol && ri == k.curRow {
-			line.hlFrom = start
-			line.hlTo = start + c.width
+		// button area: pad + centered label + pad
+		pad := (c.width - len([]rune(label))) / 2
+		if pad < 0 {
+			pad = 0
 		}
-		if ci == k.flashCol && ri == k.flashRow {
-			line.flFrom = start
-			line.flTo = start + c.width
-		}
-		// center the label inside the key width
-		for i := 0; i < c.width; i++ {
+		for i := 0; i < pad; i++ {
 			b = append(b, ' ')
 		}
-		copy(b[start+(c.width-len(label))/2:], label)
+		b = append(b, []byte(label)...)
+		for i := pad + len([]rune(label)); i < c.width; i++ {
+			b = append(b, ' ')
+		}
+		// button background segment
+		code := btnBg
+		if ci == k.flashCol && ri == k.flashRow {
+			code = btnBgFlash
+		} else if c.key.kind == kbModifier && modifierActive(c.key.key, k.mods) {
+			code = btnBgActive
+		}
+		segs = append(segs, kbSeg{from: start, to: len(b), code: code})
+		// gap between buttons: 2 transparent spaces
+		b = append(b, ' ', ' ')
 	}
-	line.text = string(b)
-	return line
+	return overlayLine{text: string(b), segs: segs}
 }
 
-// flash marks the given grid cell as just-pressed (visual confirmation).
-func (k *keyboard) flash(row, col int) {
-	k.flashRow = row
-	k.flashCol = col
+func modifierActive(key uint32, mods kbModifierState) bool {
+	switch key {
+	case metaShiftOn:
+		return mods.shift
+	case metaCtrlOn:
+		return mods.ctrl
+	case metaAltOn:
+		return mods.alt
+	case 0x10000:
+		return mods.meta
+	}
+	return false
 }
 
 func keyLabel(key kbKey, mods kbModifierState) string {
-	if key.kind == kbModifier {
-		active := false
-		switch key.key {
-		case metaShiftOn:
-			active = mods.shift
-		case metaCtrlOn:
-			active = mods.ctrl
-		case metaAltOn:
-			active = mods.alt
-		case 0x10000:
-			active = mods.meta
-		}
-		if active {
-			return "[" + key.label + "]"
-		}
+	if key.kind == kbModifier && modifierActive(key.key, mods) {
+		return "[" + key.label + "]"
 	}
 	return key.label
 }
 
 // ---------------------------------------------------------------------------
-// hit-testing: terminal cell (1-based) -> key
+// hit-testing: terminal cell (1-based) -> key, using the same geometry as
+// render (button spans; transparent gaps do NOT hit). The cursor key is
+// reverse-video for keyboard navigation.
 // ---------------------------------------------------------------------------
 
-// hitTestKeyCell returns the grid cell (row index in kb layout, col index)
-// under the given terminal cell. Used for the press flash.
 func (k *keyboard) hitTestKeyCell(cellX, cellY, termRows int) (gridCell, bool) {
-	n := len(k.rows)
+	n := k.rowHeight()
 	kbTop := termRows - n - kbRowSpace - 2
 	if kbTop < 0 {
 		kbTop = 0
@@ -266,6 +313,7 @@ func (k *keyboard) hitTestKeyCell(cellX, cellY, termRows int) (gridCell, bool) {
 	layoutRow := n - 1 - rel
 	row := k.rows[layoutRow]
 	for ci, c := range row.cells {
+		// button occupies [col, col+width); the 2-cell gap is a miss
 		if cellX-1 >= c.col && cellX-1 < c.col+c.width {
 			return gridCell{row: layoutRow, col: ci}, true
 		}
@@ -278,21 +326,8 @@ type gridCell struct {
 }
 
 func (k *keyboard) hitTest(cellX, cellY, termRows int) (kbKey, bool) {
-	n := len(k.rows)
-	kbTop := termRows - n - kbRowSpace - 2
-	if kbTop < 0 {
-		kbTop = 0
-	}
-	ov := cellY - 1
-	rel := ov - kbTop
-	if rel < 0 || rel >= n {
-		return kbKey{}, false
-	}
-	row := k.rows[n-1-rel]
-	for _, c := range row.cells {
-		if cellX-1 >= c.col && cellX-1 < c.col+c.width {
-			return c.key, true
-		}
+	if c, ok := k.hitTestKeyCell(cellX, cellY, termRows); ok {
+		return k.rows[c.row].cells[c.col].key, true
 	}
 	return kbKey{}, false
 }
@@ -301,9 +336,6 @@ func (k *keyboard) hitTest(cellX, cellY, termRows int) (kbKey, bool) {
 // actions
 // ---------------------------------------------------------------------------
 
-// act performs the key action and records a visual flash for the pressed
-// key (the overlay re-renders with that key highlighted until the next
-// frame draw; keep the flash brief by clearing it on the next act).
 func (k *keyboard) act(a *app, key kbKey) {
 	k.flash(-1, -1) // clear previous flash
 	switch key.kind {
@@ -346,6 +378,7 @@ func (k *keyboard) act(a *app, key kbKey) {
 			}
 		case 5:
 			a.toggleGrab()
+			a.refreshKeyboard()
 		case 6:
 			a.closeKeyboard()
 		case 7:
@@ -382,11 +415,6 @@ func (k *keyboard) navigate(dx, dy int) {
 	}
 }
 
-// setFlashCurrent marks the cursor cell as flashed (for Enter presses).
-func (k *keyboard) setFlashCurrent() {
-	k.flash(k.curRow, k.curCol)
-}
-
 func (k *keyboard) currentKey() (kbKey, bool) {
 	if k.curRow < 0 || k.curRow >= len(k.rows) {
 		return kbKey{}, false
@@ -396,4 +424,15 @@ func (k *keyboard) currentKey() (kbKey, bool) {
 		return kbKey{}, false
 	}
 	return row.cells[k.curCol].key, true
+}
+
+// setFlashCurrent marks the cursor cell as flashed (for Enter presses).
+func (k *keyboard) setFlashCurrent() {
+	k.flash(k.curRow, k.curCol)
+}
+
+// flash marks a key as just-pressed (visual confirmation).
+func (k *keyboard) flash(row, col int) {
+	k.flashRow = row
+	k.flashCol = col
 }

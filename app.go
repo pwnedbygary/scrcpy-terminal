@@ -105,7 +105,7 @@ func (a *app) run() error {
 
 	go a.inputLoop()
 	sigCh := make(chan os.Signal, 4)
-	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		for s := range sigCh {
 			switch s {
@@ -166,6 +166,23 @@ func (a *app) run() error {
 }
 
 func (a *app) runHeadless() error {
+	if a.cfg.audio && a.audio.err != nil {
+		fmt.Fprintf(stderrWriter(), "sct: audio disabled: %v\n", a.audio.errString())
+	}
+	// Same signal handling as the TUI path: SIGTERM/SIGINT must exit and
+	// run shutdown so the PulseAudio stream is closed.
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		for s := range sigCh {
+			switch s {
+			case syscall.SIGWINCH:
+				// no TUI, ignore
+			default:
+				a.events <- inputEvent{kind: evQuit}
+			}
+		}
+	}()
 	go func() {
 		if err := a.stream.runVideo(); err != nil {
 			fmt.Fprintf(stderrWriter(), "sct: video: %v\n", err)
@@ -243,6 +260,21 @@ func (a *app) openKeyboard() {
 	if !a.grabbed {
 		a.setMouse(true)
 		a.kbAutoGrabbed = true
+	}
+	// Zellij sometimes needs the pane to be focused/clicked before mouse
+	// events flow; the first click after opening may be consumed by the
+	// frontend. Re-assert grab briefly after 300ms as a handshake nudge.
+	if a.inZellij {
+		time.AfterFunc(300*time.Millisecond, func() {
+			if a.kb == nil || !a.kb.open {
+				return
+			}
+			if !a.grabbed {
+				a.setMouse(true)
+				a.kbAutoGrabbed = true
+				a.refreshKeyboard()
+			}
+		})
 	}
 	a.refreshKeyboard()
 }

@@ -61,6 +61,10 @@ func main() {
 	}
 	defer sess.stop()
 
+	// Remove any sink-inputs left behind by a previous hard-killed sct
+	// (they keep playing audio from a dead process).
+	cleanupStaleStreams()
+
 	app := newApp(sess, cfg)
 	app.stream = newStreamState(sess, cfg, app.ctrl)
 	if err := app.run(); err != nil {
