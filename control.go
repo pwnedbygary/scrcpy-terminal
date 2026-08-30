@@ -44,7 +44,7 @@ func (c *controller) sendRaw(wire []byte) error {
 // injectKey sends a keyevent down/up pair.
 func (c *controller) injectKey(keycode uint32, metastate uint32) error {
 	if dbgControl != "" {
-		fmt.Fprintf(os.Stderr, "sct: key %d meta=0x%x\n", keycode, metastate)
+		fmt.Fprintf(os.Stderr, "scterm: key %d meta=0x%x\n", keycode, metastate)
 	}
 	if err := c.send(ctrlInjectKeycode, keycodeMsg(keyActionDown, keycode, 0, metastate)); err != nil {
 		return err
@@ -79,7 +79,7 @@ func (c *controller) back() error {
 
 func (c *controller) touch(down bool, pos position) error {
 	if dbgControl != "" {
-		fmt.Fprintf(os.Stderr, "sct: touch down=%v at %d,%d (%dx%d)\n", down, pos.x, pos.y, pos.screenW, pos.screenH)
+		fmt.Fprintf(os.Stderr, "scterm: touch down=%v at %d,%d (%dx%d)\n", down, pos.x, pos.y, pos.screenW, pos.screenH)
 	}
 	action := byte(motionActionUp)
 	pressure := uint16(0)
@@ -92,7 +92,7 @@ func (c *controller) touch(down bool, pos position) error {
 
 func (c *controller) touchMove(pos position) error {
 	if dbgControl != "" {
-		fmt.Fprintf(os.Stderr, "sct: touch move at %d,%d\n", pos.x, pos.y)
+		fmt.Fprintf(os.Stderr, "scterm: touch move at %d,%d\n", pos.x, pos.y)
 	}
 	return c.send(ctrlInjectTouch,
 		touchMsg(motionActionMove, pointerIDMouse, pos, floatToU16fp(1.0), 0, 0))
@@ -106,7 +106,7 @@ func (c *controller) touchRelease(pos position) error {
 // scroll sends a vertical scroll (wheel delta units, positive = up).
 func (c *controller) scroll(pos position, vscroll float32, buttons uint32) error {
 	if dbgControl != "" {
-		fmt.Fprintf(os.Stderr, "sct: scroll %f at %d,%d\n", vscroll, pos.x, pos.y)
+		fmt.Fprintf(os.Stderr, "scterm: scroll %f at %d,%d\n", vscroll, pos.x, pos.y)
 	}
 	return c.send(ctrlInjectScroll, scrollMsg(pos, 0, vscroll, buttons))
 }
@@ -143,7 +143,7 @@ func deviceMsgReader(conn net.Conn) {
 		n, err := conn.Read(buf)
 		if err != nil {
 			if err != io.EOF {
-				fmt.Fprintf(stderrWriter(), "sct: control recv: %v\n", err)
+				fmt.Fprintf(stderrWriter(), "scterm: control recv: %v\n", err)
 			}
 			return
 		}
@@ -179,7 +179,7 @@ func parseDeviceMessage(b []byte) (int, bool) {
 			return 0, false
 		}
 		text := string(b[5 : 5+l])
-		fmt.Fprintf(stderrWriter(), "sct: clipboard: %q\n", text)
+		fmt.Fprintf(stderrWriter(), "scterm: clipboard: %q\n", text)
 		return 5 + l, true
 	case 1: // ack clipboard: 8-byte sequence
 		if len(b) < 9 {
@@ -187,7 +187,7 @@ func parseDeviceMessage(b []byte) (int, bool) {
 		}
 		return 9, true
 	default:
-		fmt.Fprintf(stderrWriter(), "sct: unknown device msg %d\n", b[0])
+		fmt.Fprintf(stderrWriter(), "scterm: unknown device msg %d\n", b[0])
 		return 1, true
 	}
 }

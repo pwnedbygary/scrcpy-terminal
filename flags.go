@@ -7,7 +7,7 @@ import (
 )
 
 func parseFlags(cfg *config, mirrorFPS *float64) {
-	fs := flag.NewFlagSet("sct", flag.ExitOnError)
+	fs := flag.NewFlagSet("scterm", flag.ExitOnError)
 	fs.StringVar(&cfg.serial, "s", "", "device serial (default: ANDROID_SERIAL or the only device)")
 	fs.IntVar(&cfg.maxSize, "max-size", cfg.maxSize, "maximum video size (0 = device size)")
 	fs.IntVar(&cfg.videoBitRate, "video-bit-rate", cfg.videoBitRate, "video bit rate")
@@ -23,8 +23,8 @@ func parseFlags(cfg *config, mirrorFPS *float64) {
 	fs.BoolVar(&cfg.audioDup, "audio-dup", cfg.audioDup, "keep device audio playing while capturing (duplicates to device)")
 	fs.Float64Var(mirrorFPS, "mirror-fps", 0, "cap display framerate (0 = uncapped)")
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "sct - scrcpy in your terminal\n\n")
-		fmt.Fprintf(os.Stderr, "usage: sct [flags]\n\nflags:\n")
+		fmt.Fprintf(os.Stderr, "scterm - scrcpy in your terminal\n\n")
+		fmt.Fprintf(os.Stderr, "usage: scterm [flags]\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	fs.Parse(os.Args[1:])

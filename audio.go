@@ -30,7 +30,7 @@ static sct_audio_sink *sct_audio_open_with_server(const char *app_name, const ch
     attr.minreq = (uint32_t) -1;
     attr.fragsize = (uint32_t) -1;
     a->s = pa_simple_new(server, app_name, PA_STREAM_PLAYBACK, device,
-                         "sct audio", &ss, NULL, &attr, &a->err);
+                         "scterm audio", &ss, NULL, &attr, &a->err);
     a->valid = a->s != NULL;
     return a;
 }
@@ -75,7 +75,7 @@ static int sct_audio_kill_streams(const char *server, const char *app) {
     pa_mainloop *ml = pa_mainloop_new();
     if (!ml) return -1;
     pa_mainloop_api *api = pa_mainloop_get_api(ml);
-    pa_context *ctx = pa_context_new(api, "sct-cleanup");
+    pa_context *ctx = pa_context_new(api, "scterm-cleanup");
     if (!ctx) { pa_mainloop_free(ml); return -1; }
     if (server == NULL || server[0] == '\0') server = NULL;
     if (pa_context_connect(ctx, server, PA_CONTEXT_NOFLAGS, NULL) < 0) {
@@ -173,9 +173,9 @@ func (a *audioSink) open() {
 	for _, server := range servers {
 		for _, device := range devices {
 			for attempt := 0; attempt < 3; attempt++ {
-				sink := C.sct_audio_open_with_server(cstr("sct"), cstr(server), cstr(device))
+				sink := C.sct_audio_open_with_server(cstr("scterm"), cstr(server), cstr(device))
 				if sink != nil && sink.valid != 0 {
-					fmt.Fprintf(stderrWriter(), "sct: audio sink: %s (device %q)\n",
+					fmt.Fprintf(stderrWriter(), "scterm: audio sink: %s (device %q)\n",
 						serverOrDefault(server), deviceOrDefault(device))
 					a.sink = sink
 					a.err = nil
@@ -360,7 +360,7 @@ func (a *audioSink) writePCM16(pcm []byte) {
 	}
 	if C.sct_audio_write(a.sink, (*C.uint8_t)(bytePtr(pcm)), C.int(len(pcm))) != 0 {
 		a.err = errPulseLagged{}
-		logOnce("sct: audio sink write failed; audio stopped. Check `pactl list sinks` and your audio server.\n")
+		logOnce("scterm: audio sink write failed; audio stopped. Check `pactl list sinks` and your audio server.\n")
 	}
 }
 
@@ -383,17 +383,20 @@ func (a *audioSink) gainPercent() int {
 	return int(atomic.LoadInt32(&a.gain)) * 100 / 256
 }
 
-// cleanupStaleStreams: if sct was killed hard (SIGKILL, pane death) or a
+// cleanupStaleStreams: if scterm was killed hard (SIGKILL, pane death) or a
 // stray instance is still alive in another pane, its sink-input keeps
 // playing audio and no amount of quitting the visible instance stops it
 // ("the app is killed but the sound still plays"). On startup, kill every
-// leftover sct sink-input BEFORE opening our own stream, so the new
+// leftover scterm sink-input BEFORE opening our own stream, so the new
 // instance is the only audio source. (pactl has no kill-sink-input;
 // the libpulse control API does.)
 func cleanupStaleStreams() {
-	n := int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("sct")))
+	// Kill both the current and the legacy application name: a stray
+	// stream from an old sct binary must not survive the rename.
+	n := int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("scterm")))
+	n += int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("sct")))
 	if n > 0 {
-		fmt.Fprintf(stderrWriter(), "sct: silenced %d leftover audio stream(s)\n", n)
+		fmt.Fprintf(stderrWriter(), "scterm: silenced %d leftover audio stream(s)\n", n)
 	}
 }
 

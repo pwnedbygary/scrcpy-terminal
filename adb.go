@@ -85,7 +85,7 @@ func envOr(key, def string) string {
 // pushServer pushes the embedded server jar to the device.
 func (a *adbRunner) pushServer(data []byte) error {
 	// Use adb push with stdin redirect for speed: push from a temp file.
-	dir, err := osMkdirTemp("", "sct-server")
+	dir, err := osMkdirTemp("", "scterm-server")
 	if err != nil {
 		return err
 	}

@@ -94,7 +94,7 @@ func (a *app) run() error {
 	// Print warnings before entering the alternate screen so they don't
 	// corrupt the TUI.
 	if a.cfg.audio && a.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "sct: audio disabled: %v\n", a.audio.errString())
+		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
 	}
 
 	a.tui.shellInit()
@@ -119,13 +119,13 @@ func (a *app) run() error {
 
 	go func() {
 		if err := a.stream.runVideo(); err != nil {
-			fmt.Fprintf(stderrWriter(), "sct: video: %v\n", err)
+			fmt.Fprintf(stderrWriter(), "scterm: video: %v\n", err)
 			a.events <- inputEvent{kind: evQuit}
 		}
 	}()
 	go func() {
 		if err := a.stream.runAudio(a.audio); err != nil {
-			fmt.Fprintf(stderrWriter(), "sct: audio: %v\n", err)
+			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
 		}
 	}()
 
@@ -167,7 +167,7 @@ func (a *app) run() error {
 
 func (a *app) runHeadless() error {
 	if a.cfg.audio && a.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "sct: audio disabled: %v\n", a.audio.errString())
+		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
 	}
 	// Same signal handling as the TUI path: SIGTERM/SIGINT must exit and
 	// run shutdown so the PulseAudio stream is closed.
@@ -185,13 +185,13 @@ func (a *app) runHeadless() error {
 	}()
 	go func() {
 		if err := a.stream.runVideo(); err != nil {
-			fmt.Fprintf(stderrWriter(), "sct: video: %v\n", err)
+			fmt.Fprintf(stderrWriter(), "scterm: video: %v\n", err)
 			a.events <- inputEvent{kind: evQuit}
 		}
 	}()
 	go func() {
 		if err := a.stream.runAudio(a.audio); err != nil {
-			fmt.Fprintf(stderrWriter(), "sct: audio: %v\n", err)
+			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
 		}
 	}()
 	ticker := time.NewTicker(2 * time.Second)
@@ -422,7 +422,7 @@ func (a *app) statusLine() string {
 		}
 		ft = fmt.Sprintf("  %s %4.1fms %4.1ffps ", a.sparkline(20), avg, fps)
 	}
-	return fmt.Sprintf("sct %s %dx%d %s vol %s%s%s| Esc back · F1-F4 home/menu/recents/power · F5/F6 dev-vol · F7 mute · F8 rotate · F9/F10 shade · Ctrl-K kb · Alt+M mute · Alt+Q quit",
+	return fmt.Sprintf("scterm %s %dx%d %s vol %s%s%s| Esc back · F1-F4 home/menu/recents/power · F5/F6 dev-vol · F7 mute · F8 rotate · F9/F10 shade · Ctrl-K kb · Alt+M mute · Alt+Q quit",
 		name, a.frameW, a.frameH, g, vol, kb, ft)
 }
 

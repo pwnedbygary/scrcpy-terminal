@@ -1,0 +1,4 @@
+# Built binaries (produced by GitHub Actions; keep out of git)
+/sct
+/scterm
+*.stackdump

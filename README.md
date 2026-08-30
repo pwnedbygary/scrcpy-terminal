@@ -1,4 +1,4 @@
-# sct — scrcpy in your terminal
+# scterm — scrcpy in your terminal
 
 `scrcpy` inside a terminal, built from the ground up: our own client that speaks
 the scrcpy wire protocol directly to the device. No `scrcpy` binary, no ffmpeg
@@ -7,7 +7,7 @@ that runs on the device.
 
 ```
               ┌──────────────────────────────────────────────┐
-              │               sct (this repo)                │
+              │             scterm (this repo)                │
               │  Go client: protocol demux, control, audio,  │
               │  TUI renderer (half-blocks, hybrid redraw)   │
               │  cgo: libavcodec/libswscale/decode+scale     │
@@ -29,14 +29,22 @@ that runs on the device.
 Requires: Go (with cgo), ffmpeg dev libraries, libpulse-simple.
 
 ```sh
-go build -o sct .
+go build -o scterm .
 ```
 
 Then run with a device connected (or `-s <serial>`):
 
 ```sh
-./sct
+./scterm
 ```
+
+## CI / releases
+
+Every push to `main` and every pull request is built and tested on GitHub
+Actions (`.github/workflows/build.yml`): `go vet`, `go test`, and a stripped
+binary uploaded as an artifact. Pushing a `v*` tag also publishes a GitHub
+release with the binary attached — the version is stamped into `main.version`
+and shown in the status line.
 
 ## Control
 

@@ -15,7 +15,7 @@ import (
 func (a *app) inputLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderrWriter(), "sct: input loop panic: %v\n", r)
+			fmt.Fprintf(stderrWriter(), "scterm: input loop panic: %v\n", r)
 		}
 	}()
 	buf := make([]byte, 4096)
@@ -46,7 +46,7 @@ func (a *app) inputLoop() {
 		}
 		for len(pend) > 0 {
 			if dbgControl != "" {
-				fmt.Fprintf(os.Stderr, "sct: raw % x\n", pend)
+				fmt.Fprintf(os.Stderr, "scterm: raw % x\n", pend)
 			}
 			ev, consumed := a.decodeInput(pend)
 			if consumed == 0 {
@@ -142,7 +142,7 @@ func escSeqLen(b []byte) int {
 func (a *app) handleInput(b []byte) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderrWriter(), "sct: input ignored: %v (bytes % x)\n", r, b)
+			fmt.Fprintf(stderrWriter(), "scterm: input ignored: %v (bytes % x)\n", r, b)
 		}
 	}()
 	if len(b) == 0 {
@@ -262,7 +262,7 @@ func (a *app) sendAndroidKeyMeta(code uint32, meta uint32) {
 		return
 	}
 	if err := a.ctrl.injectKey(code, meta); err != nil {
-		fmt.Fprintf(stderrWriter(), "sct: inject key: %v\n", err)
+		fmt.Fprintf(stderrWriter(), "scterm: inject key: %v\n", err)
 	}
 }
 
@@ -317,7 +317,7 @@ func (a *app) injectChar(c byte) {
 	}
 	// Other printable: text injection.
 	if err := a.ctrl.injectText(string(c)); err != nil {
-		fmt.Fprintf(stderrWriter(), "sct: inject text: %v\n", err)
+		fmt.Fprintf(stderrWriter(), "scterm: inject text: %v\n", err)
 	}
 }
 
@@ -533,11 +533,11 @@ func (a *app) mouseEvent(b []byte) bool {
 	if a.kb != nil && a.kb.open {
 		_, rows := termSize()
 		if dbgControl != "" {
-			fmt.Fprintf(stderrWriter(), "sct: kb hit-test click (%d,%d) rows=%d open=%v\n", cellX, cellY, rows, a.kb.open)
+			fmt.Fprintf(stderrWriter(), "scterm: kb hit-test click (%d,%d) rows=%d open=%v\n", cellX, cellY, rows, a.kb.open)
 		}
 		key, ok := a.kb.hitTest(cellX, cellY, rows)
 		if dbgControl != "" {
-			fmt.Fprintf(stderrWriter(), "sct: kb hit-test (%d,%d) -> key=%v ok=%v\n", cellX, cellY, key.label, ok)
+			fmt.Fprintf(stderrWriter(), "scterm: kb hit-test (%d,%d) -> key=%v ok=%v\n", cellX, cellY, key.label, ok)
 		}
 		if ok {
 			if pressed && btnRaw&0x07 == 0 { // left button only

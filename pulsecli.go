@@ -44,7 +44,7 @@ func pulseDefaultSink() string {
 }
 
 // sctSinkInputs parses `pactl list sink-inputs` and returns the sink-input ids
-// whose application.name is "sct" (our streams).
+// whose application.name is "scterm" (our streams).
 func sctSinkInputs() []string {
 	out, err := pulseCmd("list", "sink-inputs")
 	if err != nil {
@@ -58,7 +58,7 @@ func sctSinkInputs() []string {
 			curID = strings.TrimPrefix(line, "Sink Input #")
 			continue
 		}
-		if curID != "" && strings.HasPrefix(trimmed, "application.name") && strings.Contains(trimmed, `"sct"`) {
+		if curID != "" && strings.HasPrefix(trimmed, "application.name") && strings.Contains(trimmed, `"scterm"`) {
 			ids = append(ids, curID)
 			curID = ""
 		}

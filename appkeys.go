@@ -56,7 +56,7 @@ func (a *app) scrollAt(cellX, cellY int, delta int) {
 	}
 	err := a.ctrl.scroll(a.posAt(cellX, cellY), float32(delta), 0)
 	if err != nil {
-		fmt.Fprintf(stderrWriter(), "sct: scroll: %v\n", err)
+		fmt.Fprintf(stderrWriter(), "scterm: scroll: %v\n", err)
 	}
 }
 

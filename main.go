@@ -10,6 +10,9 @@ import (
 //go:embed third_party/scrcpy-server.jar.d/scrcpy-server
 var embeddedServer []byte
 
+// version is stamped at build time: -ldflags "-X main.version=v1.0.0".
+var version = "dev"
+
 func serverJarData() []byte { return embeddedServer }
 
 func stderrWriter() *os.File { return os.Stderr }
@@ -51,6 +54,9 @@ func main() {
 		fatal(err)
 	}
 
+	// Show the version in the status line (useful for bug reports).
+	logOnce(fmt.Sprintf("scterm %s\n", version))
+
 	sess, err := newSession(serial)
 	if err != nil {
 		fatal(err)
@@ -75,7 +81,7 @@ func main() {
 }
 
 func fatal(err error) {
-	fmt.Fprintf(os.Stderr, "sct: %v\n", err)
+	fmt.Fprintf(os.Stderr, "scterm: %v\n", err)
 	os.Exit(1)
 }
 

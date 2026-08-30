@@ -45,7 +45,7 @@ func (a *app) followAudioSink() {
 		}
 		if moved {
 			lastMoved = def
-			logOnce(fmt.Sprintf("sct: audio -> %s\n", def))
+			logOnce(fmt.Sprintf("scterm: audio -> %s\n", def))
 		}
 	}
 }
