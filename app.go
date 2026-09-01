@@ -223,9 +223,10 @@ func (a *app) runHeadless() error {
 				}
 			}
 		case <-ticker.C:
-			fmt.Fprintf(os.Stdout, "\r[%dx%d fps=%.0f audio=%s pcm=%dKB peak=%d]   ",
+			lag := (a.stream.lastVideoPts.Load() - a.stream.lastAudioPts.Load()) / 1000
+			fmt.Fprintf(os.Stdout, "\r[%dx%d fps=%.0f audio=%s pcm=%dKB peak=%d avlag=%dms]   ",
 				a.frameW, a.frameH, a.stream.currentFPS, audioState(a),
-				a.stream.audioBytes/1024, a.stream.audioPeak)
+				a.stream.audioBytes/1024, a.stream.audioPeak, lag)
 		}
 	}
 }

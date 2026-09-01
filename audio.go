@@ -23,9 +23,14 @@ static sct_audio_sink *sct_audio_open_with_server(const char *app_name, const ch
     ss.format = PA_SAMPLE_S16LE;
     ss.rate = 48000;
     ss.channels = 2;
+    // Low-latency buffer: reduce tlength from the previous 50ms to 20ms to cut
+    // host-side latency, but leave prebuf/minreq/fragsize at PA defaults (-1):
+    // forcing all of them to a small fixed size on a playback stream makes
+    // PulseAudio cork the stream (it can't honor a sub-sink-minimum buffer,
+    // e.g. HDMI), which manifests as total silence instead of underrun.
     pa_buffer_attr attr;
     attr.maxlength = (uint32_t) -1;
-    attr.tlength = 48000 * 2 * 2 / 20; // 50ms
+    attr.tlength = (uint32_t) 48000 * 2 * 2 / 50; // 20ms
     attr.prebuf = (uint32_t) -1;
     attr.minreq = (uint32_t) -1;
     attr.fragsize = (uint32_t) -1;

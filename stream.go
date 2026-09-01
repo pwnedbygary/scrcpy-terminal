@@ -44,6 +44,14 @@ type streamState struct {
 	opusPeak   int16       // peak right after opus decode (before resample)
 	packets    int64       // audio media packets received
 	pktSizes   map[int]int // histogram: config/first packets
+
+	// A/V lag probe: the device timestamps audio packets and video frames on
+	// the same monotonic clock, so ptsLagUs = video.pts - audio.pts at arrival
+	// time shows how much the audio stream lags the video pipeline end-to-end
+	// (capture-side buffering, e.g. remote submix, shows up here, not in the
+	// host playback buffer).
+	lastVideoPts atomic.Int64 // us
+	lastAudioPts atomic.Int64 // us
 }
 
 type videoFrame struct {
@@ -212,6 +220,9 @@ func (s *streamState) runVideo() error {
 			}
 			continue
 		}
+		if !isConfig {
+			s.lastVideoPts.Store(ptsUs)
+		}
 		if size == 0 {
 			continue
 		}
@@ -334,13 +345,19 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 			if _, err := io.ReadFull(r, he); err != nil {
 				return fmt.Errorf("audio raw: %w", err)
 			}
-			_, _, _, _, size := parsePacketHeader(he)
+			_, ptsUs, _, _, size := parsePacketHeader(he)
 			if size == 0 {
 				continue
 			}
+			s.packets++
+			s.lastAudioPts.Store(ptsUs)
 			payload := make([]byte, size)
 			if _, err := io.ReadFull(r, payload); err != nil {
 				return fmt.Errorf("audio raw packet: %w", err)
+			}
+			s.audioBytes += int64(len(payload))
+			if pk := maxAbsInt16(payload); pk > s.audioPeak {
+				s.audioPeak = pk
 			}
 			audioOut.writePCM16(payload)
 		}
@@ -377,6 +394,7 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 			continue
 		}
 		s.packets++
+		s.lastAudioPts.Store(ptsUs)
 		if s.cfg.audioDump != "" {
 			// raw wire capture: 4-byte size + payload, for offline analysis
 			f := audioDumpFile(s.cfg.audioDump)

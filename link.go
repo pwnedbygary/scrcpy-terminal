@@ -275,6 +275,12 @@ func serverParams(video, audio, control bool, cfg config) []string {
 	if cfg.audioDup {
 		p = append(p, "audio_dup=true")
 	}
+	if cfg.audioSource != "" {
+		p = append(p, fmt.Sprintf("audio_source=%s", cfg.audioSource))
+	}
+	if cfg.audioCodec != "" {
+		p = append(p, fmt.Sprintf("audio_codec=%s", cfg.audioCodec))
+	}
 	return p
 }
 

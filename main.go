@@ -30,6 +30,8 @@ type config struct {
 	dumpFrames      string // dir to dump first frames as PPM (verification)
 	audioDump       string // file to dump raw opus wire packets (verification)
 	audioDup        bool   // keep audio playing on the device while capturing
+	audioSource     string // device audio capture source: output (default) | playback | mic
+	audioCodec      string // device audio codec: opus (default) | aac | flac | raw
 	repaintInterval int    // forced full redraw cadence in frames (default 300 ≈ 5s at 60fps)
 }
 

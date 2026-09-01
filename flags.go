@@ -21,6 +21,8 @@ func parseFlags(cfg *config, mirrorFPS *float64) {
 	fs.StringVar(&cfg.dumpFrames, "dump-frames", "", "dump first frames as PPM to this dir (verification)")
 	fs.StringVar(&cfg.audioDump, "dump-audio", "", "dump raw audio wire packets to this file (verification)")
 	fs.BoolVar(&cfg.audioDup, "audio-dup", cfg.audioDup, "keep device audio playing while capturing (duplicates to device)")
+	fs.StringVar(&cfg.audioSource, "audio-source", cfg.audioSource, "device audio capture source: output (default, remote submix), playback (Android 13+, low latency, enables audio-dup), mic")
+	fs.StringVar(&cfg.audioCodec, "audio-codec", cfg.audioCodec, "device audio codec: opus (default) | aac | flac | raw (uncompressed PCI, skips device encoder)")
 	fs.Float64Var(mirrorFPS, "mirror-fps", 0, "cap display framerate (0 = uncapped)")
 	fs.IntVar(&cfg.repaintInterval, "repaint-interval", cfg.repaintInterval, "forced full-redraw cadence in frames (desync-recovery safety net; default 300 ≈ 5s at 60fps)")
 	fs.Usage = func() {
