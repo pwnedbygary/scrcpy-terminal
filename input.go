@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -190,6 +191,18 @@ func (a *app) handleInput(b []byte) {
 		case '=', '+':
 			a.adjustLocalVolume(10)
 			return
+		case 's', 'S': // Alt+S: screenshot the last rendered canvas to PPM
+			a.screenshot()
+			return
+		case 'k', 'K': // Alt+K: request a keyframe (video reset) from device
+			if a.ctrl != nil {
+				if err := a.ctrl.resetVideo(); err != nil {
+					fmt.Fprintf(stderrWriter(), "scterm: reset video: %v\n", err)
+				}
+			} else {
+				fmt.Fprintf(stderrWriter(), "scterm: control disabled (no -control)\n")
+			}
+			return
 		case 'q', 'Q':
 			a.events <- inputEvent{kind: evQuit}
 			return
@@ -250,6 +263,33 @@ func (a *app) adjustLocalVolume(delta int) {
 		return // no sink to adjust
 	}
 	a.audio.setGain(a.audio.gainPercent() + delta)
+	a.refreshStatus()
+}
+
+// screenshot saves the most recent rendered canvas as PPM (Alt+S).
+func (a *app) screenshot() {
+	if a.tui == nil || !a.tui.running {
+		return // headless mode or before shell init: nothing to capture
+	}
+	a.tui.mu.Lock()
+	pw, ph := a.tui.cols, a.tui.rows*2
+	n := pw * ph * 4
+	var rgb []byte
+	if n > 0 && len(a.tui.lastRGB) == n {
+		rgb = make([]byte, n)
+		copy(rgb, a.tui.lastRGB[:n])
+	}
+	a.tui.mu.Unlock()
+	if rgb == nil {
+		fmt.Fprintf(stderrWriter(), "scterm: screenshot: no frame yet\n")
+		return
+	}
+	fn := fmt.Sprintf("scterm-%s.ppm", time.Now().Format("20060102-150405"))
+	if err := writePPMFile(fn, rgb, pw, ph); err != nil {
+		fmt.Fprintf(stderrWriter(), "scterm: screenshot: %v\n", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "scterm: saved %s (%dx%d)\n", fn, pw, ph)
 	a.refreshStatus()
 }
 
@@ -598,5 +638,3 @@ func (a *app) mouseEvent(b []byte) bool {
 	}
 	return true
 }
-
-var _ = fmt.Sprintf

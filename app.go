@@ -51,10 +51,11 @@ type inputEvent struct {
 }
 
 const (
-	evBytes  = 0
-	evResize = 1
-	evQuit   = 2
-	evTick   = 3
+	evBytes    = 0
+	evResize   = 1
+	evQuit     = 2
+	evTick     = 3
+	evTickFast = 4 // ~16ms: flushes coalesced drag moves without waiting for evTick
 )
 
 func newApp(sess *session, cfg config) *app {
@@ -75,6 +76,7 @@ func newApp(sess *session, cfg config) *app {
 	}
 	if !cfg.noTUI {
 		a.tui = newTUI()
+		a.tui.repaintInterval = cfg.repaintInterval
 		a.kb = newKeyboard()
 	}
 	return a
@@ -135,6 +137,13 @@ func (a *app) run() error {
 			a.events <- inputEvent{kind: evTick}
 		}
 	}()
+	go func() {
+		fast := time.NewTicker(16 * time.Millisecond)
+		defer fast.Stop()
+		for range fast.C {
+			a.events <- inputEvent{kind: evTickFast}
+		}
+	}()
 	go a.followAudioSink()
 
 	for {
@@ -145,7 +154,10 @@ func (a *app) run() error {
 				return nil
 			case evResize:
 				a.tui.resize()
+				a.stream.markGeometryDirty()
 				a.tui.setStatus(a.statusLine())
+			case evTickFast:
+				a.flushPendingMove()
 			case evTick:
 				a.flushPendingMove()
 				a.tui.setStatus(a.statusLine())
@@ -292,7 +304,7 @@ func (a *app) closeKeyboard() {
 	if a.tui != nil {
 		a.tui.setOverlay(nil)
 		a.tui.setStatus(a.statusLine())
-		a.tui.dirty = true
+		a.tui.markDirty()
 	}
 }
 
@@ -319,7 +331,7 @@ func (a *app) refreshKeyboard() {
 		a.tui.setOverlay(nil)
 	}
 	a.tui.setStatus(a.statusLine())
-	a.tui.dirty = true
+	a.tui.markDirty()
 }
 
 // ---------------------------------------------------------------------------
@@ -422,7 +434,7 @@ func (a *app) statusLine() string {
 		}
 		ft = fmt.Sprintf("  %s %4.1fms %4.1ffps ", a.sparkline(20), avg, fps)
 	}
-	return fmt.Sprintf("scterm %s %dx%d %s vol %s%s%s| Esc back · F1-F4 home/menu/recents/power · F5/F6 dev-vol · F7 mute · F8 rotate · F9/F10 shade · Ctrl-K kb · Alt+M mute · Alt+Q quit",
+	return fmt.Sprintf("scterm %s %dx%d %s vol %s%s%s| Esc back · F1-F4 home/menu/recents/power · F5/F6 dev-vol · F7 mute · F8 rotate · F9/F10 shade · Ctrl-K kb · Alt+M mute · Alt+S shot · Alt+K reset video · Alt+Q quit",
 		name, a.frameW, a.frameH, g, vol, kb, ft)
 }
 

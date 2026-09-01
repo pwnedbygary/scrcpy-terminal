@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,11 +19,16 @@ type controller struct {
 	mu   sync.Mutex
 }
 
+var errNoControl = errors.New("control disabled")
+
 func newController(conn net.Conn) *controller {
 	return &controller{conn: conn}
 }
 
 func (c *controller) send(mtype byte, payload []byte) error {
+	if c == nil || c.conn == nil {
+		return errNoControl
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	wire := serializeControlMsg(payload, mtype)
@@ -31,6 +37,9 @@ func (c *controller) send(mtype byte, payload []byte) error {
 }
 
 func (c *controller) sendRaw(wire []byte) error {
+	if c == nil || c.conn == nil {
+		return errNoControl
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, err := c.conn.Write(wire)

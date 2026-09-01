@@ -4,8 +4,6 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"time"
-	"unsafe"
 )
 
 // ---------------------------------------------------------------------------
@@ -34,17 +32,18 @@ func termSize() (cols, rows int) {
 // ---------------------------------------------------------------------------
 
 type tui struct {
-	mu       sync.Mutex
-	fd       int
-	cols     int
-	rows     int
-	keys     []uint64 // current cell keys (cols * (rows-1))
-	prev     []uint64 // last drawn keys
-	shown    bool
-	frameIdx int
-	status   string
-	dirty    bool // force full repaint
-	running  bool
+	mu              sync.Mutex
+	fd              int
+	cols            int
+	rows            int
+	keys            []uint64 // current cell keys (cols * (rows-1))
+	prev            []uint64 // last drawn keys
+	shown           bool
+	frameIdx        int
+	repaintInterval int // forced full redraw every N frames (desync-recovery safety net)
+	status          string
+	dirty           bool // force full repaint
+	running         bool
 
 	// color resolution helpers
 	sgrBuf []byte
@@ -52,6 +51,8 @@ type tui struct {
 	// overlay rendered over the video area (set by the app): palette text or
 	// the software keyboard. Each line may carry a highlight span (cursor).
 	overlay []overlayLine
+
+	lastRGB []byte // last full canvas snapshot (cols x 2*rows RGBA), for Alt+S screenshots
 }
 
 func newTUI() *tui {
@@ -90,8 +91,19 @@ func (t *tui) draw(rgba []byte) {
 		return // stale canvas (resize in flight); next frame fixes it
 	}
 
+	// keep a fresh snapshot for Alt+S screenshots (len(rgba)==w*h*4 guaranteed by packCells)
+	n := w * h * 4
+	if len(t.lastRGB) != n {
+		t.lastRGB = make([]byte, n)
+	}
+	copy(t.lastRGB[:n], rgba[:n])
+
 	t.frameIdx++
-	forceFull := t.dirty || t.frameIdx%24 == 0
+	interval := t.repaintInterval
+	if interval < 1 {
+		interval = 1
+	}
+	forceFull := t.dirty || t.frameIdx%interval == 0
 	t.dirty = false
 
 	out := t.sgrBuf[:0]
@@ -299,6 +311,13 @@ func (t *tui) setStatus(s string) {
 	t.mu.Unlock()
 }
 
+// markDirty forces a full repaint on the next drawn frame.
+func (t *tui) markDirty() {
+	t.mu.Lock()
+	t.dirty = true
+	t.mu.Unlock()
+}
+
 func (t *tui) shellInit() {
 	os.Stdout.WriteString("\x1b[?1049h") // alt screen
 	os.Stdout.WriteString("\x1b[?25l")   // hide cursor
@@ -313,6 +332,3 @@ func (t *tui) shellClose() {
 	os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?1015l")
 	os.Stdout.WriteString("\x1b[0m\x1b[?25h\x1b[?1049l")
 }
-
-var _ = unsafe.Pointer(nil)
-var _ = time.Second

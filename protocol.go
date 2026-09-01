@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 )
 
@@ -18,9 +17,6 @@ const (
 	codecFLAC = 0x666c6163
 	codecRAW  = 0x00726177
 )
-
-// Device socket order: video, audio, control (each may be absent).
-const socketOrder = "video first, then audio, then control"
 
 // ---------------------------------------------------------------------------
 // packet framing (12-byte header, big-endian)
@@ -53,24 +49,6 @@ func parsePacketHeader(he []byte) (isSession bool, ptsUs int64, isConfig, isKey 
 	isKey = pts&pktFlagKeyframe != 0
 	size = binary.BigEndian.Uint32(he[8:12])
 	return false, int64(pts & pktPTSMask), isConfig, isKey, size
-}
-
-// readMediaPacket reads a full media packet (header + payload).
-func readMediaPacket(r io.Reader, he []byte) (ptsUs int64, isConfig, isKey bool, payload []byte, err error) {
-	isSession, ptsUs, isConfig, isKey, size := parsePacketHeader(he)
-	if isSession {
-		err = fmt.Errorf("unexpected session header")
-		return
-	}
-	if size == 0 || size > 1<<22 {
-		err = fmt.Errorf("bad packet size %d", size)
-		return
-	}
-	payload = make([]byte, size)
-	if _, err = io.ReadFull(r, payload); err != nil {
-		return
-	}
-	return
 }
 
 // sessionHeader returns width, height, clientResized from a session packet.

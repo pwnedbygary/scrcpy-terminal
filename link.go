@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"math/big"
@@ -285,5 +284,3 @@ func fmtFPS(f float64) string {
 	}
 	return fmt.Sprintf("%.3f", f)
 }
-
-var _ = binary.BigEndian // placeholder to keep imports tidy if refactored

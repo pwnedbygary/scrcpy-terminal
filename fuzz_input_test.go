@@ -28,6 +28,7 @@ func TestInputFuzz(t *testing.T) {
 		"\x1bOP", "\x1bOQ", "\x1bOR", "\x1bOS", "\x1b[15~", "\x1b[24~",
 		"\x1b[1;5A", "\x1b[1;5C", "\x1b[17~",
 		"\x1bm", "\x1bM", "\x1b-", "\x1b_", "\x1b=", "\x1b+",
+		"\x1bs", "\x1bS", "\x1bk", "\x1bK", // Alt+S screenshot, Alt+K reset-video
 		"\x1b", "\x1b[", "\x1b[<", "a", "Z", "0", "9", "\r", "\x7f", "\t",
 		"\x1b\x1b", "\x1b\x1b[A",
 		"\x1b[38;2;255;255;255m",

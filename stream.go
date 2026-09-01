@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync/atomic"
 )
 
 // streamState owns the video/audio demux loops.
@@ -24,6 +25,11 @@ type streamState struct {
 	canvasW, canvasH int // cols x (2*rows): RGBA canvas
 	fitW, fitH       int // letterboxed video region inside canvas
 	fitOffX, fitOffY int // in canvas pixels
+
+	// Set by the resize/session paths (main loop), consumed per frame by
+	// runVideo: replaces the per-frame ioctl poll with one termSize() call
+	// per geometry event.
+	geometryDirty atomic.Bool
 
 	// fps
 	currentFPS float64
@@ -109,6 +115,19 @@ func (s *streamState) updateGeometry() {
 // canvasSize returns the RGBA canvas dimensions.
 func (s *streamState) canvasSize() (w, h int) { return s.canvasW, s.canvasH }
 
+// markGeometryDirty schedules a geometry recompute on the next video frame:
+// one termSize() ioctl per resize/session event instead of one per decoded
+// frame. Called from the main loop (evResize), so it is atomic.
+func (s *streamState) markGeometryDirty() { s.geometryDirty.Store(true) }
+
+// resetPool discards pooled canvases after a geometry change: fresh slots are
+// zeroed at make(), which keeps letterbox pixels black and avoids stale canvas
+// sizes lingering in the pool.
+func (s *streamState) resetPool() {
+	s.canvasPool[0] = nil
+	s.canvasPool[1] = nil
+}
+
 // mapCell maps a terminal cell (1-based) to a video-frame position, using the
 // letterbox geometry. The position's screen_size MUST be the video frame size
 // (the server drops events with mismatched sizes).
@@ -170,9 +189,7 @@ func (s *streamState) runVideo() error {
 	}
 	w, h, _ := sessionHeader(he)
 	s.videoW, s.videoH = int(w), int(h)
-	s.updateGeometry()
-	canvasW, canvasH := s.canvasSize()
-	canvas := make([]byte, canvasW*canvasH*4)
+	s.updateGeometry() // initial geometry; pool is empty so no reset needed
 
 	dec := vdecOpen(codecH264, s.videoW, s.videoH)
 	if dec == nil {
@@ -191,7 +208,7 @@ func (s *streamState) runVideo() error {
 			neww, newh, _ := sessionHeader(he)
 			if int(neww) != s.videoW || int(newh) != s.videoH {
 				s.videoW, s.videoH = int(neww), int(newh)
-				s.updateGeometry()
+				s.markGeometryDirty()
 			}
 			continue
 		}
@@ -225,22 +242,12 @@ func (s *streamState) runVideo() error {
 			if !hasFrame {
 				break
 			}
-			// Terminal may have been resized since the last frame (SIGWINCH).
-			// The stream is the only place that knows the geometry, so check
-			// the terminal size here and re-fit when it changed.
-			s.updateGeometry()
-			ncw, nch := s.canvasSize()
-			if ncw != canvasW || nch != canvasH {
-				canvasW, canvasH = ncw, nch
-				canvas = make([]byte, canvasW*canvasH*4)
-				clear(canvas)
-			} else if len(canvas) != canvasW*canvasH*4 {
-				canvas = make([]byte, canvasW*canvasH*4)
-			}
-			// zero the letterbox region (cheap: only on geometry change)
-			// then scale into the fit region
-			if s.fitOffX != 0 || s.fitOffY != 0 || s.fitW != canvasW || s.fitH != canvasH {
-				clear(canvas)
+			// Terminal may have been resized since the last frame (SIGWINCH):
+			// consume the flag set by evResize/session paths, so termSize()
+			// runs once per geometry event instead of every decoded frame.
+			if s.geometryDirty.Swap(false) {
+				s.updateGeometry()
+				s.resetPool()
 			}
 			// dump mode: render the frame at FULL resolution for verification
 			if s.cfg.dumpFrames != "" {
@@ -253,22 +260,26 @@ func (s *streamState) runVideo() error {
 				}
 				continue
 			}
-			reg := canvas[(s.fitOffY*canvasW+s.fitOffX)*4:]
-			if _, _, err := vdecScaleStride(dec, reg, canvasW*4, s.fitW, s.fitH); err != nil {
+			// Scale directly into a pooled slot (ping-pong): no per-frame
+			// scratch copy. Letterbox pixels stay black because slots are
+			// zeroed at make() and swscale only writes the fit region.
+			buf := s.takePooled(s.canvasW * s.canvasH * 4)
+			reg := buf[(s.fitOffY*s.canvasW+s.fitOffX)*4:]
+			if _, _, err := vdecScaleStride(dec, reg, s.canvasW*4, s.fitW, s.fitH); err != nil {
+				s.returnPooled(buf)
 				continue
 			}
-			// hand the renderer a pooled copy of the canvas so the decoder
-			// can keep decoding into its scratch buffer immediately
-			cpy := s.takePooled(len(canvas))
-			copy(cpy, canvas)
-			frame := &videoFrame{rgb: cpy, w: s.videoW, h: s.videoH,
-				cw: canvasW, ch: canvasH, fps: fps()}
+			frame := &videoFrame{rgb: buf, w: s.videoW, h: s.videoH,
+				cw: s.canvasW, ch: s.canvasH, fps: fps()}
 			select {
 			case s.deliver <- frame:
 			default:
-				// drop-old: replace a queued frame with the freshest
+				// drop-old: replace a queued frame with the freshest. Receive
+				// must be non-blocking: the renderer may have already taken
+				// the old frame (it returns its slot after drawing).
 				select {
-				case <-s.deliver:
+				case old := <-s.deliver:
+					s.returnPooled(old.rgb)
 				default:
 				}
 				s.deliver <- frame

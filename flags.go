@@ -22,6 +22,7 @@ func parseFlags(cfg *config, mirrorFPS *float64) {
 	fs.StringVar(&cfg.audioDump, "dump-audio", "", "dump raw audio wire packets to this file (verification)")
 	fs.BoolVar(&cfg.audioDup, "audio-dup", cfg.audioDup, "keep device audio playing while capturing (duplicates to device)")
 	fs.Float64Var(mirrorFPS, "mirror-fps", 0, "cap display framerate (0 = uncapped)")
+	fs.IntVar(&cfg.repaintInterval, "repaint-interval", cfg.repaintInterval, "forced full-redraw cadence in frames (desync-recovery safety net; default 300 ≈ 5s at 60fps)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "scterm - scrcpy in your terminal\n\n")
 		fmt.Fprintf(os.Stderr, "usage: scterm [flags]\n\nflags:\n")
@@ -29,6 +30,3 @@ func parseFlags(cfg *config, mirrorFPS *float64) {
 	}
 	fs.Parse(os.Args[1:])
 }
-
-// keysMode is set by -keys (handled before device connection).
-var keysMode bool

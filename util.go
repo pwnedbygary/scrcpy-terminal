@@ -44,11 +44,9 @@ func truncateRunes(s string, n int) string {
 	return s
 }
 
-// dumpPPM writes an RGBA canvas as a binary PPM (verification tool).
-func dumpPPM(dir string, idx int, rgba []byte, w, h int) error {
-	os.MkdirAll(dir, 0o755)
-	fn := fmt.Sprintf("%s/frame%d.ppm", dir, idx)
-	f, err := os.Create(fn)
+// writePPMFile writes an RGBA buffer as a binary PPM to path (alpha ignored).
+func writePPMFile(path string, rgba []byte, w, h int) error {
+	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
@@ -57,11 +55,16 @@ func dumpPPM(dir string, idx int, rgba []byte, w, h int) error {
 	for y := 0; y < h; y++ {
 		row := rgba[y*w*4 : (y+1)*w*4]
 		for x := 0; x < w; x++ {
-			px := row[x*4 : x*4+4]
-			f.Write(px[0:3]) // ignore alpha
+			f.Write(row[x*4 : x*4+3]) // ignore alpha
 		}
 	}
 	return nil
+}
+
+// dumpPPM writes an RGBA canvas as a binary PPM (verification tool).
+func dumpPPM(dir string, idx int, rgba []byte, w, h int) error {
+	os.MkdirAll(dir, 0o755)
+	return writePPMFile(fmt.Sprintf("%s/frame%d.ppm", dir, idx), rgba, w, h)
 }
 
 // printSortedKeys lists all Android keycodes (for -keys).

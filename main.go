@@ -4,7 +4,6 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
-	"time"
 )
 
 //go:embed third_party/scrcpy-server.jar.d/scrcpy-server
@@ -18,29 +17,31 @@ func serverJarData() []byte { return embeddedServer }
 func stderrWriter() *os.File { return os.Stderr }
 
 type config struct {
-	serial       string
-	video        bool
-	audio        bool
-	control      bool
-	videoBitRate int
-	audioBitRate int
-	maxSize      int
-	maxFps       float64
-	noTUI        bool // headless test mode (dump stats only)
-	keys         bool
-	dumpFrames   string // dir to dump first frames as PPM (verification)
-	audioDump    string // file to dump raw opus wire packets (verification)
-	audioDup     bool   // keep audio playing on the device while capturing
+	serial          string
+	video           bool
+	audio           bool
+	control         bool
+	videoBitRate    int
+	audioBitRate    int
+	maxSize         int
+	maxFps          float64
+	noTUI           bool // headless test mode (dump stats only)
+	keys            bool
+	dumpFrames      string // dir to dump first frames as PPM (verification)
+	audioDump       string // file to dump raw opus wire packets (verification)
+	audioDup        bool   // keep audio playing on the device while capturing
+	repaintInterval int    // forced full redraw cadence in frames (default 300 ≈ 5s at 60fps)
 }
 
 func main() {
 	cfg := config{
-		video:        true,
-		audio:        true,
-		control:      true,
-		videoBitRate: 8000000,
-		audioBitRate: 128000,
-		maxSize:      1280,
+		video:           true,
+		audio:           true,
+		control:         true,
+		videoBitRate:    8000000,
+		audioBitRate:    128000,
+		maxSize:         1280,
+		repaintInterval: 300,
 	}
 	var mirrorFPS float64
 	parseFlags(&cfg, &mirrorFPS)
@@ -84,5 +85,3 @@ func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "scterm: %v\n", err)
 	os.Exit(1)
 }
-
-var _ = time.Second
