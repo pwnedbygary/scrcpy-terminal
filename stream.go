@@ -5,15 +5,23 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 )
 
+// frameSink receives decoded frames from the video demux goroutine. The TUI
+// sink draws cells, the web sink encodes/hands off to browsers; both must be
+// non-blocking, because the demux loop is the pipeline's heartbeat.
+type frameSink interface {
+	frame(f *videoFrame)
+}
+
 // streamState owns the video/audio demux loops.
 type streamState struct {
-	sess    *session
-	cfg     config
-	ctrl    *controller
-	deliver chan *videoFrame
+	sess *session
+	cfg  config
+	ctrl *controller
+	sink frameSink
 
 	// current video geometry (set by session packets)
 	videoW, videoH int
@@ -26,6 +34,15 @@ type streamState struct {
 	fitW, fitH       int // letterboxed video region inside canvas
 	fitOffX, fitOffY int // in canvas pixels
 
+	// webMode makes the canvas the video's own size instead of the terminal
+	// cell grid. The browser is the display, so there is no terminal cell grid
+	// to honour, and every client must share ONE canvas: the frame buffer is
+	// allocated once per frame, so a client that invents its own geometry
+	// would hand the JPEG encoder a buffer sized for someone else's canvas
+	// (that read past the buffer and crashed scterm). Browsers scale the
+	// canvas to their viewport with CSS, which is free and lossless.
+	webMode bool
+
 	// Set by the resize/session paths (main loop), consumed per frame by
 	// runVideo: replaces the per-frame ioctl poll with one termSize() call
 	// per geometry event.
@@ -33,17 +50,21 @@ type streamState struct {
 
 	// fps
 	currentFPS float64
+	frameCount atomic.Int64
 
 	// canvas pool: hand the renderer its own buffer so the decoder can
 	// immediately reuse its scratch canvas without an alloc+copy per frame.
 	canvasPool [2][]byte
 
 	// audio stat
-	audioBytes int64       // decoded bytes handed to the sink
-	audioPeak  int16       // max |sample| seen (0 = silence, real audio > 0)
-	opusPeak   int16       // peak right after opus decode (before resample)
-	packets    int64       // audio media packets received
-	pktSizes   map[int]int // histogram: config/first packets
+	audioBytes int64 // decoded bytes handed to the sink
+	// audioPeak is the largest |sample| seen (0 = digital silence). Atomic
+	// because the status paths read it from another goroutine than the audio
+	// demux loop that writes it.
+	audioPeak atomic.Int32
+	opusPeak  int16       // peak right after opus decode (before resample)
+	packets   int64       // audio media packets received
+	pktSizes  map[int]int // histogram: config/first packets
 
 	// A/V lag probe: the device timestamps audio packets and video frames on
 	// the same monotonic clock, so ptsLagUs = video.pts - audio.pts at arrival
@@ -52,6 +73,64 @@ type streamState struct {
 	// host playback buffer).
 	lastVideoPts atomic.Int64 // us
 	lastAudioPts atomic.Int64 // us
+
+	// pcmTaps receive every decoded s16le stereo 48k buffer in addition to the
+	// local PulseAudio sink. Web/window clients need the same PCM the sink
+	// gets, and a tap must never block the demux loop (see runAudio).
+	pcmMu   sync.Mutex
+	pcmTaps []func([]byte)
+}
+
+// addPCMTap registers a consumer of decoded PCM. Taps are called from the
+// audio demux goroutine: they must not block (drop or buffer internally).
+func (s *streamState) addPCMTap(fn func([]byte)) {
+	if fn == nil {
+		return
+	}
+	s.pcmMu.Lock()
+	s.pcmTaps = append(s.pcmTaps, fn)
+	s.pcmMu.Unlock()
+}
+
+// fanPCM hands a decoded PCM buffer to every registered tap.
+func (s *streamState) fanPCM(pcm []byte) {
+	s.pcmMu.Lock()
+	taps := s.pcmTaps
+	s.pcmMu.Unlock()
+	for _, fn := range taps {
+		fn(pcm)
+	}
+}
+
+// noteAudioPeak records the largest |sample| seen so far. It is called from the
+// audio demux goroutine and read from the status paths, hence the atomic.
+func (s *streamState) noteAudioPeak(pk int16) {
+	for {
+		old := s.audioPeak.Load()
+		if int32(pk) <= old {
+			return
+		}
+		if s.audioPeak.CompareAndSwap(old, int32(pk)) {
+			return
+		}
+	}
+}
+
+// peakAudio returns the largest |sample| seen since start (0 = the device has
+// sent nothing but digital silence).
+func (s *streamState) peakAudio() int16 {
+	if s == nil {
+		return 0
+	}
+	return int16(s.audioPeak.Load())
+}
+
+// audioBytesSeen returns the decoded audio bytes handed to the sink.
+func (s *streamState) audioBytesSeen() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.audioBytes
 }
 
 type videoFrame struct {
@@ -63,18 +142,39 @@ type videoFrame struct {
 }
 
 func newStreamState(sess *session, cfg config, ctrl *controller) *streamState {
-	return &streamState{
-		sess:    sess,
-		cfg:     cfg,
-		ctrl:    ctrl,
-		deliver: make(chan *videoFrame, 1), // drop-old semantics
-	}
+	return &streamState{sess: sess, cfg: cfg, ctrl: ctrl}
+}
+
+// setSink installs the frame consumer (before runVideo starts).
+func (s *streamState) setSink(f frameSink) { s.sink = f }
+
+// frames returns (decoded frame count, video width, video height).
+func (s *streamState) frames() (int64, int, int) {
+	return s.frameCount.Load(), s.videoW, s.videoH
 }
 
 // updateGeometry recomputes canvas + fit after a terminal resize or a video
 // session change. Cheap enough to call per frame (one ioctl); the canvas
 // realloc only happens when the size actually changed.
 func (s *streamState) updateGeometry() {
+	if s.webMode {
+		// The canvas is the video, at the video's own resolution: fit is the
+		// whole canvas and there is no letterboxing. JPEG 4:2:0 needs even
+		// dimensions, and a zero geometry (before the first session header)
+		// must not allocate a frame buffer.
+		cw, ch := s.videoW&^1, s.videoH&^1
+		if cw < 2 || ch < 2 {
+			s.canvasW, s.canvasH = 0, 0
+			s.fitW, s.fitH = 0, 0
+			s.fitOffX, s.fitOffY = 0, 0
+			return
+		}
+		s.canvasW, s.canvasH = cw, ch
+		s.fitW, s.fitH = cw, ch
+		s.fitOffX, s.fitOffY = 0, 0
+		return
+	}
+
 	cols, rows := termSize()
 	rows-- // status bar
 	if cols < 2 {
@@ -266,35 +366,31 @@ func (s *streamState) runVideo() error {
 				if _, _, err := vdecScaleStride(dec, full, s.videoW*4, s.videoW, s.videoH); err == nil {
 					cpy := s.takePooled(len(full))
 					copy(cpy, full)
-					s.deliver <- &videoFrame{rgb: cpy, w: s.videoW, h: s.videoH,
-						cw: s.videoW, ch: s.videoH, fps: fps()}
+					s.frameCount.Add(1)
+					s.deliverFrame(&videoFrame{rgb: cpy, w: s.videoW, h: s.videoH,
+						cw: s.videoW, ch: s.videoH, fps: fps()})
 				}
 				continue
 			}
 			// Scale directly into a pooled slot (ping-pong): no per-frame
 			// scratch copy. Letterbox pixels stay black because slots are
 			// zeroed at make() and swscale only writes the fit region.
+			//
+			// A zero canvas (web mode before the first session header tells us
+			// the video size) has no frame buffer to scale into: drop the frame
+			// rather than hand swscale an empty destination.
+			if s.canvasW < 2 || s.canvasH < 2 || s.fitW < 2 || s.fitH < 2 {
+				continue
+			}
 			buf := s.takePooled(s.canvasW * s.canvasH * 4)
 			reg := buf[(s.fitOffY*s.canvasW+s.fitOffX)*4:]
 			if _, _, err := vdecScaleStride(dec, reg, s.canvasW*4, s.fitW, s.fitH); err != nil {
 				s.returnPooled(buf)
 				continue
 			}
-			frame := &videoFrame{rgb: buf, w: s.videoW, h: s.videoH,
-				cw: s.canvasW, ch: s.canvasH, fps: fps()}
-			select {
-			case s.deliver <- frame:
-			default:
-				// drop-old: replace a queued frame with the freshest. Receive
-				// must be non-blocking: the renderer may have already taken
-				// the old frame (it returns its slot after drawing).
-				select {
-				case old := <-s.deliver:
-					s.returnPooled(old.rgb)
-				default:
-				}
-				s.deliver <- frame
-			}
+			s.frameCount.Add(1)
+			s.deliverFrame(&videoFrame{rgb: buf, w: s.videoW, h: s.videoH,
+				cw: s.canvasW, ch: s.canvasH, fps: fps()})
 		}
 	}
 }
@@ -356,10 +452,9 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 				return fmt.Errorf("audio raw packet: %w", err)
 			}
 			s.audioBytes += int64(len(payload))
-			if pk := maxAbsInt16(payload); pk > s.audioPeak {
-				s.audioPeak = pk
-			}
+			s.noteAudioPeak(maxAbsInt16(payload))
 			audioOut.writePCM16(payload)
+			s.fanPCM(payload)
 		}
 	}
 
@@ -418,13 +513,22 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 			}
 			s.audioBytes += int64(n)
 			if s.cfg.audio {
-				if pk := maxAbsInt16(pcm[:n]); pk > s.audioPeak {
-					s.audioPeak = pk
-				}
+				s.noteAudioPeak(maxAbsInt16(pcm[:n]))
 			}
 			audioOut.writePCM16(pcm[:n])
+			s.fanPCM(pcm[:n])
 		}
 	}
+}
+
+// deliverFrame hands a frame to the sink, recycling the buffer if there is no
+// sink at all (headless without --web).
+func (s *streamState) deliverFrame(f *videoFrame) {
+	if s.sink == nil {
+		s.returnPooled(f.rgb)
+		return
+	}
+	s.sink.frame(f)
 }
 
 // takePooled returns a buffer of at least n bytes, reusing pooled canvases

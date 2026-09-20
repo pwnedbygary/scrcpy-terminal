@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -16,16 +17,33 @@ type app struct {
 	ctrl     *controller
 	audio    *audioSink
 	stream   *streamState
+	web      *webServer
 	grabbed  bool
 	inZellij bool
 
 	// input events channel
 	events chan inputEvent
 
+	// frames is the display mailbox between the video demux goroutine and the
+	// run loop: one slot, drop-old. The demux goroutine hands frames over here
+	// and never waits, so a slow terminal (or a stalled reader behind it) drops
+	// frames instead of stalling the h264 decoder and backing the device stream
+	// up. Drawing must therefore happen in the run loop, never in the sink.
+	frames chan *videoFrame
+
 	// software keyboard
 	kb *keyboard
 
-	mouseDown bool
+	// action menu: the terminal's discoverable control list (menu.go). Open
+	// state and the painted row layout, so a click can be mapped back to the
+	// row it landed on without recomputing the overlay.
+	menuOpen bool
+	menuHits []menuHit
+
+	// pointer-drag state: button, coalescer clock and the pending move.
+	// Owned by the run loop in the terminal, but written by the control
+	// dispatcher goroutine in --web/--window, so it is self-locking.
+	drag dragState
 
 	// frame geometry for pointer mapping
 	frameW, frameH int
@@ -37,12 +55,13 @@ type app struct {
 
 	lastFrameNano int64
 
-	// coalesced drag move state
-	lastMoveNano int64
-	pendingMove  position
-
 	// keyboard auto-grabbed the mouse on open (Zellij); restore on close
 	kbAutoGrabbed bool
+
+	// quitting is set once shutdown has begun, so teardown-time socket errors
+	// ("stream ended: use of closed network connection") are not reported as
+	// failures on the way out.
+	quitting atomic.Bool
 }
 
 type inputEvent struct {
@@ -64,6 +83,7 @@ func newApp(sess *session, cfg config) *app {
 		cfg:     cfg,
 		audio:   newAudioSink(),
 		events:  make(chan inputEvent, 256),
+		frames:  make(chan *videoFrame, 1), // drop-old display mailbox
 		grabbed: true,
 	}
 	_, a.inZellij = os.LookupEnv("ZELLIJ")
@@ -74,15 +94,60 @@ func newApp(sess *session, cfg config) *app {
 		a.ctrl = newController(sess.control)
 		go deviceMsgReader(sess.control)
 	}
+	// The demux loops live for as long as the app; they must exist before the
+	// web server (which sinks decoded frames) is built.
+	a.stream = newStreamState(sess, cfg, a.ctrl)
 	if !cfg.noTUI {
 		a.tui = newTUI()
 		a.tui.repaintInterval = cfg.repaintInterval
 		a.kb = newKeyboard()
 	}
+	if cfg.web {
+		// The browser is the display: no TUI, no terminal mouse grab, no
+		// alternate screen. The terminal stays a normal terminal and only
+		// shows log lines.
+		a.tui = nil
+		a.kb = nil
+		a.web = newWebServer(cfg, sess, a.stream, a.audio, a.ctrl, a)
+		a.stream.setSink(a.web)
+	} else {
+		// TUI (and headless) runs consume frames in their own run loop, so the
+		// app is the sink. Without this the stream has nowhere to deliver to
+		// and the display stays black -- which is exactly what happened when
+		// the sink refactor left this unwired.
+		a.stream.setSink(a)
+	}
 	return a
 }
 
+// frame is the frameSink implementation for the terminal UI and for headless
+// runs. It runs ON the video demux goroutine, so it must never block: the frame
+// goes into a one-slot mailbox with drop-old semantics and the run loop draws
+// it. Drawing here instead would make a slow terminal stall the h264 decoder
+// (and with it the device-side stream), which is the opposite of what the
+// display path is for.
+func (a *app) frame(f *videoFrame) {
+	if f == nil {
+		return
+	}
+	select {
+	case a.frames <- f:
+	default:
+		// drop-old: replace a queued frame with the freshest one, recycling
+		// the buffer we just evicted.
+		select {
+		case old := <-a.frames:
+			a.stream.returnPooled(old.rgb)
+		default:
+		}
+		a.frames <- f
+	}
+}
+
 func (a *app) run() error {
+	if a.web != nil {
+		return a.runWeb()
+	}
 	if a.tui == nil {
 		return a.runHeadless()
 	}
@@ -156,6 +221,9 @@ func (a *app) run() error {
 				a.tui.resize()
 				a.stream.markGeometryDirty()
 				a.tui.setStatus(a.statusLine())
+				if a.menuOpen {
+					a.refreshMenu() // rows moved: repaint and re-record hit rows
+				}
 			case evTickFast:
 				a.flushPendingMove()
 			case evTick:
@@ -164,7 +232,10 @@ func (a *app) run() error {
 			case evBytes:
 				a.handleInput(ev.buf)
 			}
-		case f := <-a.stream.deliver:
+		case f := <-a.frames:
+			// Draw here, in the run loop, not in the sink: see app.frame. This
+			// is the only place a frame is rendered, and it must be identical
+			// in structure to what the TUI has always done.
 			now := timeNowUnixNano()
 			if a.lastFrameNano != 0 {
 				a.recordFrameTime(float64(now-a.lastFrameNano) / 1e6)
@@ -173,6 +244,145 @@ func (a *app) run() error {
 			a.frameW, a.frameH = f.w, f.h
 			a.tui.draw(f.rgb)
 			a.stream.returnPooled(f.rgb)
+		}
+	}
+}
+
+// hostAudioSilent reports whether the host audio sink must stay silent.
+//
+// In web/window mode the browser plays the device audio (fed by the PCM tap),
+// so the stream is the sole source of sound and the host sink is muted.
+// --audio-dup asks for the sound in both places: the host device and the
+// window each play it, which is a deliberate duplicate rather than the
+// accidental doubling that used to happen unconditionally.
+//
+// The TUI is unaffected: there the host sink IS the only output, so it always
+// plays (and --audio-dup keeps its other meaning, letting the device keep
+// playing its own audio while capture runs).
+func hostAudioSilent(cfg config) bool {
+	return cfg.web && !cfg.audioDup
+}
+
+// runWeb is the --web / --window main loop. There is no terminal UI: the
+// browser is the display, so this loop only owns the stream goroutines, the
+// shutdown signal path and the shutdown sequence.
+func (a *app) runWeb() error {
+	if a.cfg.audio && a.audio.err != nil {
+		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
+	}
+	if a.web == nil {
+		return fmt.Errorf("web display not configured")
+	}
+
+	// The frame sink (a.web) is wired in newApp, for every mode, so a run can
+	// never start with no sink and silently draw nothing.
+	//
+	// The browser is the display, so the frame canvas is the video's own size
+	// rather than the terminal cell grid: every client shares one geometry and
+	// scales it with CSS. Set before runVideo starts (the goroutine below), so
+	// the demux goroutine always sees it.
+	a.stream.webMode = true
+	// Audio routing: in web/window mode the browser plays the device audio, so
+	// the stream is the sole source of sound and the host sink stays silent.
+	// --audio-dup asks for the sound in both places (host device and window),
+	// which is the only way to get it played twice.
+	if a.audio != nil {
+		a.audio.silent.Store(hostAudioSilent(a.cfg))
+		switch {
+		case a.audio.silent.Load():
+			// "muted" here is the POLICY, not a reading of the host mixer: the
+			// browser is the audio output, so the host sink is deliberately
+			// left silent to avoid playing every sound twice, slightly offset.
+			fmt.Fprintf(stderrWriter(),
+				"scterm: audio: browser only (the host sink stays silent; pass --audio-dup to play on both)\n")
+		case a.cfg.audioDup:
+			fmt.Fprintf(stderrWriter(),
+				"scterm: audio: duplicated (host sink and browser both play)\n")
+		}
+	}
+
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		for range sigCh {
+			select {
+			case a.events <- inputEvent{kind: evQuit}:
+			default:
+			}
+		}
+	}()
+
+	videoErr := make(chan error, 1)
+	go func() {
+		if err := a.stream.runVideo(); err != nil {
+			if !a.quitting.Load() && !isClosedConnErr(err) {
+				fmt.Fprintf(stderrWriter(), "scterm: video: %v\n", err)
+			}
+			videoErr <- err
+		}
+	}()
+	go func() {
+		if err := a.stream.runAudio(a.audio); err != nil && !a.quitting.Load() && !isClosedConnErr(err) {
+			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
+		}
+	}()
+	go a.followAudioSink()
+
+	// A 500ms tick keeps the mouse-drag coalescer fed even when no browser is
+	// connected, and lets the status line (TUI-attached runs) stay live.
+	go func() {
+		for {
+			time.Sleep(500 * time.Millisecond)
+			select {
+			case a.events <- inputEvent{kind: evTick}:
+			case <-a.web.done:
+				return
+			}
+		}
+	}()
+	go func() {
+		fast := time.NewTicker(16 * time.Millisecond)
+		defer fast.Stop()
+		for {
+			select {
+			case <-fast.C:
+				select {
+				case a.events <- inputEvent{kind: evTickFast}:
+				default:
+				}
+			case <-a.web.done:
+				return
+			}
+		}
+	}()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- a.web.run(a.cfg.window) }()
+
+	for {
+		select {
+		case ev := <-a.events:
+			switch ev.kind {
+			case evQuit:
+				a.quitting.Store(true)
+				a.web.stop()
+				return nil
+			case evTickFast:
+				a.flushPendingMove()
+			case evTick:
+				a.flushPendingMove()
+				a.refreshStatus()
+			case evBytes:
+				a.handleInput(ev.buf)
+			}
+		case err := <-serveErr:
+			a.quitting.Store(true)
+			a.web.stop()
+			return err
+		case err := <-videoErr:
+			a.quitting.Store(true)
+			a.web.stop()
+			return err
 		}
 	}
 }
@@ -209,24 +419,31 @@ func (a *app) runHeadless() error {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	var dumped int
+
 	for {
 		select {
 		case <-a.events:
 			return nil
-		case f := <-a.stream.deliver:
+		case f := <-a.frames:
+			// Same mailbox as the TUI: the run loop owns the frame and the
+			// demux goroutine never waits on disk I/O either. At most three
+			// frames are written, as before.
 			a.frameW, a.frameH = f.w, f.h
-			if a.cfg.dumpFrames != "" {
-				if dumped < 3 {
-					dumpPPM(a.cfg.dumpFrames, dumped, f.rgb, f.cw, f.ch)
+			if a.cfg.dumpFrames != "" && dumped < 3 {
+				if err := dumpPPM(a.cfg.dumpFrames, dumped, f.rgb, f.cw, f.ch); err != nil {
+					fmt.Fprintf(stderrWriter(), "scterm: dump frame: %v\n", err)
+				} else {
 					dumped++
-					fmt.Fprintf(os.Stdout, "dumped frame %d: %dx%d (canvas %dx%d)\n", dumped, f.w, f.h, f.cw, f.ch)
+					fmt.Fprintf(os.Stdout, "dumped frame %d: %dx%d (canvas %dx%d)\n",
+						dumped, f.w, f.h, f.cw, f.ch)
 				}
 			}
+			a.stream.returnPooled(f.rgb)
 		case <-ticker.C:
 			lag := (a.stream.lastVideoPts.Load() - a.stream.lastAudioPts.Load()) / 1000
 			fmt.Fprintf(os.Stdout, "\r[%dx%d fps=%.0f audio=%s pcm=%dKB peak=%d avlag=%dms]   ",
 				a.frameW, a.frameH, a.stream.currentFPS, audioState(a),
-				a.stream.audioBytes/1024, a.stream.audioPeak, lag)
+				a.stream.audioBytesSeen()/1024, a.stream.peakAudio(), lag)
 		}
 	}
 }
@@ -265,6 +482,11 @@ func (a *app) refreshStatus() {
 func (a *app) openKeyboard() {
 	if a.kb == nil {
 		return
+	}
+	// The menu and the keyboard are both full-width overlays; opening one
+	// closes the other so they cannot share the screen.
+	if a.menuOpen {
+		a.closeMenu()
 	}
 	a.kb.open = true
 	// In Zellij the app starts ungrabbed (mouse reporting OFF), so clicks
@@ -435,7 +657,12 @@ func (a *app) statusLine() string {
 		}
 		ft = fmt.Sprintf("  %s %4.1fms %4.1ffps ", a.sparkline(20), avg, fps)
 	}
-	return fmt.Sprintf("scterm %s %dx%d %s vol %s%s%s| Esc back · F1-F4 home/menu/recents/power · F5/F6 dev-vol · F7 mute · F8 rotate · F9/F10 shade · Ctrl-K kb · Alt+M mute · Alt+S shot · Alt+K reset video · Alt+Q quit",
+	// The hint is intentionally short: the full control list lives in the
+	// action menu (Alt+/) and in the README. Spelling out every F-key here ate
+	// two lines of a phone-sized terminal and still needed the menu to explain
+	// it, so the menu is now the discoverable path and this is the pointer to
+	// it. "Alt+/ menu" is the only thing a new user has to learn.
+	return fmt.Sprintf("scterm %s %dx%d %s vol %s%s%s| Alt+/ actions · Alt+I keys · Alt+Q quit",
 		name, a.frameW, a.frameH, g, vol, kb, ft)
 }
 

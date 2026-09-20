@@ -20,11 +20,19 @@ func parseFlags(cfg *config, mirrorFPS *float64) {
 	fs.BoolVar(&cfg.keys, "keys", cfg.keys, "print all supported Android keys and exit")
 	fs.StringVar(&cfg.dumpFrames, "dump-frames", "", "dump first frames as PPM to this dir (verification)")
 	fs.StringVar(&cfg.audioDump, "dump-audio", "", "dump raw audio wire packets to this file (verification)")
-	fs.BoolVar(&cfg.audioDup, "audio-dup", cfg.audioDup, "keep device audio playing while capturing (duplicates to device)")
+	fs.BoolVar(&cfg.audioDup, "audio-dup", cfg.audioDup, "duplicate the audio: keep it playing on the device while capturing, and (with --web/--window) play it on the host as well as in the browser")
 	fs.StringVar(&cfg.audioSource, "audio-source", cfg.audioSource, "device audio capture source: output (default, remote submix), playback (Android 13+, low latency, enables audio-dup), mic")
 	fs.StringVar(&cfg.audioCodec, "audio-codec", cfg.audioCodec, "device audio codec: opus (default) | aac | flac | raw (uncompressed PCI, skips device encoder)")
 	fs.Float64Var(mirrorFPS, "mirror-fps", 0, "cap display framerate (0 = uncapped)")
 	fs.IntVar(&cfg.repaintInterval, "repaint-interval", cfg.repaintInterval, "forced full-redraw cadence in frames (desync-recovery safety net; default 300 ≈ 5s at 60fps)")
+
+	// ---- web / window display -------------------------------------------
+	fs.BoolVar(&cfg.web, "web", cfg.web, "serve the mirror over HTTP to a browser (canvas display, same controls)")
+	fs.BoolVar(&cfg.window, "window", cfg.window, "like --web, but pop the mirror out into its own window")
+	fs.IntVar(&cfg.webPort, "web-port", cfg.webPort, "TCP port for --web/--window (0 = pick a free port)")
+	fs.StringVar(&cfg.webAddr, "web-addr", cfg.webAddr, "interface to bind for --web/--window (default 127.0.0.1; 0.0.0.0 exposes it to your network)")
+	fs.IntVar(&cfg.webQuality, "web-quality", cfg.webQuality, "mjpeg quality for the web display: 2 (best, big) .. 31 (small)")
+	fs.StringVar(&cfg.windowSize, "window-size", cfg.windowSize, "window size for --window as WxH (default: fitted to the device)")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "scterm - scrcpy in your terminal\n\n")
 		fmt.Fprintf(os.Stderr, "usage: scterm [flags]\n\nflags:\n")

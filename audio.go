@@ -158,6 +158,13 @@ type audioSink struct {
 	sink *C.sct_audio_sink
 	gain int32 // q8, 256 = 1.0
 	err  error
+
+	// silent drops PCM instead of writing it to the host device. Web/window
+	// mode sets it: there the browser is the audio output, and playing on the
+	// host as well would double every sound with a small offset, which for a
+	// window on the same machine is plainly wrong. This is independent of
+	// fanPCM, so browser audio is unaffected.
+	silent atomic.Bool
 }
 
 func newAudioSink() *audioSink {
@@ -346,6 +353,9 @@ func cstr(s string) *C.char {
 func (a *audioSink) writePCM16(pcm []byte) {
 	if a.err != nil {
 		return
+	}
+	if a.silent.Load() {
+		return // web/window: the browser is the audio output (see silent)
 	}
 	if len(pcm)%4 != 0 {
 		pcm = pcm[:len(pcm)-len(pcm)%4]

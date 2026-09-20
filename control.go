@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"sync"
@@ -151,7 +150,9 @@ func deviceMsgReader(conn net.Conn) {
 	for {
 		n, err := conn.Read(buf)
 		if err != nil {
-			if err != io.EOF {
+			// A closed socket is the normal way this goroutine ends: on quit,
+			// the session tears the control connection down first.
+			if !isClosedConnErr(err) {
 				fmt.Fprintf(stderrWriter(), "scterm: control recv: %v\n", err)
 			}
 			return

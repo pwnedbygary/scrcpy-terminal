@@ -1,0 +1,331 @@
+/* scterm web display: the canvas owns the window; the HUD only appears when
+   the pointer moves, so a --window run looks like a device, not a web page. */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  color: #e8e8e8;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, "DejaVu Sans Mono", Menlo, monospace;
+  -webkit-user-select: none;
+  user-select: none;
+  overscroll-behavior: none;
+}
+
+#screen {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  display: block;
+  /* width/height are set by View.fit() in player.js. The element is scaled to
+     the largest box that fits the window at the picture's own aspect ratio, so
+     the image is never distorted and never smaller than it needs to be: a
+     window of the capture's own shape (1280x720 for the default --max-size)
+     shows it 1:1 with no bars at all, and any other shape is fitted with black
+     on the shorter side.
+     Sizing the ELEMENT to that box, rather than filling the window with the
+     element and letterboxing the bitmap inside it with object-fit, is what
+     keeps the element's rect equal to the drawn picture -- pointer mapping
+     measures that rect, so CSS-side letterboxing would leave it covering the
+     bars too and offset every touch by their size. The black around the picture
+     is this page's background. */
+  image-rendering: auto;
+  background: #000;
+  cursor: none;
+  touch-action: none;
+}
+
+#screen.grabbed { cursor: none; }
+
+#hud {
+  position: fixed;
+  left: 0;
+  right: 0;
+  /* Clear of the action bar (#bar), which shares the bottom strip and would
+     otherwise cover the stats. player.js measures the bar (it wraps to more
+     rows on narrow screens) and sets this offset; the value here is the
+     one-row fallback used before that measurement runs and when the bar is
+     absent. */
+  bottom: 48px;
+  padding: 6px 10px 7px;
+  background: linear-gradient(to top, rgba(0,0,0,.82), rgba(0,0,0,.45) 70%, rgba(0,0,0,0));
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity .25s ease;
+  text-shadow: 0 1px 2px #000;
+}
+
+#hud.idle { opacity: 0; }
+
+#hud .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#hud .row.help { margin-top: 3px; color: #9aa0a6; font-size: 11px; }
+#hud .row.help span { white-space: nowrap; }
+#hud .sep { color: #5f6368; }
+#hud .spacer { flex: 1 1 auto; }
+
+/* ---------------------------------------------------------------------------
+   action bar: every device action as a button. It shares the HUD's idle fade,
+   and its tooltips carry the chord names, so the two cannot drift: a button's
+   title is the documentation for the keyboard binding next to it.
+   --------------------------------------------------------------------------- */
+#bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+  padding: 7px 8px;
+  background: linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,.5) 70%, rgba(0,0,0,0));
+  transition: opacity .25s ease, transform .25s ease;
+}
+
+#bar.idle { opacity: 0; transform: translateY(6px); pointer-events: none; }
+
+#bar button {
+  appearance: none;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 9px;
+  background: rgba(32,32,38,.92);
+  color: #e8e8e8;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 7px 10px;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: transform .08s ease, background .12s ease, border-color .12s ease;
+}
+
+#bar button:hover { background: rgba(58,58,68,.95); border-color: rgba(255,255,255,.28); }
+/* The press is the fun part: it visibly clicks, so a tap on a phone feels
+   like a button and not a dead rectangle. */
+#bar button:active { transform: scale(.9); background: rgba(90,130,220,.55); }
+#bar button.done { background: rgba(60,160,90,.55); border-color: rgba(120,230,150,.7); }
+
+#bar .bar-sep { width: 1px; align-self: stretch; margin: 2px 3px; background: rgba(255,255,255,.12); }
+
+/* ---------------------------------------------------------------------------
+   controls sheet (Alt+/): static documentation, no actions of its own.
+   --------------------------------------------------------------------------- */
+#sheet {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,.55);
+  z-index: 20;
+  transition: opacity .18s ease;
+}
+
+#sheet.idle { opacity: 0; pointer-events: none; }
+
+.sheet-card {
+  max-width: min(560px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  padding: 16px 18px 14px;
+  border-radius: 14px;
+  background: #17171c;
+  border: 1px solid rgba(255,255,255,.12);
+  box-shadow: 0 12px 40px rgba(0,0,0,.7);
+}
+
+.sheet-title { font-size: 15px; font-weight: 600; color: #ffc850; margin-bottom: 10px; }
+
+.sheet-card dl {
+  margin: 0 0 12px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 16px;
+  font-size: 12px;
+}
+
+.sheet-card dt { color: #9ecbff; white-space: nowrap; }
+.sheet-card dd { margin: 0; color: #d5d5dc; }
+
+#sheet-close {
+  appearance: none;
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 8px;
+  background: rgba(60,60,72,.9);
+  color: #e8e8e8;
+  font: inherit;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+#sheet-close:hover { background: rgba(80,80,96,.95); }
+
+/* ---------------------------------------------------------------------------
+   pointer overlay: the visible answer to "where am I about to click?".
+   This is NOT the device cursor, which the protocol cannot move -- it is a
+   local indication of where this client's pointer is. Mouse/pen get a hover
+   ghost that fills on press and drags a trail; touch gets ripples that exist
+   only while the finger is down, because a finger has no hover to show.
+   pointer-events:none everywhere so the overlay can never eat a click.
+   --------------------------------------------------------------------------- */
+#pointer-layer {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  pointer-events: none;
+  z-index: 10;
+}
+
+#cursor-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border: 2px solid rgba(255,255,255,.85);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.55) inset, 0 1px 6px rgba(0,0,0,.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: width .1s ease, height .1s ease, margin .1s ease,
+              background .1s ease, opacity .15s ease;
+}
+
+#cursor-ghost.on { opacity: .9; }
+
+/* Pressed: the ring fills, so the moment of touch is unmistakable. */
+#cursor-ghost.down {
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
+  background: rgba(120,170,255,.35);
+  border-color: rgba(180,210,255,.95);
+}
+
+/* Dragging: a small filled dot inside the ring reads as "this is moving the
+   device", not just "the pointer is here". */
+#cursor-ghost.drag {
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  background: rgba(255,200,80,.35);
+  border-color: rgba(255,215,120,.95);
+}
+
+/* Trail segments left behind by a drag. */
+.trail {
+  position: fixed;
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  border-radius: 50%;
+  background: rgba(255,200,80,.55);
+  pointer-events: none;
+  animation: trail-fade .5s ease-out forwards;
+}
+
+@keyframes trail-fade {
+  from { opacity: .8; transform: scale(1); }
+  to   { opacity: 0;  transform: scale(.3); }
+}
+
+/* Touch ripple: one per finger, grows and fades on release. */
+.ripple {
+  position: fixed;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  border: 2px solid rgba(140,200,255,.9);
+  border-radius: 50%;
+  background: rgba(120,170,255,.18);
+  pointer-events: none;
+  animation: ripple-in .12s ease-out;
+}
+
+.ripple.out { animation: ripple-out .35s ease-out forwards; }
+
+@keyframes ripple-in {
+  from { transform: scale(.5); opacity: .4; }
+  to   { transform: scale(1);  opacity: 1; }
+}
+
+@keyframes ripple-out {
+  from { transform: scale(1);   opacity: 1; }
+  to   { transform: scale(1.8); opacity: 0; }
+}
+
+#state.ok { color: #81c995; }
+#state.warn { color: #fdd663; }
+#state.bad { color: #f28b82; }
+
+#toast {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  border-radius: 6px;
+  background: rgba(20,20,20,.9);
+  color: #e8e8e8;
+  box-shadow: 0 2px 10px rgba(0,0,0,.6);
+  opacity: 0;
+  transition: opacity .2s ease;
+  pointer-events: none;
+  white-space: pre;
+}
+
+#toast.show { opacity: 1; }
+
+/* Floating menu button: opens the controls sheet. Sits just above the action
+   bar and fades with the rest of the chrome. */
+#menu-btn {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 10px;
+  background: rgba(28,28,34,.85);
+  color: #e8e8e8;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 15;
+  transition: opacity .25s ease, transform .08s ease, background .12s ease;
+}
+
+#menu-btn:hover { background: rgba(58,58,68,.95); }
+#menu-btn:active { transform: scale(.9); }
+#menu-btn.idle { opacity: 0; pointer-events: none; }
+
+/* Phone soft-keyboard sink (three-finger tap). Kept rendered and focusable so
+   the IME will come up, but invisible and unable to take pointer events. It
+   must NOT be display:none / visibility:hidden -- both iOS and Android refuse
+   to raise the keyboard for an element that is not being rendered. opacity is
+   0.01 rather than 0 for the same reason, and 16px stops iOS from zooming the
+   page when the field takes focus. */
+#ime {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  opacity: 0.01;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  font-size: 16px;
+  pointer-events: none;
+  z-index: -1;
+}

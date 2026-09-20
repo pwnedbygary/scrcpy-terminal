@@ -164,6 +164,10 @@ func (a *app) handleInput(b []byte) {
 			return
 		}
 	}
+	// menu open: consume keys for its rows (modal, like the software keyboard)
+	if a.menuOpen && a.menuKeyInput(b) {
+		return
+	}
 	// keyboard open: consume keys for navigation, and mouse clicks for keys
 	if a.kb != nil && a.kb.open {
 		if a.keyboardInput(b) {
@@ -179,7 +183,36 @@ func (a *app) handleInput(b []byte) {
 		a.toggleGrab()
 		return
 	}
-	// Alt+key: local controls (Alt+M mute, Alt+- / Alt+= volume, Alt+Q quit)
+	// Alt+letter: the mnemonic device actions (appkeys.go appMnemonicOps).
+	// These are the primary bindings on a phone keyboard, which has Alt but no
+	// F-row. They run before the case-sensitive locals below so that each
+	// chord has exactly one meaning: Alt+M is LOCAL mute, not device mute, and
+	// Alt+G reaches grab here exactly as it does in the browser.
+	if len(b) == 2 && b[0] == 0x1b && b[1] != '[' && b[1] != 'O' {
+		if op, ok := mnemonicOp(b[1]); ok {
+			switch op {
+			case "keyboard":
+				a.toggleKeyboard()
+			case "toolbar":
+				a.toggleMenu()
+			case "screenshot":
+				a.screenshot()
+			case "resetvideo":
+				// Keyframe requests are the one action that silently does
+				// nothing without a control socket; say so, as the old
+				// dedicated handler did.
+				if a.ctrl == nil {
+					fmt.Fprintf(stderrWriter(), "scterm: control disabled (no -control)\n")
+					return
+				}
+				a.applyAppOp(op)
+			default:
+				a.applyAppOp(op)
+			}
+			return
+		}
+	}
+	// Alt+punctuation: local controls (Alt+M mute, Alt+- / Alt+= volume).
 	if len(b) == 2 && b[0] == 0x1b && b[1] != '[' && b[1] != 'O' {
 		switch b[1] {
 		case 'm', 'M':
@@ -190,21 +223,6 @@ func (a *app) handleInput(b []byte) {
 			return
 		case '=', '+':
 			a.adjustLocalVolume(10)
-			return
-		case 's', 'S': // Alt+S: screenshot the last rendered canvas to PPM
-			a.screenshot()
-			return
-		case 'k', 'K': // Alt+K: request a keyframe (video reset) from device
-			if a.ctrl != nil {
-				if err := a.ctrl.resetVideo(); err != nil {
-					fmt.Fprintf(stderrWriter(), "scterm: reset video: %v\n", err)
-				}
-			} else {
-				fmt.Fprintf(stderrWriter(), "scterm: control disabled (no -control)\n")
-			}
-			return
-		case 'q', 'Q':
-			a.events <- inputEvent{kind: evQuit}
 			return
 		}
 	}
@@ -568,6 +586,19 @@ func (a *app) mouseEvent(b []byte) bool {
 		cellY = 1
 	}
 
+	// Menu open: clicks on a row run it; clicks elsewhere are swallowed, so a
+	// stray click never reaches the device through the overlay.
+	if a.menuOpen {
+		if pressed && btnRaw&0x07 == 0 { // left button only
+			_, rows := termSize()
+			if item, ok := a.menuHitTest(cellX, cellY, rows); ok {
+				a.closeMenu()
+				a.menuAction(item.Op)
+			}
+		}
+		return true
+	}
+
 	// Keyboard open: clicks inside the keyboard area press keys, clicks
 	// above it pass through to the device (tap-through).
 	if a.kb != nil && a.kb.open {
@@ -612,7 +643,7 @@ func (a *app) mouseEvent(b []byte) bool {
 		a.scrollAt(cellX, cellY, -1)
 		return true
 	case btnRaw&32 != 0 && pressed: // motion
-		if a.mouseDown {
+		if a.drag.isDown() {
 			a.coalescedMove(a.posAt(cellX, cellY))
 		}
 		return true
@@ -621,10 +652,10 @@ func (a *app) mouseEvent(b []byte) bool {
 	switch btn {
 	case 0: // left
 		if pressed {
-			a.mouseDown = true
+			a.drag.setDown(true)
 			a.ctrl.touch(true, a.posAt(cellX, cellY))
 		} else {
-			a.mouseDown = false
+			a.drag.setDown(false)
 			a.ctrl.touchRelease(a.posAt(cellX, cellY))
 		}
 	case 1: // middle

@@ -9,6 +9,7 @@ package main
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"unsafe"
 )
@@ -111,6 +112,85 @@ func adecRecv(d unsafe.Pointer, buf []byte) (int, error) {
 
 func adecFree(d unsafe.Pointer) {
 	C.sct_adec_free(d)
+}
+
+// ---------------------------------------------------------------------------
+// JPEG encoder (web/window display path)
+// ---------------------------------------------------------------------------
+
+// jencHandle wraps the native mjpeg encoder. A nil *jencHandle is safe to use:
+// every method degrades to a no-op/error instead of crashing, which keeps the
+// display path alive when libavcodec lacks an mjpeg encoder.
+type jencHandle struct{ p unsafe.Pointer }
+
+func jencOpen(w, h, quality int) *jencHandle {
+	p := C.sct_jenc_open(C.int(w), C.int(h), C.int(quality))
+	if p == nil {
+		return nil
+	}
+	return &jencHandle{p: p}
+}
+
+// encode converts one BGR0 canvas (len = w*h*4) to JPEG. The returned slice
+// aliases the encoder's internal buffer and is valid until the next encode.
+// Prefer encodeInto on the network path: it writes straight into the buffer
+// that goes to the socket, with no intermediate copy.
+func (j *jencHandle) encode(bgr0 []byte) ([]byte, error) {
+	if j == nil || j.p == nil {
+		return nil, fmt.Errorf("jpeg encoder unavailable")
+	}
+	if len(bgr0) == 0 {
+		return nil, fmt.Errorf("empty frame")
+	}
+	var out *C.uint8_t
+	var n C.int
+	r := C.sct_jenc_encode(j.p, (*C.uint8_t)(unsafe.Pointer(&bgr0[0])), C.int(0), &out, &n)
+	if r != 0 || out == nil || n <= 0 {
+		return nil, fmt.Errorf("jpeg encode failed")
+	}
+	return C.GoBytes(unsafe.Pointer(out), n), nil
+}
+
+// maxSize is a safe upper bound for one encoded frame, used to size the
+// header+payload buffer once per geometry instead of retrying per frame.
+func (j *jencHandle) maxSize() int {
+	if j == nil || j.p == nil {
+		return 0
+	}
+	return int(C.sct_jenc_max_size(j.p))
+}
+
+// encodeInto writes the JPEG for one BGR0 canvas into dst[dstOff:].
+// Returns the JPEG length, or -1 when dst was too small.
+func (j *jencHandle) encodeInto(bgr0, dst []byte, dstOff int) (int, error) {
+	if j == nil || j.p == nil {
+		return 0, fmt.Errorf("jpeg encoder unavailable")
+	}
+	if len(bgr0) == 0 || len(dst) <= dstOff {
+		return 0, fmt.Errorf("empty frame")
+	}
+	var n C.int
+	r := C.sct_jenc_encode_to(j.p,
+		(*C.uint8_t)(unsafe.Pointer(&bgr0[0])), C.int(0),
+		(*C.uint8_t)(unsafe.Pointer(&dst[dstOff])), C.int(0),
+		C.int(len(dst)-dstOff), &n)
+	if r == -2 {
+		return int(n), errJencTooSmall
+	}
+	if r != 0 || n <= 0 {
+		return 0, fmt.Errorf("jpeg encode failed")
+	}
+	return int(n), nil
+}
+
+var errJencTooSmall = errors.New("jpeg output buffer too small")
+
+func (j *jencHandle) free() {
+	if j == nil || j.p == nil {
+		return
+	}
+	C.sct_jenc_free(j.p)
+	j.p = nil
 }
 
 // ---------------------------------------------------------------------------

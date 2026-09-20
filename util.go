@@ -1,12 +1,37 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"sort"
+	"strings"
 	"time"
 	"unsafe"
 )
+
+// isClosedConnErr reports whether err is just "the socket went away" while
+// shutting down (vs. a real I/O failure worth reporting).
+func isClosedConnErr(err error) bool {
+	if err == nil || err == io.EOF {
+		return true
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "connection reset by peer")
+}
+
+// timeoutContext is context.WithTimeout without importing context at every
+// call site (used by the web server's graceful shutdown).
+func timeoutContext(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), d)
+}
 
 func timeNowUnixNano() int64 { return time.Now().UnixNano() }
 

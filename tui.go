@@ -18,8 +18,16 @@ func ap(out []byte, parts ...string) []byte {
 	return out
 }
 
+// termSizeOverride, when non-zero, replaces the ioctl-derived terminal size.
+// Tests use it to exercise geometry-dependent layout (the action menu's
+// status-row bound, for example) without a pty.
+var termSizeOverride struct{ cols, rows int }
+
 // termSize returns the current terminal size (cols, rows).
 func termSize() (cols, rows int) {
+	if termSizeOverride.cols > 0 && termSizeOverride.rows > 0 {
+		return termSizeOverride.cols, termSizeOverride.rows
+	}
 	w, h, err := ioctlWinsize()
 	if err != nil || w == 0 || h == 0 {
 		return 80, 24

@@ -4,6 +4,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
@@ -246,6 +247,179 @@ void sct_adec_free(void *v) {
 }
 
 const char *sct_av_version(void) { return avcodec_configuration(); }
+
+// ---------------------------------------------------------------------------
+// Video: BGR0 (the renderer canvas) -> JPEG, for the web/window display path.
+//
+// One still per video frame. 4:2:0, full-range YCbCr (mjpeg is a JPEG-range
+// codec: limited range would wash the colors out), quality ~80.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    AVCodecContext *ctx;
+    AVFrame *frame;
+    AVPacket *pkt;
+    struct SwsContext *sws;
+    int w, h;
+    int quality;
+    uint8_t *out;
+    int out_cap;
+} sct_jenc;
+
+void *sct_jenc_open(int w, int h, int quality) {
+    if (w <= 0 || h <= 0) return NULL;
+    // 4:2:0 needs even dimensions for every plane.
+    w &= ~1;
+    h &= ~1;
+    if (w <= 0 || h <= 0) return NULL;
+
+    const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
+    if (!codec) return NULL;
+
+    sct_jenc *e = calloc(1, sizeof(*e));
+    if (!e) return NULL;
+
+    e->w = w;
+    e->h = h;
+    if (quality < 2) quality = 2;
+    if (quality > 31) quality = 31;
+    e->quality = quality;
+
+    e->ctx = avcodec_alloc_context3(codec);
+    if (!e->ctx) { free(e); return NULL; }
+    e->ctx->width = w;
+    e->ctx->height = h;
+    e->ctx->time_base = (AVRational){1, 1000000};
+    // Standard limited-range 4:2:0. AV_PIX_FMT_YUVJ420P (the deprecated
+    // full-range alias) needs -strict unofficial on the encoder and is
+    // deprecated in ffmpeg 7; plain YUV420P is standards-compliant mjpeg,
+    // decodes in every browser, and rounds RGB back to within ~3/255.
+    e->ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    e->ctx->color_range = AVCOL_RANGE_MPEG;
+    e->ctx->flags |= AV_CODEC_FLAG_QSCALE;
+    e->ctx->global_quality = quality * FF_QP2LAMBDA;
+    e->ctx->thread_count = 1; // frame threading would delay output by N frames
+
+    // The mjpeg encoder guards non-full-range YUV behind strict_std_compliance.
+    // That warning is cosmetic -- limited-range mjpeg is what ffmpeg's own
+    // mjpeg muxer emits and every decoder reads it correctly. Set the field
+    // directly: av_opt_set cannot reach it (the option lives on the private
+    // codec context, which avcodec_open2 has not created yet).
+    e->ctx->strict_std_compliance = FF_COMPLIANCE_UNOFFICIAL;
+
+    if (avcodec_open2(e->ctx, codec, NULL) < 0) {
+        avcodec_free_context(&e->ctx);
+        free(e);
+        return NULL;
+    }
+
+    e->frame = av_frame_alloc();
+    e->pkt = av_packet_alloc();
+    if (!e->frame || !e->pkt) { sct_jenc_free(e); return NULL; }
+    e->frame->format = e->ctx->pix_fmt;
+    e->frame->width = w;
+    e->frame->height = h;
+    if (av_frame_get_buffer(e->frame, 32) < 0) { sct_jenc_free(e); return NULL; }
+
+    e->sws = sws_getContext(w, h, AV_PIX_FMT_BGR0, w, h, AV_PIX_FMT_YUV420P,
+                            SWS_POINT, NULL, NULL, NULL);
+    if (!e->sws) { sct_jenc_free(e); return NULL; }
+    return e;
+}
+
+// Shared tail of both encode entry points: run the scaler, encode, and copy
+// the packet into dst (or the internal buffer when dst == NULL).
+static int sct_jenc_core(sct_jenc *e, const uint8_t *bgr0, int stride,
+                         uint8_t *dst, int dst_off, int dst_cap,
+                         uint8_t **out, int *out_size) {
+    if (stride == 0) stride = e->w * 4;
+    if (av_frame_make_writable(e->frame) < 0) return -1;
+
+    // BGR0 bytes are already [B,G,R,X] in memory, exactly what the scaler
+    // wants: no channel swap, no intermediate copy.
+    const uint8_t *src[4] = { bgr0, NULL, NULL, NULL };
+    const int src_stride[4] = { stride, 0, 0, 0 };
+    sws_scale(e->sws, src, src_stride, 0, e->h, e->frame->data, e->frame->linesize);
+
+    e->frame->pts += 1000; // arbitrary monotonic pts; mjpeg does not care
+    e->frame->quality = e->ctx->global_quality;
+
+    int ret = avcodec_send_frame(e->ctx, e->frame);
+    if (ret < 0) return -1;
+    ret = avcodec_receive_packet(e->ctx, e->pkt);
+    if (ret < 0) {
+        // A full queue means thread_count > 1; the encoder is opened with
+        // thread_count = 1 precisely so one frame in is one packet out.
+        return -1;
+    }
+
+    int n = e->pkt->size;
+    if (dst) {
+        if (n > dst_cap - dst_off) {
+            av_packet_unref(e->pkt);
+            if (out_size) *out_size = n; // caller can retry with this size
+            return -2;
+        }
+        memcpy(dst + dst_off, e->pkt->data, (size_t)n);
+        av_packet_unref(e->pkt);
+        if (out) *out = dst + dst_off;
+        if (out_size) *out_size = n;
+        return 0;
+    }
+
+    if (n > e->out_cap) {
+        uint8_t *nb = realloc(e->out, (size_t)n);
+        if (!nb) { av_packet_unref(e->pkt); return -1; }
+        e->out = nb;
+        e->out_cap = n;
+    }
+    memcpy(e->out, e->pkt->data, (size_t)n);
+    av_packet_unref(e->pkt);
+
+    if (out) *out = e->out;
+    if (out_size) *out_size = n;
+    return 0;
+}
+
+int sct_jenc_encode(void *v, const uint8_t *bgr0, int stride, uint8_t **out, int *out_size) {
+    sct_jenc *e = v;
+    if (!e || !bgr0) return -1;
+    return sct_jenc_core(e, bgr0, stride, NULL, 0, 0, out, out_size);
+}
+
+int sct_jenc_encode_to(void *v, const uint8_t *bgr0, int stride,
+                       uint8_t *dst, int dst_off, int dst_cap, int *out_size) {
+    sct_jenc *e = v;
+    if (!e || !bgr0 || !dst) return -1;
+    return sct_jenc_core(e, bgr0, stride, dst, dst_off, dst_cap, NULL, out_size);
+}
+
+int sct_jenc_max_size(void *v) {
+    sct_jenc *e = v;
+    if (!e) return 0;
+    // 4:2:0 worst case is generous at 3 bytes/pixel (a real photo lands near
+    // 0.3); the buffer is allocated once per geometry, so slack is free.
+    return e->w * e->h * 3 + 4096;
+}
+
+void sct_jenc_shrink(void *v) {
+    sct_jenc *e = v;
+    if (!e) return;
+    free(e->out);
+    e->out = NULL;
+    e->out_cap = 0;
+}
+
+void sct_jenc_free(void *v) {
+    sct_jenc *e = v;
+    if (!e) return;
+    if (e->sws) sws_freeContext(e->sws);
+    free(e->out);
+    if (e->frame) av_frame_free(&e->frame);
+    if (e->pkt) av_packet_free(&e->pkt);
+    if (e->ctx) avcodec_free_context(&e->ctx);
+    free(e);
+}
 
 // ---------------------------------------------------------------------------
 // Cell packing: W x H RGBA -> (W x H/2) uint64 cells.

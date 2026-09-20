@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>scterm</title>
+<link rel="stylesheet" href="/player.css">
+</head>
+<body>
+<canvas id="screen" width="480" height="1080"></canvas>
+
+<!-- Local pointer indication (hover ghost, drag trail, touch ripples). It
+     never talks to the device; player.js paints it from the same events that
+     do. Kept as DOM elements so CSS does the animation. -->
+<div id="pointer-layer" aria-hidden="true"></div>
+
+<!-- Phone soft-keyboard sink. A phone raises its on-screen keyboard only for a
+     focused editable element, so a three-finger tap (player.js) focuses this
+     field and the IME then types straight into the device. It must stay
+     rendered -- display:none or visibility:hidden makes iOS and Android refuse
+     to show the keyboard -- and it is emptied on every input event so it never
+     accumulates text. -->
+<input id="ime" type="text" enterkeyhint="send" tabindex="-1"
+       autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+<div id="hud" class="idle">
+  <div class="row">
+    <span id="device">device</span>
+    <span class="sep">·</span>
+    <span id="geom">—</span>
+    <span class="sep">·</span>
+    <span id="fps">—</span>
+    <span class="sep">·</span>
+    <span id="audio">audio —</span>
+    <span class="spacer"></span>
+    <span id="state">connecting…</span>
+  </div>
+  <div class="row help">
+    <span>click = tap</span><span>drag = swipe</span><span>wheel = scroll</span>
+    <span>Alt+/ = controls</span>
+    <span>Alt+I = keyboard</span>
+  </div>
+</div>
+
+<!-- Floating menu button: opens the controls sheet. It stays visible with the
+     action bar and is the phone-friendly way to reach the keyboard chord
+     reference. -->
+<button id="menu-btn" title="Controls (Alt+/)">☰</button>
+
+<!-- Action bar: every device action as a button, same ops as the keyboard. The
+     tooltip (title) names the chord, so the bar doubles as the cheat sheet.
+     Buttons are aria-labelled and keyboard-focusable, which is also what the
+     node input tests and the browser check script assert against. -->
+<div id="bar" class="idle" role="toolbar" aria-label="Device actions">
+  <button data-act="back"      title="Back (Alt+B, Esc, right-click)">Back</button>
+  <button data-act="home"      title="Home (Alt+H)">Home</button>
+  <button data-act="appswitch" title="Recents (Alt+T)">Recents</button>
+  <button data-act="menu"      title="Menu key (no chord)">Menu</button>
+  <button data-act="toolbar"   title="Controls reference (Alt+/)">Controls</button>
+  <span class="bar-sep"></span>
+  <button data-act="volup"     title="Device volume up (Alt+U)">Vol +</button>
+  <button data-act="voldown"   title="Device volume down (Alt+D)">Vol −</button>
+  <button data-act="mute"      title="Device mute (F7)">Mute</button>
+  <span class="bar-sep"></span>
+  <button data-act="rotate"    title="Rotate (Alt+R)">Rotate</button>
+  <button data-act="notif"     title="Notifications (Alt+N)">Notif</button>
+  <button data-act="settings"  title="Settings shade (Alt+E)">Shade</button>
+  <button data-act="collapse"  title="Collapse panels (Alt+C)">Collapse</button>
+  <span class="bar-sep"></span>
+  <button data-act="power"     title="Power (Alt+P)">Power</button>
+  <button data-act="keyboard"  title="Software keyboard (Alt+I, 3-finger tap)">Keys</button>
+  <button data-act="screenshot" title="Save a PNG of the screen (Alt+S)">Shot</button>
+  <button data-act="resetvideo" title="Request a keyframe (Alt+K)">Refresh</button>
+  <button data-act="grab"      title="Grab browser keys (Alt+G)">Grab</button>
+  <button data-act="quit"      title="End the session (Alt+Q)">Quit</button>
+</div>
+
+<!-- Controls sheet: the "Alt+/" reference, for phones where a chord is awkward.
+     Pure documentation — it runs nothing, so it can never disagree with the
+     real bindings. -->
+<div id="sheet" class="idle">
+  <div class="sheet-card">
+    <div class="sheet-title">Controls</div>
+    <dl>
+      <dt>tap / drag</dt><dd>tap / swipe</dd>
+      <dt>wheel</dt><dd>scroll</dd>
+      <dt>right click</dt><dd>Back</dd>
+      <dt>3-finger tap</dt><dd>keyboard</dd>
+      <dt>Alt+/</dt><dd>this sheet</dd>
+      <dt>Alt+B / Esc</dt><dd>Back</dd>
+      <dt>Alt+H / Alt+T</dt><dd>Home / Recents</dd>
+      <dt>Alt+U / Alt+D</dt><dd>Device volume</dd>
+      <dt>Alt+P / Alt+R</dt><dd>Power / Rotate</dd>
+      <dt>Alt+N / Alt+E / Alt+C</dt><dd>Notif / Settings / Collapse</dd>
+      <dt>Alt+I</dt><dd>Software keyboard</dd>
+      <dt>Alt+M / Alt+− / Alt+=</dt><dd>Local mute / volume</dd>
+      <dt>Alt+S / Alt+K</dt><dd>Screenshot / keyframe</dd>
+      <dt>Alt+G</dt><dd>Grab browser keys</dd>
+      <dt>Alt+Q</dt><dd>Quit</dd>
+      <dt>F1..F12 / Alt+F1..F12</dt><dd>the classic aliases</dd>
+    </dl>
+    <button id="sheet-close" title="Close (Esc)">Close</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/pointer.js"></script>
+<script src="/player.js"></script>
+</body>
+</html>

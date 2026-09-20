@@ -33,6 +33,14 @@ type config struct {
 	audioSource     string // device audio capture source: output (default) | playback | mic
 	audioCodec      string // device audio codec: opus (default) | aac | flac | raw
 	repaintInterval int    // forced full redraw cadence in frames (default 300 ≈ 5s at 60fps)
+
+	// web / window display mode
+	web        bool   // serve a browser-based mirror instead of the TUI
+	window     bool   // --web plus: pop the mirror out into its own window
+	webPort    int    // TCP port for the web display (0 = pick a free one)
+	webAddr    string // interface to bind (default 127.0.0.1)
+	webQuality int    // mjpeg quality 2..31, lower = better (default 5)
+	windowSize string // WxH for --window (default: sized to the device)
 }
 
 func main() {
@@ -44,12 +52,25 @@ func main() {
 		audioBitRate:    128000,
 		maxSize:         1280,
 		repaintInterval: 300,
+		webAddr:         "127.0.0.1",
+		webPort:         6969,
+		webQuality:      5,
 	}
 	var mirrorFPS float64
 	parseFlags(&cfg, &mirrorFPS)
 	if cfg.keys {
 		printSortedKeys()
 		return
+	}
+
+	// --web/--window replace the terminal UI: the browser is the display, so
+	// the terminal must stay usable (no alternate screen, no raw mode, no
+	// mouse grab). --no-tui still means "no display at all".
+	if cfg.window {
+		cfg.web = true
+	}
+	if cfg.web && cfg.noTUI {
+		fatal(fmt.Errorf("--web/--window and --no-tui are mutually exclusive"))
 	}
 
 	serial, err := findDevice(cfg.serial)
@@ -75,7 +96,6 @@ func main() {
 	cleanupStaleStreams()
 
 	app := newApp(sess, cfg)
-	app.stream = newStreamState(sess, cfg, app.ctrl)
 	if err := app.run(); err != nil {
 		app.shutdown()
 		fatal(err)

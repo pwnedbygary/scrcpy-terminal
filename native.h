@@ -52,6 +52,38 @@ int sct_adec_recv(void *d, uint8_t *out, int out_cap, int *out_bytes);
 
 void sct_adec_free(void *d);
 
+// ---- JPEG encoder (libavcodec mjpeg) ----
+// The web/window display path ships one still image per video frame. mjpeg
+// encodes at several hundred MPix/s on a modern CPU, which keeps the whole
+// pipeline far cheaper than shipping raw BGR0 to the browser.
+//
+// Open an encoder for a fixed w x h (must be even). Returns NULL on error.
+void *sct_jenc_open(int w, int h, int quality);
+
+// Encode one BGR0 (memory [B,G,R,X]) frame of w x h pixels, stride in bytes.
+// On success *out points at an internal buffer of *out_size JPEG bytes that
+// stays valid until the next call. Returns 0, or -1 on error.
+// stride == 0 means tightly packed rows (w*4).
+int sct_jenc_encode(void *e, const uint8_t *bgr0, int stride, uint8_t **out, int *out_size);
+
+// Zero-copy variant for the network path: writes the JPEG directly into
+// dst+dst_off when it fits in dst_cap (never writes more than dst_cap bytes).
+// On success *out_size is the JPEG length, and the caller's buffer can go
+// straight to the socket with no intermediate copy. Returns 0, or -1 if the
+// frame does not fit (caller retries with a bigger buffer) or on error.
+int sct_jenc_encode_to(void *e, const uint8_t *bgr0, int stride,
+                       uint8_t *dst, int dst_off, int dst_cap, int *out_size);
+
+// Upper bound for one encoded frame of this encoder's geometry, so callers can
+// size a buffer once instead of retrying.
+int sct_jenc_max_size(void *e);
+
+// Drop the internal output buffers (call after a burst when the source resized
+// or the encoder is idle, to give memory back).
+void sct_jenc_shrink(void *e);
+
+void sct_jenc_free(void *e);
+
 // ---- terminal cell packing (SIMD: AVX2/SSE on x86, NEON on aarch64) ----
 // rgba: W x H RGBA buffer (H even). keys: W/1 * H/2 uint64 cells.
 // Cell (x,y) -> keys[y*W+x] = quantized(top_rgb32) | quantized(bottom_rgb32)<<32
