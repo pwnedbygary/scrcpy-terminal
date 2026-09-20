@@ -32,12 +32,25 @@ function fakeEl(id) {
     classList: { add() {}, remove() {}, contains: () => false },
     addEventListener(t, fn) { (listeners[t] ||= []).push(fn); },
     removeEventListener() {},
-    focus() { doc.activeElement = this; },
+    // refuseFocus models the phone-browser rule: focus outside a touch gesture
+    // is refused, which is what Alt+I hits on a phone.
+    focus() { if (this.refuseFocus) return; doc.activeElement = this; },
     blur() { if (doc.activeElement === this) doc.activeElement = null; },
     setPointerCapture() {},
     fire(t, ev) { for (const fn of listeners[t] || []) fn(ev); },
   };
 }
+
+// window listeners are recorded so tests can fire the IME-focus retry that
+// toggleSoftKeys arms (and the keydown/keyup that attach() registers).
+const winListeners = {};
+const winStub = {
+  addEventListener(t, fn) { (winListeners[t] ||= []).push(fn); },
+  removeEventListener(t, fn) {
+    winListeners[t] = (winListeners[t] || []).filter((f) => f !== fn);
+  },
+};
+const fireWindow = (t, ev) => (winListeners[t] || []).forEach((fn) => fn(ev));
 
 const els = { canvas: fakeEl("screen"), ime: fakeEl("ime"), toast: fakeEl("toast") };
 const toasts = [];
@@ -67,7 +80,7 @@ const ctx = {
   setTimeout, clearTimeout,
   requestAnimationFrame: (fn) => setTimeout(fn, 0),
   document: doc,
-  window: { addEventListener() {}, removeEventListener() {} },
+  window: winStub,
   pcm: pcmStub,
   toolbar: toolbarStub,
   console,
@@ -461,6 +474,36 @@ console.log("mnemonic chords");
     h.input.key({ code: "", key: "m", altKey: true, preventDefault() {} }, true);
     check("a phone keyboard's Alt+M is still the local mute", h.net.sent, []);
     check("and it changed the local gain", pcmStub.localGain !== before, true);
+  }
+  {
+    // Punctuation chords from a phone keyboard: no `code`, only `key`. These
+    // used to fall through to the text path -- Alt+/ typed a slash at the
+    // device instead of opening the controls sheet.
+    const h = harness();
+    h.input.key({ code: "", key: "/", altKey: true, preventDefault() {} }, true);
+    check("a phone keyboard's Alt+/ opens the controls sheet", toolbarStub.opened, true);
+    check("and does not type the slash at the device", h.net.sent, []);
+  }
+  {
+    const h = harness();
+    const before = pcmStub.localGain;
+    h.input.key({ code: "", key: "-", altKey: true, preventDefault() {} }, true);
+    check("a phone keyboard's Alt+- changes the local volume", pcmStub.localGain < before, true);
+    check("and does not reach the device", h.net.sent, []);
+  }
+  {
+    // Refused IME focus, reported as a phone keyboard does (bare letter, no
+    // code): stay on and retry on the next tap.
+    const h = harness();
+    els.ime.refuseFocus = true;
+    h.input.key({ code: "", key: "i", altKey: true, preventDefault() {} }, true);
+    check("refused focus keeps the keyboard on", h.input.softKeys, true);
+    check("a pointerdown retry is armed", h.input.kbRetry, true);
+    check("the retry does not send anything", h.net.sent, []);
+    els.ime.refuseFocus = false;
+    fireWindow("pointerdown", {});
+    check("the next tap raises the keyboard", doc.activeElement, els.ime);
+    check("and the retry is consumed", h.input.kbRetry, false);
   }
 }
 

@@ -66,7 +66,10 @@ and you press F12/Ctrl-G to hand the mouse over.
 Phone keyboards (Unexpected Keyboard and friends) have Ctrl and Alt but no
 F-key row, so **Alt+`<letter>` is the primary binding** for every device
 action — in the terminal, a browser tab and `--window` alike. The letters are
-mnemonics, and the same table drives all three front ends:
+mnemonics, and the same table drives all three front ends. The punctuation
+chords (`Alt+/`, `Alt+-`, `Alt+=`) work there too: a phone reports them by
+character rather than by key code, and the player normalises that before the
+lookup.
 
 | Chord | Action |
 |-------|--------|
@@ -114,14 +117,25 @@ The classic keys still work, unchanged — nothing was taken away:
 | Mouse right | Back |
 | Mouse middle | Home |
 
-### Action menu (TUI) and action bar (web)
+### Action bar and action menu
 
-`Alt+/` opens a list of every action with its chord in the terminal; letters
-run a row, `Esc` closes, and a mouse click on a row runs it too. The web page
-gets the same thing as a floating action bar (plus a `☰` button and a clickable
-controls sheet), so a phone can drive everything with taps and no chords at all.
-The bar's tooltips name the chords, so the buttons and the keyboard cannot
+The web page has a floating action bar: one button per action, arriving with
+mouse activity and fading a couple of seconds after the last movement. The
+button tooltips name the chords, so the buttons and the keyboard cannot
 disagree.
+
+The terminal gets the same thing drawn with the software keyboard's button
+spans: a row of pills along the last video row, above the status line, that
+appears when you move the mouse and fades on the same timer (mouse motion is
+re-read from the tick, so the bar never needs its own timer). Buttons run
+through the same dispatch as the chords and the menu, a click flashes the
+button green, and when the row is wider than the pane the `‹`/`›` edges scroll
+it. Clicks on the bar never reach the device as taps.
+
+`Alt+/` opens the keyboard-driven action menu: every action with its chord,
+letters run a row, `Esc` closes, and a mouse click on a row runs it too. The
+web page gets the same list as a clickable controls sheet behind the `☰`
+button.
 
 ### Pointer indication (web/`--window`)
 

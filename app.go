@@ -40,6 +40,17 @@ type app struct {
 	menuOpen bool
 	menuHits []menuHit
 
+	// action bar: the mouse-driven button strip (actionbar.go). Show state is
+	// driven by recent mouse activity and a hide timer checked on the tick;
+	// barHits is the painted layout clicks are matched against, and
+	// barFlashIdx/At give a clicked button a brief green flash.
+	barShow         bool
+	barLastActivity int64
+	barOffset       int
+	barHits         []barHit
+	barFlashIdx     int
+	barFlashAt      int64
+
 	// pointer-drag state: button, coalescer clock and the pending move.
 	// Owned by the run loop in the terminal, but written by the control
 	// dispatcher goroutine in --web/--window, so it is self-locking.
@@ -79,12 +90,13 @@ const (
 
 func newApp(sess *session, cfg config) *app {
 	a := &app{
-		sess:    sess,
-		cfg:     cfg,
-		audio:   newAudioSink(),
-		events:  make(chan inputEvent, 256),
-		frames:  make(chan *videoFrame, 1), // drop-old display mailbox
-		grabbed: true,
+		sess:        sess,
+		cfg:         cfg,
+		audio:       newAudioSink(),
+		events:      make(chan inputEvent, 256),
+		frames:      make(chan *videoFrame, 1), // drop-old display mailbox
+		grabbed:     true,
+		barFlashIdx: -1, // no button flashed until one is clicked
 	}
 	_, a.inZellij = os.LookupEnv("ZELLIJ")
 	if a.inZellij {
@@ -218,16 +230,12 @@ func (a *app) run() error {
 			case evQuit:
 				return nil
 			case evResize:
-				a.tui.resize()
-				a.stream.markGeometryDirty()
-				a.tui.setStatus(a.statusLine())
-				if a.menuOpen {
-					a.refreshMenu() // rows moved: repaint and re-record hit rows
-				}
+				a.onResize()
 			case evTickFast:
 				a.flushPendingMove()
 			case evTick:
 				a.flushPendingMove()
+				a.barTick()
 				a.tui.setStatus(a.statusLine())
 			case evBytes:
 				a.handleInput(ev.buf)
@@ -458,14 +466,36 @@ func audioState(a *app) string {
 	return fmt.Sprintf("%d%%", a.audio.gainPercent())
 }
 
-// setMouse enables/disables terminal mouse tracking.
+// setMouse enables/disables terminal mouse tracking. 1003 (any-event motion)
+// is included so hovering is reported, which is what wakes the action bar:
+// with only 1002 the terminal reports motion while a button is down, and the
+// bar could never appear until after a click -- too late, because the first
+// click taps the device.
 func (a *app) setMouse(on bool) {
 	if on {
-		os.Stdout.WriteString("\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1015h")
+		os.Stdout.WriteString("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1015h")
 	} else {
-		os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?1015l")
+		os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l")
 	}
 	a.grabbed = on
+}
+
+// onResize handles a terminal resize: the cell grid changes, and any overlay
+// is size-dependent. The menu in particular must re-record its click rows
+// (refreshMenu does that) or a click would be matched against the old
+// geometry, up to and including the status row that runs Quit on a small pane.
+func (a *app) onResize() {
+	a.tui.resize()
+	if a.stream != nil {
+		a.stream.markGeometryDirty()
+	}
+	switch {
+	case a.menuOpen:
+		a.refreshMenu()
+	case a.barVisible():
+		a.refreshOverlays()
+	}
+	a.tui.setStatus(a.statusLine())
 }
 
 // refreshStatus redraws the status line (nil-safe for headless/transient states).
@@ -525,9 +555,7 @@ func (a *app) closeKeyboard() {
 	}
 	a.kbAutoGrabbed = false
 	if a.tui != nil {
-		a.tui.setOverlay(nil)
-		a.tui.setStatus(a.statusLine())
-		a.tui.markDirty()
+		a.refreshOverlays()
 	}
 }
 
@@ -547,14 +575,7 @@ func (a *app) refreshKeyboard() {
 	if a.kb == nil || a.tui == nil {
 		return
 	}
-	if a.kb.open {
-		_, rows := termSize()
-		a.tui.setOverlay(a.kb.lines(rows))
-	} else {
-		a.tui.setOverlay(nil)
-	}
-	a.tui.setStatus(a.statusLine())
-	a.tui.markDirty()
+	a.refreshOverlays()
 }
 
 // ---------------------------------------------------------------------------

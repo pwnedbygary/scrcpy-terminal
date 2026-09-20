@@ -419,9 +419,9 @@ const CTRL_BROWSER_KEYS = new Set(["KeyW", "KeyT", "KeyN", "KeyR", "KeyQ"]);
 // Alt+M is deliberately NOT here: it stays the LOCAL mute. The device's own
 // mute has no chord (F7 and the action bar carry it).
 //
-// Slash: codeOf() leaves punctuation alone when a phone keyboard reports only
-// `key` and no `code`, so Alt+/ works on a desktop and on keyboards that send
-// a real code; the ☰ button is the always-available path.
+// Slash is a punctuation chord: a phone keyboard reports it by character and
+// codeOf() normalises it (PUNCT_CODES) before this lookup, so Alt+/ opens the
+// controls sheet there too. The ☰ button remains the always-available path.
 const MNEMONIC_ACTIONS = {
   KeyB: "back", KeyC: "collapse", KeyD: "voldown", KeyE: "settings",
   KeyG: "grab", KeyH: "home", KeyI: "keyboard", KeyK: "resetvideo",
@@ -444,8 +444,19 @@ const ALT_ACTIONS = {
 // Phone soft keyboards report key events differently from a desktop keyboard:
 // `code` is very often empty and only `key` carries anything, so a table lookup
 // by code silently misses every hotkey. Normalise the character back to its
-// US-layout code name. (Punctuation is deliberately left alone: it is sent as
-// text, which survives layouts in a way a code name would not.)
+// US-layout code name.
+//
+// Punctuation that is part of a chord (Alt+/ opens the controls sheet, Alt+- /
+// Alt+= are the local volume) must be normalised too, or the chord silently
+// degrades to typing the character: on a phone, `code` is empty and Alt+/
+// typed "/" at the device instead of opening the sheet. Text that is not a
+// chord still goes through the text path (the name lookup simply misses).
+const PUNCT_CODES = {
+  "/": "Slash", "-": "Minus", "=": "Equal", ".": "Period", ",": "Comma",
+  ";": "Semicolon", "'": "Quote", "`": "Backquote",
+  "[": "BracketLeft", "]": "BracketRight", "\\": "Backslash",
+};
+
 function codeOf(ev) {
   if (ev.code) return ev.code;
   const k = ev.key;
@@ -454,7 +465,7 @@ function codeOf(ev) {
     if (k >= "a" && k <= "z") return "Key" + k.toUpperCase();
     if (k >= "A" && k <= "Z") return "Key" + k;
     if (k >= "0" && k <= "9") return "Digit" + k;
-    return ""; // space and punctuation go through the text path
+    return PUNCT_CODES[k] || "";
   }
   return k; // "Enter", "Backspace", "ArrowLeft", ...
 }
@@ -496,6 +507,7 @@ class Input {
     this.drift = 0;
     this.tapAt = 0;
     this.softKeys = false;
+    this.kbRetry = false; // a pointerdown retry is armed for the IME
   }
 
   sendPos(op, extra) {
@@ -549,11 +561,30 @@ class Input {
     els.ime.value = "";
     els.ime.focus({ preventScroll: true });
     if (document.activeElement !== els.ime) {
-      this.softKeys = false;
-      toast("keyboard: browser refused focus");
+      // The browser refused focus outside a touch gesture. This is what a phone
+      // does for Alt+I (a keydown is not a gesture for the IME, even though it
+      // is one for audio), so stay "on" and retry on the next tap rather than
+      // flipping back to off: the user asked for the keyboard, not for an
+      // error. The toolbar's Keys button works because it is a real click.
+      this.armSoftKeyRetry();
+      toast("keyboard on — tap the screen once to raise it", 2600);
       return;
     }
     toast("keyboard on — type to send to the device", 2600);
+  }
+
+  // armSoftKeyRetry re-focuses the IME sink inside the next pointer gesture,
+  // which is the only context a phone browser accepts for showing the IME.
+  armSoftKeyRetry() {
+    if (this.kbRetry) return;
+    this.kbRetry = true;
+    const retry = () => {
+      this.kbRetry = false;
+      if (!this.softKeys || !els.ime) return;
+      els.ime.value = "";
+      els.ime.focus({ preventScroll: true });
+    };
+    window.addEventListener("pointerdown", retry, { once: true, capture: true });
   }
 
   attach() {

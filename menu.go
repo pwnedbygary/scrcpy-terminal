@@ -80,9 +80,7 @@ func (a *app) closeMenu() {
 	}
 	a.kbAutoGrabbed = false
 	if a.tui != nil {
-		a.tui.setOverlay(nil)
-		a.tui.setStatus(a.statusLine())
-		a.tui.markDirty()
+		a.refreshOverlays()
 	}
 }
 
@@ -225,17 +223,14 @@ func (a *app) menuLines(rows int) []overlayLine {
 	return lines
 }
 
-// refreshMenu re-renders the menu overlay and status, and records the screen
-// rows the rows landed on for click hit-testing.
+// refreshMenu records the screen rows the rows landed on for click
+// hit-testing, then repaints. The painter itself lives in refreshOverlays, so
+// the menu, the keyboard and the action bar can never fight for the overlay.
 func (a *app) refreshMenu() {
 	if a.tui == nil || !a.menuOpen {
 		return
 	}
 	_, rows := termSize()
-	lines := a.menuLines(rows)
-	a.tui.setOverlay(padLines(lines, menuLeftMargin))
-	a.tui.setStatus(a.statusLine())
-	a.tui.markDirty()
 
 	// Screen row of each menu row: the overlay starts at the top of the video
 	// area, one line per entry, after the header. menuHitTest consumes this, so
@@ -253,6 +248,7 @@ func (a *app) refreshMenu() {
 		}
 		a.menuHits = append(a.menuHits, menuHit{row: line + 1, item: menuItems[i]})
 	}
+	a.refreshOverlays()
 }
 
 // padLines prepends n spaces to every line (a left margin for the overlay).

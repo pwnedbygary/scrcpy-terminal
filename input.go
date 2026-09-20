@@ -629,6 +629,19 @@ func (a *app) mouseEvent(b []byte) bool {
 
 	btn := btnRaw & 0x7f
 
+	// Action bar: mouse motion wakes it; a LEFT click on its row runs a button
+	// (or is swallowed) before it can reach the device as a tap. Other buttons
+	// and the wheel keep their normal meaning -- right is Back, wheel scrolls
+	// -- even when they land on the strip, so the bar cannot hijack them.
+	if btnRaw&32 != 0 {
+		a.wakeBar()
+	} else if btn == 0 && a.barVisible() {
+		_, rows := termSize()
+		if a.barClick(cellX, cellY, rows, pressed) {
+			return true
+		}
+	}
+
 	if a.ctrl == nil {
 		// No control socket (--control=false or not yet connected):
 		// consume mouse events, never crash on them.
