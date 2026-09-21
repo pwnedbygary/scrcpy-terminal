@@ -63,6 +63,7 @@ func TestScreenshotWritesPPM(t *testing.T) {
 	a := &app{tui: &tui{cols: 80, rows: 39}}
 	a.tui.running = true
 	a.tui.lastRGB = pattern
+	a.tui.lastW, a.tui.lastH = pw, ph // as a real draw records them
 	a.screenshot()
 
 	files, _ := filepath.Glob("scterm-*.ppm")
@@ -89,6 +90,26 @@ func TestScreenshotWritesPPM(t *testing.T) {
 	last := n - 4 // last RGBA quad
 	if body[wantBody-3] != pattern[last] || body[wantBody-2] != pattern[last+1] || body[wantBody-1] != pattern[last+2] {
 		t.Fatalf("last pixel mismatch: %v", body[wantBody-3:])
+	}
+}
+
+// TestScreenshotStaleCanvas: a snapshot from a different geometry must not be
+// written as a sheared PPM. A resize can keep the same cell count (120x29 and
+// 116x30 are both 3480 cells), so the length check alone is not enough.
+func TestScreenshotStaleCanvas(t *testing.T) {
+	t.Chdir(t.TempDir())
+	a := &app{tui: &tui{cols: 80, rows: 39, running: true}}
+	// 80x39 and 120x26 are both 3120 cells, so the snapshot has exactly the
+	// length the current geometry wants -- only the dimensions differ.
+	a.tui.lastW, a.tui.lastH = 120, 52
+	a.tui.lastRGB = make([]byte, 80*39*2*4)
+	if len(a.tui.lastRGB) != 120*52*4 {
+		t.Fatalf("test setup is wrong: %d vs %d", len(a.tui.lastRGB), 120*52*4)
+	}
+	a.screenshot()
+	files, _ := filepath.Glob("scterm-*.ppm")
+	if len(files) != 0 {
+		t.Fatalf("wrote a stale screenshot: %v", files)
 	}
 }
 
@@ -138,5 +159,29 @@ func TestAltKResetVideoWire(t *testing.T) {
 	w := cc.captured[0]
 	if len(w) != 1 || w[0] != ctrlResetVideo {
 		t.Fatalf("wire bytes: % x (want single byte %#x)", w, ctrlResetVideo)
+	}
+}
+
+// TestMouseModesPreferSGR: the enable sequence must leave the terminal in SGR
+// encoding. On a terminal that implements both SGR (1006) and urxvt (1015),
+// the mode set last wins; enabling 1015 after 1006 makes it send
+// "CSI b;x;yM" (no "<"), which this client does not parse -- so the mouse
+// worked through Zellij (which re-encodes to SGR) but did nothing in a plain
+// terminal tab.
+func TestMouseModesPreferSGR(t *testing.T) {
+	if !strings.Contains(mouseOnSeq, "?1006h") {
+		t.Fatal("mouseOnSeq does not enable SGR (1006)")
+	}
+	if strings.Contains(mouseOnSeq, "?1015h") {
+		t.Fatal("mouseOnSeq enables urxvt (1015): the last mode set wins and its events are unparseable")
+	}
+	for _, mode := range []string{"?1000h", "?1002h", "?1003h"} {
+		if !strings.Contains(mouseOnSeq, mode) {
+			t.Errorf("mouseOnSeq does not enable %s", mode)
+		}
+	}
+	// The off sequence still clears 1015, in case something else set it.
+	if !strings.Contains(mouseOffSeq, "?1015l") {
+		t.Error("mouseOffSeq does not disable urxvt (1015)")
 	}
 }

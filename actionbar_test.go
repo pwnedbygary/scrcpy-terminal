@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -55,17 +57,24 @@ func TestBarLayoutFitsAndScrolls(t *testing.T) {
 	a := newTestApp(nil)
 	a.tui = &tui{cols: 80, rows: 23}
 	a.wakeBar()
+	a.refreshOverlays()
 
-	text, hits, left, right := a.barLayout(80)
-	if len([]rune(text)) > 80 {
-		t.Fatalf("bar is %d cells wide in an 80-cell pane: %q", len([]rune(text)), text)
+	top, bottom := a.barLines()
+	if top == nil || bottom == nil {
+		t.Fatal("bar did not render")
 	}
-	if left || !right {
+	if _, _, left, right := a.barLayout(80); left || !right {
 		t.Fatalf("at offset 0 want left=false right=true, got left=%v right=%v", left, right)
+	}
+	if got := len([]rune(bottom.text)); got > 80 {
+		t.Fatalf("bar is %d cells wide in an 80-cell pane: %q", got, bottom.text)
+	}
+	if got := len([]rune(top.text)); got != len([]rune(bottom.text)) {
+		t.Fatalf("cap row is %d cells, label row is %d", got, len([]rune(bottom.text)))
 	}
 	// The right arrow is clickable and scrolls.
 	var arrow barHit
-	for _, h := range hits {
+	for _, h := range a.barHits {
 		if h.scroll == +1 {
 			arrow = h
 		}
@@ -73,7 +82,7 @@ func TestBarLayoutFitsAndScrolls(t *testing.T) {
 	if arrow.to == 0 {
 		t.Fatal("no right-scroll hit found")
 	}
-	if !a.barClick(arrow.from+1, 23, 24, true) {
+	if !a.barClick(arrow.from+1, a.barBotRow, true) {
 		t.Fatal("click on the scroll arrow was not consumed")
 	}
 	if a.barOffset == 0 {
@@ -99,7 +108,7 @@ func TestBarClickRunsTheButton(t *testing.T) {
 		t.Fatalf("second button is %q, want Back", barItemAt(back).Short)
 	}
 	mid := (back.from + back.to) / 2
-	if !a.barClick(mid+1, 29, 30, true) {
+	if !a.barClick(mid+1, a.barBotRow, true) {
 		t.Fatal("click on Back was not consumed")
 	}
 	if len(cc.captured) != 2 ||
@@ -111,9 +120,10 @@ func TestBarClickRunsTheButton(t *testing.T) {
 		t.Errorf("clicked button not flashed: idx=%d, want 1", a.barFlashIdx)
 	}
 	// The repaint must paint the clicked pill with the flash style, so the
-	// click is visible on screen and not just in a field.
+	// click is visible on screen and not just in a field. The style is shared
+	// by both rows.
 	flashed := false
-	for _, seg := range a.tui.overlay[28].segs {
+	for _, seg := range a.tui.overlay[a.barBotRow-1].segs {
 		if seg.from == back.from && seg.to == back.to && seg.code == btnBgFlash {
 			flashed = true
 		}
@@ -123,8 +133,8 @@ func TestBarClickRunsTheButton(t *testing.T) {
 	}
 }
 
-// TestBarClickOnStripDoesNotTapTheDevice: a click on the bar row outside any
-// button must be swallowed, not forwarded as a touch.
+// TestBarClickOnStripDoesNotTapTheDevice: a click on the bar (either row)
+// outside any button must be swallowed, not forwarded as a touch.
 func TestBarClickOnStripDoesNotTapTheDevice(t *testing.T) {
 	withTermSize(t, 120, 30)
 	cc := &capConn{}
@@ -133,17 +143,18 @@ func TestBarClickOnStripDoesNotTapTheDevice(t *testing.T) {
 	a.wakeBar()
 	a.refreshOverlays()
 
-	// A column past the last button on the bar row.
+	// A column past the last button, on each of the bar's two rows.
 	last := a.barHits[len(a.barHits)-1]
-	a.barClick(last.to+5, 29, 30, true)
+	a.barClick(last.to+5, a.barBotRow, true)
+	a.barClick(last.to+5, a.barTopRow, true)
 	if len(cc.captured) != 0 {
 		t.Fatalf("a click on the empty strip reached the device: %d messages", len(cc.captured))
 	}
 }
 
-// TestBarClickBelowTheBarTapsThrough: the row under the bar is the video, so
-// clicking there is a normal device tap.
-func TestBarClickBelowTheBarTapsThrough(t *testing.T) {
+// TestBarClickAboveTheBarTapsThrough: the rows above the bar are video, so
+// clicking there is a normal device tap; the bar's own top row is consumed.
+func TestBarClickAboveTheBarTapsThrough(t *testing.T) {
 	withTermSize(t, 120, 30)
 	cc := &capConn{}
 	a := newTestApp(newController(cc))
@@ -151,7 +162,15 @@ func TestBarClickBelowTheBarTapsThrough(t *testing.T) {
 	a.wakeBar()
 	a.refreshOverlays()
 
-	if a.barClick(10, 28, 30, true) { // row 28 is video; bar is row 29
+	// A cell in the bar's leading margin (not on a pill) on the cap row.
+	strip := a.barHits[0].from - 1
+	if !a.barClick(strip, a.barTopRow, true) {
+		t.Fatal("click on the bar's cap row was not consumed")
+	}
+	if len(cc.captured) != 0 {
+		t.Fatalf("cap-row click reached the device: %d messages", len(cc.captured))
+	}
+	if a.barClick(10, a.barTopRow-1, true) {
 		t.Fatal("click above the bar was consumed by it")
 	}
 }
@@ -164,13 +183,14 @@ func TestBarReleaseAfterVideoDragStillReachesTheDevice(t *testing.T) {
 	a := newTestApp(newController(&capConn{}))
 	a.tui = &tui{cols: 120, rows: 29}
 	a.wakeBar()
+	a.refreshOverlays()
 
 	a.drag.setDown(true)
-	if a.barClick(10, 29, 30, false) {
+	if a.barClick(10, a.barBotRow, false) {
 		t.Fatal("release after a video drag was swallowed by the bar")
 	}
 	a.drag.setDown(false)
-	if !a.barClick(10, 29, 30, false) {
+	if !a.barClick(10, a.barBotRow, false) {
 		t.Fatal("release without a device touch should be swallowed on the bar row")
 	}
 }
@@ -188,9 +208,10 @@ func TestBarMotionWakesViaMouseEvent(t *testing.T) {
 	}
 }
 
-// TestBarOverlayOnlyOnItsRow: the bar paints one line, the last video row, and
-// clears the recorded hits when it hides.
-func TestBarOverlayOnlyOnItsRow(t *testing.T) {
+// TestBarOverlayOnlyOnItsRows: the bar paints two lines -- the cap and the
+// label row, just above the status line -- and clears the recorded hits when
+// it hides.
+func TestBarOverlayOnlyOnItsRows(t *testing.T) {
 	withTermSize(t, 120, 30)
 	a := newTestApp(nil)
 	a.tui = &tui{cols: 120, rows: 29}
@@ -201,24 +222,88 @@ func TestBarOverlayOnlyOnItsRow(t *testing.T) {
 	if len(ov) != 30 {
 		t.Fatalf("overlay has %d lines, want one per terminal row", len(ov))
 	}
-	if len(ov[28].text) == 0 {
-		t.Fatal("bar row 28 (0-based) is empty")
+	topIdx, botIdx := a.barTopRow-1, a.barBotRow-1
+	if topIdx != 27 || botIdx != 28 {
+		t.Fatalf("bar rows are %d/%d, want 27/28 (above the status line)",
+			a.barTopRow, a.barBotRow)
 	}
 	for i, line := range ov {
-		if i != 28 && line.text != "" {
+		if i != topIdx && i != botIdx && line.text != "" {
 			t.Errorf("overlay line %d painted while only the bar should be: %q", i, line.text)
 		}
 	}
-	if !strings.Contains(ov[28].text, "Home") {
-		t.Errorf("bar text does not contain Home: %q", ov[28].text)
+	if !strings.Contains(ov[botIdx].text, "Home") {
+		t.Errorf("bar text does not contain Home: %q", ov[botIdx].text)
 	}
-	if len(ov[28].segs) == 0 {
-		t.Error("bar has no button segments (would render as plain text)")
+	if len(ov[botIdx].segs) == 0 || len(ov[topIdx].segs) == 0 {
+		t.Error("bar rows have no button segments (would render as plain text)")
+	}
+	if strings.TrimSpace(ov[topIdx].text) != "" {
+		t.Errorf("cap row should be background only, got %q", ov[topIdx].text)
 	}
 
 	a.barHideCheck(timeNowUnixNano() + int64(barIdle) + 1)
 	if a.barHits != nil {
 		t.Error("bar hits survived the hide: a click could still run a button")
+	}
+	if a.barTopRow != 0 || a.barBotRow != 0 {
+		t.Errorf("bar rows survived the hide: %d/%d", a.barTopRow, a.barBotRow)
+	}
+}
+
+// TestBarIsCentered: the strip is centered in the pane, not left-justified.
+func TestBarIsCentered(t *testing.T) {
+	withTermSize(t, 120, 30)
+	a := newTestApp(nil)
+	a.tui = &tui{cols: 120, rows: 29}
+	a.wakeBar()
+	a.refreshOverlays()
+
+	if len(a.barHits) == 0 {
+		t.Fatal("bar painted no buttons")
+	}
+	// Centered means the empty space left of the first pill and right of the
+	// last one are the same, and the strip touches neither edge.
+	left := a.barHits[0].from
+	right := 120 - a.barHits[len(a.barHits)-1].to
+	if left == 0 {
+		t.Fatal("bar is not centered: it starts at the left edge")
+	}
+	if right == 0 {
+		t.Fatal("bar is not centered: it runs to the right edge")
+	}
+	if diff := left - right; diff < -1 || diff > 1 {
+		t.Errorf("bar is off-center: %d cells left, %d right", left, right)
+	}
+}
+
+// TestBarStaysWhilePointerRestsOnIt: a pointer resting on a pill keeps the bar
+// up, so the button cannot vanish under the cursor and turn the next click
+// into a device tap.
+func TestBarStaysWhilePointerRestsOnIt(t *testing.T) {
+	withTermSize(t, 120, 30)
+	a := newTestApp(nil)
+	a.tui = &tui{cols: 120, rows: 29}
+	a.wakeBar()
+	a.refreshOverlays()
+
+	a.barPointerY = a.barBotRow
+	now := timeNowUnixNano()
+	a.barHideCheck(now + int64(barIdle)*10)
+	if !a.barVisible() {
+		t.Fatal("bar hid while the pointer was resting on it")
+	}
+	if a.barLastActivity != now+int64(barIdle)*10 {
+		t.Errorf("idle clock not refreshed while resting on the bar: %d", a.barLastActivity)
+	}
+
+	a.barPointerY = a.barTopRow - 1 // moved off onto the video
+	a.barHideCheck(now + int64(barIdle)*20)
+	if a.barVisible() {
+		t.Fatal("bar did not hide after the pointer moved off")
+	}
+	if a.barPointerY != 0 {
+		t.Errorf("stale pointer row survived the hide: %d", a.barPointerY)
 	}
 }
 
@@ -340,23 +425,85 @@ func TestBarSnapsBackWhenItFits(t *testing.T) {
 	a.tui = &tui{cols: 80, rows: 23}
 	a.wakeBar()
 	a.barOffset = 8
-	_ = a.barLine() // paints at the narrow width, offset stays (items remain)
+	if _, bot := a.barLines(); bot == nil { // paints at the narrow width
+		t.Fatal("bar did not render at the narrow width")
+	}
 	if a.barOffset != 8 {
 		t.Fatalf("offset changed while items remain: %d", a.barOffset)
 	}
 
 	// Widen so everything fits at offset 0.
 	termSizeOverride = struct{ cols, rows int }{300, 24}
-	line := a.barLine()
-	if line == nil {
+	_, bot := a.barLines()
+	if bot == nil {
 		t.Fatal("bar did not render at the wide width")
 	}
 	if a.barOffset != 0 {
 		t.Errorf("offset did not snap back on a wide pane: %d", a.barOffset)
 	}
-	if strings.Contains(line.text, "‹") {
-		t.Errorf("bar still shows a left arrow after snapping back: %q", line.text)
+	if strings.Contains(bot.text, "‹") {
+		t.Errorf("bar still shows a left arrow after snapping back: %q", bot.text)
 	}
+}
+
+// TestRepaintWithoutAFrame: an overlay change must reach the screen on its
+// own, not wait for the next video frame. A static device screen can send no
+// frames at all, and before repaint() the action bar (and the keyboard) could
+// stay invisible -- or a hidden bar stay on screen -- until the device moved.
+func TestRepaintWithoutAFrame(t *testing.T) {
+	const tw, th = 40, 5
+	tr := &tui{cols: tw, rows: th, running: true, lastW: tw, lastH: th * 2}
+	tr.keys = make([]uint64, tw*th)
+	tr.prev = make([]uint64, tw*th)
+	for i := range tr.prev {
+		tr.prev[i] = ^uint64(0)
+	}
+	tr.lastRGB = make([]byte, tw*th*2*4) // cols x 2*rows RGBA
+	tr.setOverlay([]overlayLine{{text: "Hi"}})
+
+	out := captureStdout(t, tr.repaint)
+	if !strings.Contains(out, "Hi") {
+		t.Fatalf("repaint did not paint the overlay; output %q", out)
+	}
+}
+
+// TestRepaintRejectsAStaleCanvas: a resize can keep the same cell count
+// (120x29 and 116x30 are both 3480 cells), so the old snapshot has the right
+// length but the wrong shape. repaint must not shear it into the new grid.
+func TestRepaintRejectsAStaleCanvas(t *testing.T) {
+	const tw, th = 120, 29
+	tr := &tui{cols: tw, rows: th, running: true, lastW: tw, lastH: th * 2}
+	tr.keys = make([]uint64, tw*th)
+	tr.prev = make([]uint64, tw*th)
+	tr.lastRGB = make([]byte, tw*th*2*4)
+
+	// Same cell count, different shape.
+	tr.cols, tr.rows = 116, 30
+	if len(tr.lastRGB) != tr.cols*tr.rows*2*4 {
+		t.Fatalf("test setup is wrong: lengths differ (%d vs %d)",
+			len(tr.lastRGB), tr.cols*tr.rows*2*4)
+	}
+	out := captureStdout(t, tr.repaint)
+	if len(out) != 0 {
+		t.Fatalf("repaint drew a stale canvas: %q", out)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what
+// it wrote. Tests are not parallel in this package, so the swap is safe.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	return string(out)
 }
 
 // TestBarMuteHasNoChordButWorks: Mute has no Alt chord on purpose, and the bar
@@ -371,7 +518,7 @@ func TestBarMuteHasNoChordButWorks(t *testing.T) {
 
 	for _, h := range a.barHits {
 		if h.scroll == 0 && barItemAt(h).Short == "Mute" {
-			a.barClick((h.from+h.to)/2+1, 29, 30, true)
+			a.barClick((h.from+h.to)/2+1, a.barBotRow, true)
 			if len(cc.captured) != 2 {
 				t.Fatalf("Mute wrote %d messages, want down+up", len(cc.captured))
 			}
@@ -382,5 +529,5 @@ func TestBarMuteHasNoChordButWorks(t *testing.T) {
 			return
 		}
 	}
-	t.Fatalf("Mute button not found in a 200-cell bar: %q", a.tui.overlay[28].text)
+	t.Fatalf("Mute button not found in a 200-cell bar: %q", a.tui.overlay[a.barBotRow-1].text)
 }

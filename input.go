@@ -293,7 +293,10 @@ func (a *app) screenshot() {
 	pw, ph := a.tui.cols, a.tui.rows*2
 	n := pw * ph * 4
 	var rgb []byte
-	if n > 0 && len(a.tui.lastRGB) == n {
+	// The length check alone is not enough: a resize can keep the same cell
+	// count, and a differently-shaped snapshot would be written as a sheared
+	// PPM. lastW/lastH record the geometry the snapshot was taken at.
+	if n > 0 && len(a.tui.lastRGB) == n && a.tui.lastW == pw && a.tui.lastH == ph {
 		rgb = make([]byte, n)
 		copy(rgb, a.tui.lastRGB[:n])
 	}
@@ -629,15 +632,19 @@ func (a *app) mouseEvent(b []byte) bool {
 
 	btn := btnRaw & 0x7f
 
-	// Action bar: mouse motion wakes it; a LEFT click on its row runs a button
-	// (or is swallowed) before it can reach the device as a tap. Other buttons
-	// and the wheel keep their normal meaning -- right is Back, wheel scrolls
-	// -- even when they land on the strip, so the bar cannot hijack them.
+	// Action bar: any mouse event wakes it -- hover motion where the terminal
+	// forwards it (1003), and otherwise a click or wheel, so the strip is
+	// discoverable even through a multiplexer that drops pure motion. A LEFT
+	// click on either of its rows runs a button (or is swallowed) before it
+	// can reach the device as a tap. Other buttons and the wheel keep their
+	// normal meaning -- right is Back, wheel scrolls -- even when they land on
+	// the strip, so the bar cannot hijack them.
 	if btnRaw&32 != 0 {
-		a.wakeBar()
-	} else if btn == 0 && a.barVisible() {
-		_, rows := termSize()
-		if a.barClick(cellX, cellY, rows, pressed) {
+		a.barPointerY = cellY
+	}
+	a.wakeBar()
+	if btn == 0 && a.barVisible() {
+		if a.barClick(cellX, cellY, pressed) {
 			return true
 		}
 	}

@@ -61,6 +61,9 @@ type tui struct {
 	overlay []overlayLine
 
 	lastRGB []byte // last full canvas snapshot (cols x 2*rows RGBA), for Alt+S screenshots
+	lastW   int    // canvas pixel width the snapshot was taken at
+	lastH   int    // ...and height; a resize that keeps the same cell count would
+	// otherwise let repaint() shear the old canvas into the new grid
 }
 
 func newTUI() *tui {
@@ -105,6 +108,7 @@ func (t *tui) draw(rgba []byte) {
 		t.lastRGB = make([]byte, n)
 	}
 	copy(t.lastRGB[:n], rgba[:n])
+	t.lastW, t.lastH = w, h
 
 	t.frameIdx++
 	interval := t.repaintInterval
@@ -303,11 +307,34 @@ func rgbStr(c uint32) string {
 	return strconv.Itoa(int(c>>16)&0xFF) + ";" + strconv.Itoa(int(c>>8)&0xFF) + ";" + strconv.Itoa(int(c)&0xFF)
 }
 
+// setOverlay replaces the overlay and marks the grid dirty. The caller is
+// expected to repaint (see repaint): overlays are also drawn by the next video
+// frame, but a static device screen may not produce one for a long time.
 func (t *tui) setOverlay(lines []overlayLine) {
 	t.mu.Lock()
 	t.overlay = lines
 	t.dirty = true
 	t.mu.Unlock()
+}
+
+// repaint redraws the last canvas with the current overlay, so an overlay
+// change does not wait for the next video frame. A static device screen can
+// send no frames at all, and without this the keyboard, the action menu and
+// the action bar could stay invisible (and a hide could stay on screen) until
+// something on the device moved.
+func (t *tui) repaint() {
+	t.mu.Lock()
+	rgb := t.lastRGB
+	stale := t.lastW != t.cols || t.lastH != t.rows*2 || len(rgb) == 0
+	t.mu.Unlock()
+	if stale {
+		// Nothing drawn yet, or the snapshot is from another geometry (a
+		// resize can keep the same cell count): wait for a real frame.
+		return
+	}
+	// draw takes the lock itself and treats the snapshot as a canvas; the
+	// copy-back is a no-op because it is the same slice.
+	t.draw(rgb)
 }
 
 func (t *tui) setStatus(s string) {
@@ -337,6 +364,6 @@ func (t *tui) shellClose() {
 	t.running = false
 	// Always disable mouse reporting + restore the normal screen, so a crash
 	// or quit never leaves SGR garbage pouring into the shell.
-	os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l")
+	os.Stdout.WriteString(mouseOffSeq)
 	os.Stdout.WriteString("\x1b[0m\x1b[?25h\x1b[?1049l")
 }

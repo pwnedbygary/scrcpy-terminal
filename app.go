@@ -42,12 +42,18 @@ type app struct {
 
 	// action bar: the mouse-driven button strip (actionbar.go). Show state is
 	// driven by recent mouse activity and a hide timer checked on the tick;
-	// barHits is the painted layout clicks are matched against, and
-	// barFlashIdx/At give a clicked button a brief green flash.
+	// barHits is the painted layout clicks are matched against,
+	// barTopRow/barBotRow the screen rows it actually painted on (0 = not
+	// drawn), barPointerY the last motion row (so a pointer resting on the
+	// strip keeps it up), and barFlashIdx/At give a clicked button a brief
+	// green flash.
 	barShow         bool
 	barLastActivity int64
 	barOffset       int
 	barHits         []barHit
+	barTopRow       int
+	barBotRow       int
+	barPointerY     int
 	barFlashIdx     int
 	barFlashAt      int64
 
@@ -466,6 +472,20 @@ func audioState(a *app) string {
 	return fmt.Sprintf("%d%%", a.audio.gainPercent())
 }
 
+// Mouse reporting sequences. 1000 = press/release, 1002 = button motion,
+// 1003 = any motion (hover, which wakes the action bar), 1006 = SGR encoding.
+//
+// 1015 (urxvt encoding) is deliberately NOT enabled with the others: on a
+// terminal that implements both, the mode set LAST wins, and with 1006 before
+// 1015 that is urxvt -- whose events (CSI b;x;yM, no "<") this client does not
+// parse at all. That is why the mouse worked through Zellij (which re-encodes
+// to SGR) but did nothing in a plain terminal tab. The disable list still
+// turns 1015 off, for terminals left in that mode by something else.
+const (
+	mouseOnSeq  = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"
+	mouseOffSeq = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l"
+)
+
 // setMouse enables/disables terminal mouse tracking. 1003 (any-event motion)
 // is included so hovering is reported, which is what wakes the action bar:
 // with only 1002 the terminal reports motion while a button is down, and the
@@ -473,9 +493,9 @@ func audioState(a *app) string {
 // click taps the device.
 func (a *app) setMouse(on bool) {
 	if on {
-		os.Stdout.WriteString("\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1015h")
+		os.Stdout.WriteString(mouseOnSeq)
 	} else {
-		os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l")
+		os.Stdout.WriteString(mouseOffSeq)
 	}
 	a.grabbed = on
 }

@@ -125,12 +125,18 @@ button tooltips name the chords, so the buttons and the keyboard cannot
 disagree.
 
 The terminal gets the same thing drawn with the software keyboard's button
-spans: a row of pills along the last video row, above the status line, that
-appears when you move the mouse and fades on the same timer (mouse motion is
-re-read from the tick, so the bar never needs its own timer). Buttons run
-through the same dispatch as the chords and the menu, a click flashes the
-button green, and when the row is wider than the pane the `‹`/`›` edges scroll
-it. Clicks on the bar never reach the device as taps.
+spans: a strip of two-row pills, centered in the pane just above the status
+line, sized for pointing (inner padding and a gap between buttons). Any mouse
+activity brings it up -- hover where the terminal forwards motion (mouse
+tracking is set to SGR, with any-event motion enabled), otherwise a click or
+wheel -- and it fades a couple of seconds after the last movement, except
+while the pointer is resting on it: hiding a button from under the cursor
+would turn the next click into a device tap. Buttons run through the same
+dispatch as the chords and the menu, a click flashes the button green, and
+when the strip is wider than the pane the `‹`/`›` edges scroll it. Clicks on
+the bar never reach the device as taps, and the overlay repaints immediately
+instead of waiting for the next video frame (a static device screen may send
+none at all).
 
 `Alt+/` opens the keyboard-driven action menu: every action with its chord,
 letters run a row, `Esc` closes, and a mouse click on a row runs it too. The
