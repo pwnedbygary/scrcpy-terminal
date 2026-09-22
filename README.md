@@ -450,9 +450,11 @@ size, which is what the display actually shows.
 
 ## Development roadmap
 
-The [native Android client and cross-mode parity plan](docs/ANDROID_CLIENT_PLAN.md)
-describes the proposed architecture, existing-client gap closure, milestones,
-acceptance tests, and release criteria. Developers and LLMs should start with the
+The [Android peer app and cross-mode parity plan](docs/ANDROID_CLIENT_PLAN.md)
+describes one Android APK with both server and client roles, direct paired
+control in either direction, and authenticated Go TUI/web/window connections to
+Android servers while retaining legacy ADB operation. It includes permission and
+backend constraints, existing-client gap closure, milestones and release tests. Developers and LLMs should start with the
 [current checkpoint](.agent/HANDOFF.md) and reconcile it against Git and in-flight
 work before implementing the next task. This is a plan, not a shipped Android client.
 

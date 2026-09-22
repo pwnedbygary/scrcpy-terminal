@@ -1,15 +1,26 @@
-# Native Android client and cross-mode parity development plan
+# Android peer app, authenticated Go client, and cross-mode parity plan
 
 Status: proposed implementation plan; no Android implementation is completed by
 this document. Created 2026-09-22 from source baseline
 `e48af13fd32f8e3fa37f2c2d6f72b0122406b545` on `codex/android-client`.
 
+Scope revision 2 (2026-09-22), based on planning commit
+`be4594e60b7a16d906a50772565cd1cfd3c2c0de`: the user requires BOTH server and
+client roles in the same Android APK, direct paired Android-to-Android control
+in either direction, and the maintained Go application as an authenticated
+client of Android-hosted servers. This supersedes the original host-first-only
+scope and optional hostless X01. No implementation completion is implied. The
+actual development branch is `codex/android-client`; do not rename it to the
+user's shorthand `android-client`, switch to main, or assume main is unchanged.
+
 ## 1. Start here: instructions for the next developer or LLM
 
 Read this document, [the current checkpoint](../.agent/HANDOFF.md), and all
 applicable `AGENTS.md` instructions before changing code. The user requested an
-installable native Android client with the lowest practical latency and complete
-functional parity, including closing gaps between existing modes.
+installable native Android peer app with both server and client roles, an
+authenticated Go client, the lowest practical latency and complete functional
+parity where the selected Android execution backend permits it, including
+closing gaps between existing modes.
 
 The checkpoint is a navigation aid, not proof of repository state. Git, source,
 live task ownership, and reproducible evidence override stale checkboxes. This
@@ -64,8 +75,9 @@ session and repository instructions.
 ### State and evidence conventions
 
 Use `NOT_STARTED`, `IN_PROGRESS`, `BLOCKED`, `IMPLEMENTED_UNVERIFIED`,
-`VERIFIED`, or `DEFERRED` for engineering state. Track review, commit, and push
-separately; they are not synonyms for verification. `VERIFIED` requires the
+`VERIFIED`, `DEFERRED`, or `SUPERSEDED` for engineering state. SUPERSEDED
+requires a replacement task and does not count as completed work. Track review,
+commit, and push separately; they are not synonyms for verification. `VERIFIED` requires the
 task-specific exit criteria and evidence links. A missing physical test remains
 explicitly unverified even if host tests pass.
 
@@ -90,8 +102,16 @@ necessary, and recover publication from Git instead of preclaiming success.
 
 ### Required scope
 
-- Installable native Android receiving/control application.
-- Host-connected operation equivalent to connecting a browser to `scterm`.
+- One installable Android APK containing controller/client AND target/server
+  roles. Every supported installation can offer either role after local setup.
+- Direct authenticated Android A controls B, and B controls A, without requiring
+  a Go host in the steady-state media/control path.
+- Maintain the Go application: existing ADB source mode continues, plus a new
+  authenticated Android-server source usable from TUI, web and window modes.
+- Keep Android-to-Go-bridge-to-ADB operation as a compatibility topology.
+- Role reversal is required. Simultaneous serving and viewing is a separately
+  negotiated, tested mode within this scope; inability to sustain it on a device
+  must be reported explicitly rather than dropping one direction silently.
 - Equivalent actions and device effects across TUI, web, window, and Android.
 - Explicit diagnosis and closure of existing-client parity defects.
 - Hardware video decoding, bounded latency, slow-client isolation, resilient
@@ -103,25 +123,36 @@ necessary, and recover publication from Git instead of preclaiming success.
 
 | Decision | Proposed default | Revisit when |
 | --- | --- | --- |
-| Topology | Existing Linux host owns ADB/source session; APK connects remotely | User needs hostless Android-to-Android operation |
+| Topology (user requirement) | Symmetric Android peers; Go is an additional authenticated controller/bridge, not a required broker | Only a new user instruction changes this |
 | APK stack | Kotlin UI/session/input, MediaCodec + SurfaceView, Oboe JNI audio | Device measurements justify a narrower alternative |
-| Minimum receiver | Android 8.1/API 27; prefer Android 11+ in low-latency validation | Actual receiver inventory requires another floor |
+| Minimum app / serving capabilities | Propose API 27 install/receive floor; each serving backend has its own capability/API matrix; public playback capture starts at API 29 | B00 device evidence finalizes supported roles per OS |
 | Video | Forward original H.264; keep JPEG compatibility | Device codec/transport measurements justify another codec |
 | Initial transport | Separate TLS WebSockets for control, video, audio | Packet-loss measurements justify datagram transport |
 | Input compatibility | Existing gestures retained; explicit immediate-input policy | Shared UX decision supersedes the compatibility policy |
 | Control ownership | One active controller, multiple viewers, explicit takeover | A tested multi-controller requirement is added |
-| Background behavior | Suspend media/input and release presses; reconnect on return | Background playback is explicitly required |
+| Background behavior | Viewer releases input on blur; active target serving uses user-visible lifecycle/foreground service as required | OS restrictions and explicit serving policy |
+| Target execution | Scrcpy-derived activated helper for closest parity; public-API consent-based backend for ordinary installs | B00 proves capability/privilege feasibility |
+| Pair trust | Mutual identities, separate directional view/control grants, local revocation | Explicit product decision changes access policy |
 
 These defaults are recommendations, not recorded user approval of every product
 detail. Continue independent implementation using reversible defaults; clarify
 only decisions that materially block work. Do not invent benchmark hardware,
 signing keys, SDK versions, or results.
 
-Hostless ADB is extension X01, not a hidden dependency of the first APK. HEVC/AV1,
-gamepad axes, arbitrary remote app launching, recording, WAN relay infrastructure,
-and background services are not part of the initial parity baseline. Existing
-CLI capture controls remain host-owned; runtime remote reconfiguration is a
-separate negotiated capability rather than assumed functionality.
+Direct Android peering is required, not deferred behind X01. ADB becomes one
+activation/legacy source mechanism, not the user-facing peer protocol. HEVC/AV1,
+gamepad axes, arbitrary remote app launching, recording, and public WAN relay
+infrastructure remain outside the initial baseline. Foreground serving lifecycle
+is required. Capture settings belong to the target/session owner; remote Go or
+Android requests negotiate bounded settings and cannot silently change another
+viewer’s session. Existing Go CLI capture settings continue to work in ADB mode.
+
+“Any Android device” is a reach goal, not a claim that a stock APK has shell
+privileges or that all OS/vendor restrictions disappear. B00 must produce a
+supported-device/backend matrix. Full scrcpy-equivalent behavior requires an
+explicitly authorized execution environment; the ordinary-app backend must
+report unsupported controls. Do not quietly redefine full parity as limited
+Accessibility operation; keep full-parity qualification a distinct release gate.
 
 ## 3. Baseline source map and verified observations
 
@@ -142,8 +173,13 @@ Source observations do not establish physical-device behavior.
 | Verification | `web*_test.go`, `ctrl_test.go`, `wire_test.go`, `audio_routing_test.go`, `web/*_test.mjs` | Existing wire, mapping, geometry, audio, slow-client and browser tests |
 | CI | `.github/workflows/build.yml`, `go.mod` | Go 1.27; vet/test/build; FFmpeg/PulseAudio dependencies; Linux binary artifacts/releases |
 
-At plan creation there is no Android receiver application/build. The vendored
-scrcpy Android source is the source-device server, not that client.
+At plan creation there is no Android peer application/build. The vendored
+scrcpy source is a source-device server launched by `adb.go: startServer` using
+`adb shell ... app_process`, not an ordinary Android application service. Its
+`wrappers/InputManager.java` invokes privileged input injection and handles
+`INJECT_EVENTS` permission errors. Bundling those classes in an APK does not
+inherit the ADB shell execution identity. This is the critical B00 feasibility
+boundary for reusing the current server.
 
 Historical checks from the planning session (2026-09-22):
 
@@ -164,18 +200,122 @@ These results are a historical baseline, not evidence for future changed code.
 ## 4. Target architecture and invariants
 
 ```text
-source Android / vendored scrcpy server
-  -> existing ADB video/audio/control transport
-  -> host packet reader and session manager
-       -> compressed media subscribers -> native Android decode/output
-       -> decoded consumers -> TUI
-                            -> JPEG/raw compatibility -> web/window
+Android A APK                         Android B APK
+  controller/viewer  -- authenticated --> target/server
+  target/server     <-- authenticated -- controller/viewer
+  own identity + grants                 own identity + grants
 
-all frontend input adapters -> shared action/input dispatcher -> source control
+Go scterm source providers:
+  LegacyAdbSource -> vendored source server through existing ADB transport
+  AndroidPeerSource -> authenticated target/server in Android APK
+    -> shared media + action interfaces -> TUI / web / window
+    -> optional authenticated bridge -> Android viewer
 ```
 
+Each source sends video/audio outward and accepts authorized input inward. A
+reverse control session is a new directional session, not reversing the input
+and video channels of an existing one. Both roles live in one APK; the privileged
+engine may run in a separately activated helper process under shell identity.
+
 Refactor incrementally. Avoid importing the Linux/cgo application into Android
-or rewriting unrelated terminal behavior.
+or replacing the maintained Go application. Reuse server algorithms/wire tests
+where sound; separate privileged platform adapters from portable protocol,
+session, encoder and control semantics.
+
+### Android target/server backends and privilege boundary
+
+B00 must establish the following through source inspection and a physical spike
+before promising full parity. App identity and pairing grant no OS privileges.
+
+| Backend | Capture and control | Setup / expected limit |
+| --- | --- | --- |
+| Activated scrcpy-derived helper | Reuse capture/encoder/control behavior of the vendored server behind a local authenticated adapter | Explicit ADB/shell activation on supported devices; no silent privilege escalation; capability qualification required |
+| Ordinary-app backend | MediaProjection to MediaCodec; Accessibility gestures/global actions and supported text operations | User capture consent and explicit Accessibility enablement; not equivalent to arbitrary key injection or all scrcpy controls |
+| Optional privileged deployment | Root/system-specific adapter only if explicitly required later | Not assumed or required for ordinary installation; separate support and authorization policy |
+
+Recommended layering: APK owns pairing, peer TLS connections, consent UX and
+session policy. The activated helper exposes only a narrowly scoped local IPC
+endpoint to its owning app; it must not expose the raw scrcpy control socket on
+the LAN. Authenticate app-helper IPC, validate lengths/actions, and reject other
+local apps. Prove actual IPC identity/token handling under Android UIDs/SELinux;
+do not assume a localhost port or an unprotected abstract Unix socket is private.
+Keep peer credentials in the app (Keystore where supported), not in the helper.
+
+B00 must compare practical activation options: a user-approved desktop ADB setup
+for older systems and user-approved wireless-debugging activation where
+supported. Android 11+ wireless-debugging pairing is a distinct trust ceremony
+from application peer pairing. Same-device activation is a feasibility question,
+not an assumed working path. Package/version the helper with the APK; verify its
+artifact provenance, detect death/upgrade/reboot, expire its local session secret,
+and explain when reactivation is needed. No always-available unattended service
+is promised after reboot or Android revokes capture/privileges.
+
+The public backend uses fresh capture consent where required, a correctly typed
+foreground service, and projection-stop handling. Resize/rebind the existing
+capture correctly on rotation; do not reuse one-shot consent tokens. Android
+14+ targeting rules explicitly require consent per projection session. [Android
+projection lifecycle](https://developer.android.com/about/versions/14/behavior-changes-14)
+
+Accessibility exposes gesture dispatch and certain global actions; it does not
+make every scrcpy key/pointer operation equivalent. Validate incremental drags,
+cancellation, text and each global action against real apps and supported API
+levels. Return typed unsupported/error results, never false success. [Accessibility
+API](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService)
+
+Public playback capture is Android 10+ and depends on recording permission,
+projection consent, matching user profile and the source app’s capture policy.
+Provide video-only fallback when unavailable; microphone is a separate opt-in,
+not a silent substitute for system audio. [Android playback capture](https://developer.android.com/media/platform/av-capture)
+
+### Required Android server runtime
+
+- Target state machine: disabled -> enabled/idle -> awaiting platform consent or
+  helper activation -> ready -> streaming -> suspended/error/stopped. Pairing can
+  exist while serving is disabled; grants never bypass platform setup.
+- Encode the local display through a MediaCodec surface, H.264 first; publish
+  config/keyframe/geometry epochs using the common protocol. Reuse validated
+  scrcpy encoder/recovery logic through backend interfaces, retaining notices.
+- Capability vector includes backend, API/limits, capture scope, audio support,
+  each supported control, codecs, maximum streams and duplex capacity. Revoke
+  capabilities dynamically when permission/helper/capture is lost.
+- Full-display control needs a trustworthy display-coordinate transform. If the
+  user chooses single-app projection and the public APIs cannot establish the
+  required screen mapping, advertise view-only; never inject guessed coordinates.
+- One capture/encoder per compatible stream profile; share encoded packets among
+  viewers. Bound resource use and reject unsupported extra profiles instead of
+  spawning unlimited encoders. Keep the source input path independent of media.
+- User-visible serving indicator with peer identity and local Stop/Revoke controls.
+  Serving can continue while another app is foreground under the allowed service
+  lifecycle; viewer blur does not automatically terminate unrelated serving.
+- Stop is authoritative: release input, invalidate sessions, stop capture/audio,
+  close channels, and clean up helper resources. Permission loss follows the same
+  cleanup path. Persist neither capture tokens nor pressed input.
+
+### Go application as an authenticated peer client
+
+Introduce a source-provider interface for connect/negotiate, packet streams,
+control, capabilities/status and close. Implement `LegacyAdbSource` using current
+behavior and `AndroidPeerSource` using the same protocol and identity model as
+Android controllers. Keep authentication distinct from ADB credentials.
+
+All Go frontends select a source through this interface; rendering and action
+semantics do not depend on whether the target was reached via ADB or peer TLS.
+Remove hidden peer-mode dependencies on local `adb` subprocesses, including
+volume/status polling, display discovery, screenshots and reset/control helpers;
+obtain them from the server or report capability absence. Peer mode must function
+with no ADB executable, USB device, or `ANDROID_SERIAL` configured.
+
+Specify additive CLI/config commands for pairing, listing/revoking peers and
+selecting a peer source in B04. Names are TBD, not existing flags. Preserve `-s`
+and all current modes/defaults; reject ambiguous ADB and peer source selection.
+Store keys with restricted permissions, redact pairing credentials and include
+machine-readable connection/error status for automation.
+
+In web/window mode the Go process is the authenticated controller acting for its
+local viewer(s). Enforce browser access/ownership and target grants; do not expose
+long-lived target credentials to JavaScript. If explicit downstream delegation is
+added, it must be a separate scoped grant. A Go bridge must not turn one trusted
+peer into an unbounded unauthenticated controller proxy.
 
 ### Host media subscriptions
 
@@ -213,8 +353,9 @@ binary layouts from stale comments; use serializer/parser fixtures.
 
 Required schema fields and behaviors:
 
-- Handshake: supported versions, client identity, session/channel binding,
-  authentication, capabilities, selected formats, limits and errors.
+- Handshake: supported versions, mutual peer identity, controller/target role,
+  target device ID, session/direction/channel binding, authentication, directional
+  grants, backend capabilities, selected formats, limits and errors.
 - Video: codec/profile/configuration, PTS units, sequence, keyframe/config flags,
   dimensions, stream generation, payload framing and maximum lengths.
 - Audio: encoded format/config or PCM sample format/rate/channels, PTS, sample
@@ -240,6 +381,44 @@ useful for browser requests but are not native-client authentication. Retain
 localhost compatibility; secure remote exposure needs an explicit configuration
 and migration story for old clients.
 
+### Mutual pairing, directional authorization and duplex behavior
+
+Use one interoperable pairing/authentication implementation contract for Go and
+Android. A QR/invitation may carry a short-lived high-entropy bootstrap secret,
+address and identity fingerprint. Manual short-code pairing needs a reviewed
+PAKE or equivalent MITM-resistant design, attempt limits and expiration; do not
+invent password crypto or trust an unauthenticated discovery response.
+
+Pairing establishes two stable identities, not unconditional two-way access.
+Present separate grants for A viewing/controlling B and B viewing/controlling A.
+An explicit mutual-allow flow can grant both. Store independently revocable
+view/control/audio/clipboard permissions per peer/direction. Each target enforces
+its grants and active controller lease even if the controller UI is compromised.
+New captures still satisfy Android consent rules. Reconnecting an authenticated
+peer does not revive revoked grants or bypass a required local consent step.
+
+Use established TLS mutual authentication or an equivalently reviewed binding
+of both identities. Rotate/revoke keys; require re-pair after identity change.
+Discovery (manual address first, optional NSD/mDNS later) finds endpoints, never
+establishes trust. Account for IP changes, local-network permissions, IPv4/IPv6,
+VPNs/AP isolation; Internet NAT traversal/relay is deferred. Do not open router
+ports automatically. Revocation must end live sessions as well as future access.
+
+Session IDs bind source, controller, direction, stream generation and channels.
+Control lease and pressed state are per target/session, not global to the app.
+Role reversal releases the previous lease/presses and opens the authorized reverse
+session. Simultaneous A->B and B->A need independent IDs, resource budgets and
+local emergency-stop access. Do not forward received input onward into another
+session. Android input provenance cannot be assumed trustworthy: while an inbound
+remote-control lease is active, suppress outgoing viewer input forwarding (or
+require an explicit local role handoff); concurrent viewing/capture can continue.
+Do not depend solely on flags that may be lost during OS injection. Remote viewer surfaces captured on the other device can create recursive
+video, and remote audio can feed back: default to role switching; make concurrent
+view/serve explicit, warn about recursive capture, prevent input relay, and mute
+or exclude received audio from capture where supported. If the backend cannot
+exclude it, disable one audio direction with a clear reason. Test these policies,
+not just the existence of two network sockets.
+
 Distinguish viewer disconnect from host/session termination. Preserve legacy
 `quit` behavior through compatibility mapping; make global termination explicit
 and authorized in the new protocol. Test `--window` last-viewer exit separately
@@ -249,14 +428,15 @@ from a host intentionally serving multiple persistent viewers.
 
 ### Project and lifecycle
 
-Create `android/` with a pinned Gradle wrapper, Android plugin/Kotlin versions,
+Create one dual-role application under `android/` with a pinned Gradle wrapper, Android plugin/Kotlin versions,
 compile/target/min SDKs, NDK and dependency versions selected against current
 official requirements at implementation time. Use Kotlin for session/UI/input
 and a small JNI module for Oboe. Start with ARM64 device and x86_64 emulator
 builds; add other ABIs only when the device inventory requires them.
 
-Use a session abstraction so host-connected transport and optional direct ADB can
-share rendering/input/audio. Keep network and codec work off the UI thread. UI
+Use separate controller-session and target-session abstractions so direct peer
+connections, the Go bridge and legacy activation mechanisms share contracts
+without coupling serving lifetime to the viewer Activity. Keep network and codec work off the UI thread. UI
 state is observable without per-frame recomposition or bitmap conversion. Handle
 foreground/background, process recreation, network changes, surface loss,
 orientation, IME insets, display cutouts, and focus loss. Persist connection
@@ -345,6 +525,10 @@ table is the initial audit inventory, not a claim of complete current parity.
 | Status | Source identity, geometry, stream availability, volume, client/performance stats |
 | Lifecycle | Connect/reconnect, ownership, close/quit, focus/background, host/source loss |
 | Flags | video/audio/control disabled; source codec/source selection and capture settings |
+| Peer roles | A controls B, B controls A, reverse grants, role reversal, concurrent serve/view |
+| Go sources | Legacy ADB and authenticated Android server through TUI/web/window, without ADB in peer mode |
+| Serving backends | Activated helper versus public APIs; honest per-action capability/consent states |
+| Peer lifecycle | Discovery/pair/revoke, helper restart, projection stop, lease cleanup, local emergency stop |
 
 Parity means equivalent actions and device effects, not identical platform UI.
 Record intentional exceptions: TUI screenshots may be PPM while graphical
@@ -375,6 +559,10 @@ P2 means shared capability or polish after baseline agreement.
 | G12 | P2 | Screenshot formats and overlays differ; UI availability differs | Content/no-frame/save tests, accepted format exceptions and accessible action equivalents |
 | G13 | P1 | Go/JS action maps duplicated; some dispatch paths duplicated | Generated maps from schema plus independent golden expectations; drift check in CI |
 | G14 | P1 | Browser multi-finger suppression differs from potential native multitouch | Baseline gesture parity first; negotiate/test true multitouch across capable clients if enabled |
+| G15 | P0 | New requirement: APK target cannot inherit scrcpy shell privileges by bundling code | B00/B02/B03 evidence; separate full-parity and public-backend capability matrices |
+| G16 | P0 | New requirement: paired peers can have asymmetric permissions and independent directions | Pair/grant/revoke and duplex lease tests; no reverse access without its grant |
+| G17 | P1 | Go status/control currently include ADB-specific operations | B04 runs every Go frontend against APK target with no ADB; capabilities/status replace shell polling |
+| G18 | P0 | Concurrent capture/view/control introduces possible feedback and lifecycle coupling | B05 verifies input non-relay, audio policy, local stop, resource bounds and independent direction cleanup |
 
 ### Process for each gap
 
@@ -390,22 +578,31 @@ P2 means shared capability or polish after baseline agreement.
 
 ## 8. Milestones, dependencies, and acceptance criteria
 
-The mutable task ledger lives in `.agent/HANDOFF.md`. All required A tasks below
-are initially NOT_STARTED; optional X01 is DEFERRED. Each milestone may require
-several small reviewed commits.
+The mutable task ledger lives in `.agent/HANDOFF.md`. All required A and B tasks
+below are initially NOT_STARTED. X01 is SUPERSEDED by B00–B05, not completed or
+optional. IDs A00–A09 remain stable so existing references survive; new B tasks
+are required dependencies in the revised graph, not a later optional project.
+Each milestone may require several small reviewed commits.
+
+Recommended execution order: A00 -> B00 -> A01 -> A02/A03 -> A04 -> A05;
+then B01 -> B02/B03/B04 alongside A06 -> B05 -> A07 -> A08 -> A09. Only run
+independent tasks concurrently when current delegation policy and path ownership
+permit it. A05's host-connected slice is an integration step, not the product
+completion criterion.
 
 ### A00 — Reconcile state and establish validation inventory
 
 Dependencies: none. Inspect current work, instructions, CI, and baseline tests.
 Record source/receiver devices, OS versions, network topology and available
-hardware without operating devices absent authorization. Finalize topology/min
-SDK defaults or record unanswered questions. Add a reproducible measurement
+hardware without operating devices absent authorization. Record the required
+dual-role topology and finalize min-SDK/backend validation inventory. Add a reproducible measurement
 recipe. Exit: reconciled ledger, baseline checks and explicit unknowns; no
 invented performance numbers.
 
 ### A01 — Specify parity and reproduce gaps
 
-Depends on A00. Build feature-by-mode matrix and gap reproductions G01–G14.
+Depends on A00/B00. Build frontend-by-target-backend matrix and gap reproductions
+G01–G18; record full-parity versus public-backend capability limits.
 Decide action/local ownership, input policies, disabled-capability semantics,
 disconnect/quit and platform exceptions. Define test fixtures before fixing
 behavior. Exit: each baseline action has a contract, status and verification
@@ -431,9 +628,9 @@ or other clients; bounds, ownership, late join and rotation tests pass.
 
 ### A04 — Authenticated versioned transport
 
-Depends on A02/A03 contracts. Implement negotiated channels, bounded parsers,
-pairing/trust/credentials, timeouts, ownership, reconnect and capability/error
-reporting. Specify planned CLI/config options before adding them; none of the
+Depends on A02/A03 and B00 contracts. Implement negotiated channels, bounded parsers,
+pairing/trust/credentials, directional grants, timeouts, ownership, reconnect and
+capability/error reporting for Android and Go roles. Specify planned CLI/config options before adding them; none of the
 proposed new options exists at baseline. Exit: old web clients retain supported
 behavior; new test client handles media/control; malformed/unauthorized clients
 are rejected; slow/disconnected channels clean up; remote setup is documented.
@@ -455,7 +652,7 @@ break video/control.
 
 ### A07 — Native controls and full baseline parity
 
-Depends on A02/A04/A05; audio rows depend on A06. Implement toolbar, keyboard/IME,
+Depends on A02/A04/A05/B05; audio rows depend on A06. Implement toolbar, keyboard/IME,
 mouse/touch, local screenshot, status, grab/ownership and lifecycle. Exit: all
 baseline ledger rows pass or have evidence-backed accepted platform exceptions;
 input integrity cases pass; shared enhancements are implemented in existing
@@ -463,7 +660,8 @@ capable clients too. Unavailable physical tests remain release blockers.
 
 ### A08 — Performance qualification and existing-browser fast path
 
-Depends on A05–A07. Measure and optimize before/after; retain compatibility
+Depends on A05–A07 and B01–B05. Measure direct peers, Go peer and legacy paths
+separately; optimize before/after; retain compatibility
 policies. Add negotiated compressed browser decode where current browser APIs,
 secure contexts and hardware support allow; keep JPEG fallback and test it.
 Verify H.264 framing/config differences for the browser decoder. Consider
@@ -474,22 +672,119 @@ transport/alternate codecs require a separate evidence-backed decision.
 
 ### A09 — CI, packaging, and release qualification
 
-Depends on A02–A08. Pin Node in CI, retain host tests, add Android unit/lint/build
+Depends on A02–A08 and B00–B05. Pin Node in CI, retain host tests, add Android unit/lint/build
 and emulator smoke jobs. Store device qualification reports; signed release APK
 and update install test; notices/license audit for embedded/native dependencies.
 Do not commit signing keys or publish without required authorization. Exit:
 installable reproducible artifact with checksum/build revision, compatibility
 docs, rollback guidance, complete release gate and known-limitations list.
 
-### X01 — Optional direct Android-to-Android provider
+README and screenshot completion is a user-required part of A09, not optional
+follow-up. Once the feature is implemented and qualified:
 
-State: DEFERRED pending topology requirement. Reuse the same client media/input
-interfaces, adding Android-side ADB authentication/pairing, vendored server
-deployment/versioning, process/tunnel lifecycle and discovery. Validate wireless
-debugging and USB-host permission/transport separately against official APIs and
-real devices. No assumption of root or silent ADB authorization. Exit: hostless
-session meets the same parity/performance criteria and cleans up sessions/keys;
-record whether removal of the host actually improves end-to-end latency.
+1. Capture real screenshots from the release-candidate build: Android peer list/
+   pairing (with codes and identifiers concealed), server-ready/active status and
+   local Stop, Android controlling another Android in each role, and Go TUI,
+   web and window controlling an APK server. Include backend/permission status
+   and representative unsupported-capability UI when needed to explain setup.
+   Use a controlled non-sensitive test screen; do not publish other apps' private
+   content, credentials, addresses, notifications or clipboard contents. Mockups
+   and emulator screenshots must not be presented as physical-device evidence.
+2. Store optimized images in `docs/images/` with descriptive stable names and alt
+   text. Keep a small capture manifest under `docs/validation/` with filename,
+   build SHA, device/API/backend, topology and capture method. Use native capture
+   tools/available screenshot workflow; do not fabricate screenshots in advance.
+   Capture is a documentation activity distinct from implementing the client’s
+   own screenshot action. Review actual rendered images and README rendering.
+3. Rewrite README around the shipped dual-role product: install/update APK and Go,
+   platform/backend support, pairing and directional grants, activation/consent,
+   both control directions, Go peer selection in all modes, legacy ADB usage,
+   capabilities/limits, audio/latency, local stop/revocation, troubleshooting and
+   current architecture. Include exact tested commands and useful screenshots;
+   remove the roadmap-only statement that no Android app ships once it does.
+4. Audit the entire README against the release revision. Replace stale diagrams,
+   obsolete flags/defaults/setup paths, JPEG-only architecture claims when no
+   longer universal, outdated performance claims without current evidence, and
+   superseded screenshots. Preserve still-valid legacy ADB instructions and
+   explain compatibility paths; do not remove useful supported modes merely
+   because the default changed. Move useful historical rationale to clearly
+   labeled history if needed; keep resumability/review evidence in the plan and
+   checkpoint instead of exposing stale product instructions to users.
+5. Validate every documented quickstart on the declared environments, check local
+   links/image paths and screenshot currency, and review the documentation diff
+   alongside the release artifact. A09 is not VERIFIED while this work is pending.
+
+### B00 — Serving privilege/capability feasibility and architecture gate
+
+Depends on A00. Inspect scrcpy source/launch identity and current official APIs;
+run authorized physical spikes for public capture/control and helper activation
+on nominated API/vendor versions. Prove app-helper IPC isolation, reboot/death
+behavior, continuous gestures, keyboard, capture scope, audio and latency.
+Define `CaptureBackend`, `InputBackend`, `AudioCaptureBackend`, `SourceProvider`
+and capability/error contracts. Pin a reproducible helper build/provenance path.
+Exit: evidence-backed backend matrix and selected activation procedure; ordinary
+APK limitations and full-parity requirements are explicit. If shell activation
+is infeasible on target hardware, record a blocker for full parity and revise
+supported hardware or obtain a product decision; do not claim public APIs solve
+it. No root path is implemented merely to escape this gate.
+
+### B01 — Android target runtime and authenticated endpoint
+
+Depends on A04/A05 and B00. Add server role, target lifecycle/foreground service,
+peer store, directional grants, discovery/manual address, ownership and local
+stop UX. Start with deterministic media/control fixtures behind backend APIs.
+Exit: same APK can serve and view; Go/Android test controllers authenticate to
+its real network endpoint; denial/revocation/channel binding/cleanup tests pass;
+fixture-only capability claims are labeled and not mistaken for device control.
+
+### B02 — Scrcpy-derived activated serving backend
+
+Depends on B00/B01. Reuse/version the current server's capture, encoder and
+control logic through a scoped helper bridge. Implement explicit supported
+activation, liveness/upgrade/reboot recovery and authenticated local IPC; no raw
+privileged listener on the LAN. Exit: physical capture/control/audio validation
+against full-parity ledger from Android and Go controllers; helper privilege
+loss releases input and updates capabilities; artifact matches reviewed source.
+
+### B03 — Ordinary-install serving backend
+
+Depends on B00/B01. Implement MediaProjection surface encoding, projection consent
+and foreground lifecycle; Accessibility control where user-enabled; supported
+playback capture. Ship in the same APK with explicit backend selection and
+capabilities. Exit: standard non-root install serves supported functions without
+ADB activation; permission denial/revocation and single-app capture mapping are
+handled; unsupported key/power/gesture/audio features produce accurate errors.
+Full scrcpy parity is NOT declared on the strength of this limited backend.
+
+### B04 — Go authenticated Android source provider
+
+Depends on A02/A03/A04 and B01; physical exit checks also require B02/B03.
+Add pairing/peer selection/config, identity store,
+`AndroidPeerSource`, and source-independent status/volume/action dispatch. Use
+B01 fixtures before B02/B03 physical servers become available. Retain
+`LegacyAdbSource`, current CLI defaults and all display modes. Exit: TUI, web and
+window each view/control an authenticated Android target with no installed ADB;
+legacy ADB tests still pass; Go reconnect/revoke/version/capability behavior
+matches Android; web viewers cannot bypass target grants or expose peer keys.
+
+### B05 — Bidirectional interoperability and resource qualification
+
+Depends on B02/B03/B04, A05/A06 and A02 input contract. Use scripted/native test input adapters before the full
+A07 UI is complete, avoiding a circular UI/qualification dependency. Use the same signed APK
+on A and B. Validate A controls B, B controls A, role reversal without stuck
+input, and explicitly enabled concurrent serve/view with measured encoder/decoder
+limits. Add mixed Go/Android viewers, per-target leases, one-way grants, live
+revocation, device/helper restart, source scope changes and version skew.
+Exit: route/backend matrix passes, recursive video/audio policy is tested, local
+stop remains usable, one failed direction leaves the other correctly scoped,
+and resource-limited devices reject unsupported duplex operation honestly.
+
+### X01 — Superseded original hostless extension
+
+State: SUPERSEDED by B00–B05 following the user's scope revision. Keep this ID for
+history; do not resume it as optional ADB-only Android control or mark it done.
+Direct Android peering now uses the APK server protocol. ADB is a backend
+activation/legacy mechanism, not a required per-session desktop relay.
 
 ## 9. Test and performance strategy
 
@@ -528,7 +823,19 @@ Validate nominated source and receiver Android versions/vendors; lower-end and
 high-refresh receivers; Chromium and Firefox web/window where supported; desktop
 and Android browser; physical keyboard/mouse and common IMEs. Cover good LAN,
 congested Wi-Fi, added delay/loss, disconnect/rejoin, USB source transport, and
-multiple viewers. Record actual coverage; do not claim every Android device.
+multiple viewers. Test each direction and role on BOTH Android devices, each
+Go frontend against each Android backend, and legacy ADB after the same changes.
+Record actual coverage; do not claim every Android device.
+
+Required route/backend matrix: Android->Android helper; Android->Android public;
+Go TUI/web/window->Android helper/public; Android->Go bridge->ADB source; and
+unchanged Go TUI/web/window->ADB source. Repeat with A/B roles reversed and with
+asymmetric grants. Duplex is a separate matrix dimension, including unavailable
+hardware resources, recursive capture, audio feedback and local emergency stop.
+Test pairing expiration/MITM protection, identity mismatch, revoke while pressed,
+permission loss, helper death, background serving, no-ADB Go installations and
+app/helper/protocol version mismatch. Prototype fixtures cannot satisfy these
+physical route exit criteria.
 
 Test Unicode/emoji/CJK, IME deletion/composition, source media mute, screenshots,
 OS-reserved keys, protected content behavior, output audio routes and focus,
@@ -566,11 +873,13 @@ Names below are proposed, not existing packages or mandatory mass migrations:
 | Path | Responsibility |
 | --- | --- |
 | `protocol/` | Versioned schema, action catalog, independent golden fixtures, generation tooling |
-| `internal/session/` | Session state, controller ownership, stream capability negotiation |
+| `internal/session/` | Source-provider interfaces, directional sessions, controller ownership and capabilities |
 | `internal/media/` | Packet metadata, subscriptions, bounds, generation/config recovery |
-| `internal/remote/` | Authenticated channels and native/browser protocol adapters |
-| `android/` | Native receiving application and pinned Android build |
-| `docs/validation/` | Reproducible test/benchmark recipes and non-sensitive results |
+| `internal/remote/` | Go peer client/bridge, identity/grants, authenticated channels and protocol adapters |
+| `android/` | One dual-role APK; controller, target service, pairing, shared protocol, public/activated backend modules |
+| `android/` helper build module (name TBD) | Reproducible scrcpy-derived helper artifact and app-helper IPC; exact path set in B00 |
+| `docs/validation/` | Reproducible test/benchmark recipes, screenshot capture manifest and non-sensitive results |
+| `docs/images/` | Reviewed screenshots of the implemented release-candidate product |
 | `.agent/HANDOFF.md` | Current task state, claims, evidence and next action |
 
 Keep `stream.go`, `web.go`, `webinput.go`, `appkeys.go`, `control.go`, `app.go`,
@@ -581,9 +890,15 @@ source-to-embedded-artifact provenance and protocol compatibility checks.
 
 ## 11. Completion and release gate
 
-- All required A tasks satisfy their exit criteria; G rows are resolved with
+- All required A and B tasks satisfy their exit criteria; G rows are resolved with
   evidence or explicitly accepted platform exceptions, not hidden deferrals.
-- APK installs and upgrades on the declared physical support matrix.
+- The same APK installs/upgrades and serves/controls on the declared physical
+  support matrix. Direct A->B and B->A, role switching and negotiated duplex are
+  qualified; activated full-parity and public limited-capability results are
+  separate. Merely embedding server code does not satisfy serving acceptance.
+- Maintained Go TUI/web/window authenticate to each APK backend without ADB;
+  legacy Go ADB modes still pass. Directional grants and revocation work across
+  Android and Go implementations; no mandatory Go relay for Android peering.
 - Existing TUI/web/window modes retain agreed behavior; shared fixes pass their
   conformance scenarios and disabled-capability cases.
 - Latency/thermal/soak results are reproducible, with measured limitations.
@@ -594,6 +909,9 @@ source-to-embedded-artifact provenance and protocol compatibility checks.
   that revision or explain any subsequent nonfunctional delta.
 - License notices, signing provenance, artifact checksum and installation,
   configuration, troubleshooting and rollback documentation are available.
+- Actual release-candidate screenshots are reviewed, embedded in README and tied
+  to build/device/backend evidence. README quickstarts match the shipped product;
+  obsolete guidance, diagrams, claims and images have been replaced or removed.
 - Independent review, scoped commits and publication status are recorded.
 
 ## 12. Reference sources
@@ -609,3 +927,14 @@ versions or evidence that a specific device supports a feature.
 - Source protocol authority: this repository's `protocol.go`, `control.go`, and
   `third_party/scrcpy-server-src/src/main/java/com/genymobile/scrcpy/` at the
   tested revision, together with independently derived wire fixtures.
+
+- [MediaProjection consent/session rules](https://developer.android.com/about/versions/14/behavior-changes-14)
+- [Foreground service types/lifecycle](https://developer.android.com/develop/background-work/services/fgs/service-types)
+- [AccessibilityService gesture/global actions](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService)
+- [Audio playback capture requirements](https://developer.android.com/media/platform/av-capture)
+- [ADB wireless debugging and authorization](https://developer.android.com/tools/adb#wireless)
+- [Upstream scrcpy architecture](https://github.com/Genymobile/scrcpy/blob/master/doc/develop.md)
+
+The server feasibility notes combine these platform references with the local
+`adb.go: startServer` and vendored `wrappers/InputManager.java`. The proposed
+activation and duplex designs remain hypotheses until B00/B05 physical checks.
