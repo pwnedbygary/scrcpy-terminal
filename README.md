@@ -448,6 +448,14 @@ At 480x1080 the mjpeg encode costs ~1 ms/frame single-threaded and lands around
 costs proportionally more; the default 1280 keeps the canvas at the video's own
 size, which is what the display actually shows.
 
+## Development roadmap
+
+The [native Android client and cross-mode parity plan](docs/ANDROID_CLIENT_PLAN.md)
+describes the proposed architecture, existing-client gap closure, milestones,
+acceptance tests, and release criteria. Developers and LLMs should start with the
+[current checkpoint](.agent/HANDOFF.md) and reconcile it against Git and in-flight
+work before implementing the next task. This is a plan, not a shipped Android client.
+
 ## Protocol notes (from scrcpy v4.1 source)
 
 - Sockets, in order: video, audio, control (any may be absent).
