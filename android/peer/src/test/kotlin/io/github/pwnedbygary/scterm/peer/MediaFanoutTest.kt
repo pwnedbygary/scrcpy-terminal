@@ -161,8 +161,9 @@ class MediaFanoutTest {
         f.onItem(packet(34, key = false))
 
         slow.stalled = false
-        eventually(message = "slow viewer drained") {
-            slow.items().second.media().lastOrNull()?.ptsUs == 34L
+        // closeAll() discards anything unwritten, so both viewers must have drained first.
+        eventually(message = "both viewers drained") {
+            slow.items().second.media().lastOrNull()?.ptsUs == 34L && healthy.items().second.media().lastOrNull()?.ptsUs == 34L
         }
         f.closeAll()
 
