@@ -117,11 +117,10 @@ func (p position) marshal(dst []byte) {
 // serializeControlMsg returns the wire bytes for a control message.
 // The byte layouts mirror sc_control_msg_serialize() exactly.
 func serializeControlMsg(msg []byte, mtype byte) []byte {
-	out := make([]byte, 256)
+	out := make([]byte, controlMsgSize(msg, mtype))
 	out[0] = mtype
 	switch mtype {
 	case ctrlInjectKeycode:
-		out = out[:14]
 		out[1] = msg[0]                                                            // action
 		binary.BigEndian.PutUint32(out[2:6], binary.BigEndian.Uint32(msg[1:5]))    // keycode
 		binary.BigEndian.PutUint32(out[6:10], binary.BigEndian.Uint32(msg[5:9]))   // repeat
@@ -129,11 +128,9 @@ func serializeControlMsg(msg []byte, mtype byte) []byte {
 	case ctrlInjectText:
 		// payload = [pad(1)][u32 len][utf8] -> wire = [type][u32 len][utf8]
 		text := msg[5:]
-		out = out[:1+4+len(text)]
 		binary.BigEndian.PutUint32(out[1:5], uint32(len(text)))
 		copy(out[5:], text)
 	case ctrlInjectTouch:
-		out = out[:32]
 		out[1] = msg[0]                                                          // action
 		binary.BigEndian.PutUint64(out[2:10], binary.BigEndian.Uint64(msg[1:9])) // pointer_id
 		copy(out[10:22], msg[9:21])                                              // position (x,y,w,h already BE)
@@ -141,36 +138,52 @@ func serializeControlMsg(msg []byte, mtype byte) []byte {
 		copy(out[24:28], msg[23:27])                                             // action_button
 		copy(out[28:32], msg[27:31])                                             // buttons
 	case ctrlInjectScroll:
-		out = out[:21]
 		copy(out[1:13], msg[0:12])   // position
 		copy(out[13:15], msg[12:14]) // hscroll i16fp
 		copy(out[15:17], msg[14:16]) // vscroll i16fp
 		copy(out[17:21], msg[16:20]) // buttons
 	case ctrlBackOrScreenOn:
-		out = out[:2]
 		out[1] = msg[0]
 	case ctrlSetClipboard:
 		// msg = [seq8][paste1][pad2] text
-		out = out[:1+8+1+4]
 		binary.BigEndian.PutUint64(out[1:9], binary.BigEndian.Uint64(msg[0:8]))
 		out[9] = msg[8]
 		text := msg[11:]
 		binary.BigEndian.PutUint32(out[10:14], uint32(len(text)))
-		out = append(out, text...)
+		copy(out[14:], text)
 	case ctrlSetDisplayPower:
-		out = out[:2]
 		out[1] = msg[0]
-	case ctrlExpandNotif, ctrlExpandSettings, ctrlCollapsePanels,
-		ctrlRotateDevice, ctrlResetVideo:
-		out = out[:1]
 	case ctrlResizeDisplay:
-		out = out[:5]
 		binary.BigEndian.PutUint16(out[1:3], binary.BigEndian.Uint16(msg[0:2]))
 		binary.BigEndian.PutUint16(out[3:5], binary.BigEndian.Uint16(msg[2:4]))
-	default:
-		panic("unsupported control message type")
 	}
 	return out
+}
+
+// controlMsgSize is each message's exact wire size. Sizing the buffer per
+// message means no layout can outgrow it: a shared 256-byte scratch used to
+// make any injected text over 251 bytes panic.
+func controlMsgSize(msg []byte, mtype byte) int {
+	switch mtype {
+	case ctrlInjectKeycode:
+		return 14
+	case ctrlInjectText:
+		return 1 + 4 + len(msg) - 5
+	case ctrlInjectTouch:
+		return 32
+	case ctrlInjectScroll:
+		return 21
+	case ctrlBackOrScreenOn, ctrlSetDisplayPower:
+		return 2
+	case ctrlSetClipboard:
+		return 1 + 8 + 1 + 4 + len(msg) - 11
+	case ctrlResizeDisplay:
+		return 5
+	case ctrlExpandNotif, ctrlExpandSettings, ctrlCollapsePanels,
+		ctrlRotateDevice, ctrlResetVideo:
+		return 1
+	}
+	panic("unsupported control message type")
 }
 
 // helpers offered at a higher level:
@@ -198,12 +211,21 @@ func touchMsg(action byte, pointerID uint64, pos position, pressure uint16, acti
 func scrollMsg(pos position, hscroll, vscroll float32, buttons uint32) []byte {
 	m := make([]byte, 20)
 	pos.marshal(m[0:12])
-	hs := int16(clampF32(hscroll/16, -1, 1) * 32768)
-	vs := int16(clampF32(vscroll/16, -1, 1) * 32768)
-	binary.BigEndian.PutUint16(m[12:14], uint16(hs))
-	binary.BigEndian.PutUint16(m[14:16], uint16(vs))
+	binary.BigEndian.PutUint16(m[12:14], uint16(scrollToI16fp(hscroll)))
+	binary.BigEndian.PutUint16(m[14:16], uint16(scrollToI16fp(vscroll)))
 	binary.BigEndian.PutUint32(m[16:20], buttons)
 	return m
+}
+
+// scrollToI16fp encodes wheel notches ([-16, 16]) as the server's i16 fixed
+// point of notches/16, like sc_float_to_i16fp: +16 saturates to 0x7fff. A
+// plain int16(1.0*32768) wraps to -32768 and scrolls the wrong way.
+func scrollToI16fp(notches float32) int16 {
+	i := int32(clampF32(notches/16, -1, 1) * 32768)
+	if i >= 0x7fff {
+		i = 0x7fff
+	}
+	return int16(i)
 }
 
 func clampF32(v, lo, hi float32) float32 {

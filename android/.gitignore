@@ -1,0 +1,16 @@
+.gradle/
+.kotlin/
+build/
+local.properties
+*.iml
+.idea/
+captures/
+.cxx/
+.externalNativeBuild/
+# Signing material never belongs in the repository.
+*.jks
+*.keystore
+/keystore.properties
+
+# Python bytecode from android/devicetest scripts
+__pycache__/

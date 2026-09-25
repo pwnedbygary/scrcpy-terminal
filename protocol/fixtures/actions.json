@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "about": "One definition of the app-level actions shared by the TUI, web/window player and Android controller (appkeys.go, web/player.js, android DeviceAction/LocalAction). 'mute' is KEYCODE_VOLUME_MUTE (164): KEYCODE_MUTE (91) toggles the microphone.",
+  "device": [
+    {"id": "home", "mnemonic": "h", "fkey": 1, "keycode": 3},
+    {"id": "menu", "fkey": 2, "keycode": 82},
+    {"id": "appswitch", "mnemonic": "t", "fkey": 3, "keycode": 187},
+    {"id": "power", "mnemonic": "p", "fkey": 4, "keycode": 26},
+    {"id": "voldown", "mnemonic": "d", "fkey": 5, "keycode": 25},
+    {"id": "volup", "mnemonic": "u", "fkey": 6, "keycode": 24},
+    {"id": "mute", "fkey": 7, "keycode": 164},
+    {"id": "rotate", "mnemonic": "r", "fkey": 8, "control": ["rotate_device"]},
+    {"id": "notif", "mnemonic": "n", "fkey": 9, "control": ["expand_notification_panel"]},
+    {"id": "settings", "mnemonic": "e", "fkey": 10, "control": ["expand_settings_panel"]},
+    {"id": "collapse", "mnemonic": "c", "fkey": 11, "control": ["collapse_panels"]},
+    {"id": "back", "mnemonic": "b", "control": ["back_or_screen_on", "back_or_screen_on"]},
+    {"id": "resetvideo", "mnemonic": "k", "control": ["reset_video"]}
+  ],
+  "local": [
+    {"id": "grab", "mnemonic": "g", "fkey": 12},
+    {"id": "keyboard", "mnemonic": "i"},
+    {"id": "screenshot", "mnemonic": "s"},
+    {"id": "quit", "mnemonic": "q"},
+    {"id": "toolbar", "mnemonic": "/"}
+  ]
+}

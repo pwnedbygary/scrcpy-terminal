@@ -41,9 +41,17 @@ type config struct {
 	webAddr    string // interface to bind (default 127.0.0.1)
 	webQuality int    // mjpeg quality 2..31, lower = better (default 5)
 	windowSize string // WxH for --window (default: sized to the device)
+
+	// peer mode: a paired scterm device (the Android app) over the network
+	usePeer   bool   // --peer was given, even empty
+	peerQuery string // its name or identity; "" = the only paired device
+	takeover  bool   // take control on connect even if another device has it
 }
 
 func main() {
+	if runPeerCommand(os.Args[1:]) {
+		return
+	}
 	cfg := config{
 		video:           true,
 		audio:           true,
@@ -73,21 +81,30 @@ func main() {
 		fatal(fmt.Errorf("--web/--window and --no-tui are mutually exclusive"))
 	}
 
-	serial, err := findDevice(cfg.serial)
-	if err != nil {
-		fatal(err)
-	}
-
 	// Show the version in the status line (useful for bug reports).
 	logOnce(fmt.Sprintf("scterm %s\n", version))
 
-	sess, err := newSession(serial)
-	if err != nil {
-		fatal(err)
-	}
-	if err := sess.start(cfg.video, cfg.audio, cfg.control,
-		serverParams(cfg.video, cfg.audio, cfg.control, cfg)); err != nil {
-		fatal(fmt.Errorf("start: %w", err))
+	var sess *session
+	if cfg.usePeer {
+		s, err := newPeerSession(cfg.peerQuery, cfg)
+		if err != nil {
+			fatal(err)
+		}
+		sess = s
+	} else {
+		serial, err := findDevice(cfg.serial)
+		if err != nil {
+			fatal(err)
+		}
+		s, err := newSession(serial)
+		if err != nil {
+			fatal(err)
+		}
+		if err := s.start(cfg.video, cfg.audio, cfg.control,
+			serverParams(cfg.video, cfg.audio, cfg.control, cfg)); err != nil {
+			fatal(fmt.Errorf("start: %w", err))
+		}
+		sess = s
 	}
 	defer sess.stop()
 
@@ -96,11 +113,17 @@ func main() {
 	cleanupStaleStreams()
 
 	app := newApp(sess, cfg)
-	if err := app.run(); err != nil {
-		app.shutdown()
+	err := app.run()
+	app.shutdown()
+	// A peer target says why it ended a session (revoked, serving stopped, ...).
+	if sess.peer != nil {
+		if reason := sess.peer.Reason(); reason != "" && reason != "closed" {
+			fmt.Fprintf(os.Stderr, "scterm: %s ended the session: %s\n", sess.deviceName, reason)
+		}
+	}
+	if err != nil {
 		fatal(err)
 	}
-	app.shutdown()
 }
 
 func fatal(err error) {

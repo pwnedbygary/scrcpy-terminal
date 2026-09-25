@@ -13,6 +13,14 @@ scope and optional hostless X01. No implementation completion is implied. The
 actual development branch is `codex/android-client`; do not rename it to the
 user's shorthand `android-client`, switch to main, or assume main is unchanged.
 
+Design revision 3 (2026-09-24), made while implementation started on the
+user's instruction to begin the native app and to push back where the plan
+could be better: see [section 2a](#2a-design-revisions-adopted-2026-09-24).
+The peer protocol is now pinned in [PEER_PROTOCOL.md](PEER_PROTOCOL.md), and
+the first Android implementation lives under `android/`. Host tests pass; no
+physical device has run it yet, so every device-behavior exit criterion
+remains open.
+
 ## 1. Start here: instructions for the next developer or LLM
 
 Read this document, [the current checkpoint](../.agent/HANDOFF.md), and all
@@ -124,10 +132,10 @@ necessary, and recover publication from Git instead of preclaiming success.
 | Decision | Proposed default | Revisit when |
 | --- | --- | --- |
 | Topology (user requirement) | Symmetric Android peers; Go is an additional authenticated controller/bridge, not a required broker | Only a new user instruction changes this |
-| APK stack | Kotlin UI/session/input, MediaCodec + SurfaceView, Oboe JNI audio | Device measurements justify a narrower alternative |
+| APK stack | Kotlin UI/session/input, MediaCodec + SurfaceView; audio via low-latency AudioTrack (rev 3; Oboe only if measured need) | Device measurements justify a narrower alternative |
 | Minimum app / serving capabilities | Propose API 27 install/receive floor; each serving backend has its own capability/API matrix; public playback capture starts at API 29 | B00 device evidence finalizes supported roles per OS |
 | Video | Forward original H.264; keep JPEG compatibility | Device codec/transport measurements justify another codec |
-| Initial transport | Separate TLS WebSockets for control, video, audio | Packet-loss measurements justify datagram transport |
+| Initial transport | Separate mutual-TLS TCP connections for control, video, audio carrying scrcpy v4.1 framing (rev 3); WebSockets stay for browsers | Packet-loss measurements justify datagram transport |
 | Input compatibility | Existing gestures retained; explicit immediate-input policy | Shared UX decision supersedes the compatibility policy |
 | Control ownership | One active controller, multiple viewers, explicit takeover | A tested multi-controller requirement is added |
 | Background behavior | Viewer releases input on blur; active target serving uses user-visible lifecycle/foreground service as required | OS restrictions and explicit serving policy |
@@ -138,6 +146,72 @@ These defaults are recommendations, not recorded user approval of every product
 detail. Continue independent implementation using reversible defaults; clarify
 only decisions that materially block work. Do not invent benchmark hardware,
 signing keys, SDK versions, or results.
+
+### 2a. Design revisions adopted 2026-09-24
+
+Adopted while starting implementation. Each replaces the plan text it names;
+the rest of the plan still applies. Evidence: `android/` host tests and
+[PEER_PROTOCOL.md](PEER_PROTOCOL.md).
+
+1. **Peer payload = scrcpy v4.1 framing, unchanged** (replaces "introduce a
+   negotiated protocol … pin an actual schema" in section 5 as a new media and
+   input schema). The vendored server, the Go client and the Android code all
+   already speak it, and it already covers key down/up/repeat/meta, multi-pointer
+   touch with pressure and buttons, scroll, text, clipboard with acks,
+   geometry epochs (session packets plus the screen size carried by every
+   positional event) and config/keyframe flags. v1 adds only an authenticated
+   envelope: a JSON handshake per connection and `0xFE` envelope frames on the
+   control channel for lease, errors, status, heartbeat and bye. Consequence:
+   the Go `AndroidPeerSource` (B04) is "TLS dial plus handshake, then the
+   existing demux", and the Android helper backend forwards the vendored
+   server's streams after validation instead of translating them.
+2. **Native transport = mutual TLS over TCP, one connection per channel**
+   (replaces TLS WebSockets). WebSocket framing buys nothing between native
+   peers; separate connections keep scrcpy's control/video isolation. Browser
+   clients keep the Go web mode's WebSocket protocol.
+3. **Pairing without a PAKE** (replaces "manual short-code pairing needs a
+   reviewed PAKE"). Invitations carry an 80-bit single-use secret (10 minutes,
+   5 attempts) typed as 16 base32 characters or shared as a link; both sides
+   prove it with HMAC-SHA256 bound to both TLS certificates' SPKI hashes. No
+   low-entropy short codes exist, so no password-authenticated key exchange is
+   needed. Vectors from an independent implementation: `protocol/fixtures/pairing.json`.
+4. **Grants chosen at invitation time** (refines "present separate grants").
+   The target picks view/audio/control/clipboard when creating the invitation
+   and can change or revoke them later; changes end live sessions. The
+   redeeming controller may separately allow the reverse direction.
+5. **Activated helper = the vendored server compiled into the APK** (resolves
+   the "helper build module (name TBD)" row in section 10): `:scrcpy-server`
+   compiles `third_party/scrcpy-server-src` without edits, so
+   `adb shell 'CLASSPATH=<apk> app_process / com.genymobile.scrcpy.Server 4.1 …'`
+   runs the reviewed source with shell identity and no separate push. The
+   helper connects back in scrcpy's reverse mode to a random abstract socket
+   name; the app accepts only SO_PEERCRED UID 2000 (shell) or 0. Open B00
+   question: whether SELinux permits shell-to-app abstract sockets on each
+   supported release; fall back to loopback TCP plus a token if not.
+6. **Audio output = AudioTrack in low-latency mode first** (replaces Oboe
+   JNI). Capture-side buffering and the network jitter budget dominate; the
+   Java path avoids an NDK module until measurements show the output path
+   matters. Queued audio is capped at 80 ms.
+7. **Remote "end session" cannot turn serving off.** From the lease holder it
+   disconnects every viewer (legacy `quit`); only the local user stops
+   serving (notification Stop, app button).
+8. **Backends refuse per message.** Capabilities list control types, and
+   `TargetBackend.sendControl` returns false for a message it cannot perform
+   (a key with no accessibility equivalent), which becomes an `unsupported`
+   error: no false success, no silent drop.
+9. **Execution order.** Because of item 1, the Android foundation proceeded
+   alongside A02/A03/A04 instead of after them. Media fanout with keyframe
+   resync, the input lease, stuck-input release and grant enforcement live in
+   `android/peer` (pure Kotlin, JVM-tested); the Go host still needs A03 for
+   its own bridge role.
+10. **G09 decided**: the "mute" action sends `KEYCODE_VOLUME_MUTE` (164);
+    `KEYCODE_MUTE` (91) is the microphone mute. Applied to Go, the shared
+    catalog (`protocol/fixtures/actions.json`) and Android; still needs a
+    physical confirmation run.
+11. **Multitouch (G14)**: the Android controller forwards real pointer ids,
+    which the helper backend injects as multi-touch; the screen-capture
+    backend is single-finger. The browser remains single-finger; parity work
+    stays under G14.
 
 Direct Android peering is required, not deferred behind X01. ADB becomes one
 activation/legacy source mechanism, not the user-facing peer protocol. HEVC/AV1,

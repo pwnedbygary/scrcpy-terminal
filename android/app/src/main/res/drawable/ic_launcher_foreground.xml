@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A phone outline with a terminal prompt: two devices, one screen. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M40,30h28a4,4 0,0 1,4 4v40a4,4 0,0 1,-4 4h-28a4,4 0,0 1,-4 -4v-40a4,4 0,0 1,4 -4z"
+        android:strokeWidth="3"
+        android:strokeColor="#FF4FC3F7" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M45,46l7,6l-7,6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="3"
+        android:strokeColor="#FFFFFFFF" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M55,60h9"
+        android:strokeLineCap="round"
+        android:strokeWidth="3"
+        android:strokeColor="#FFFFFFFF" />
+</vector>

@@ -6,6 +6,8 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  # Run on any branch from the Actions tab or: gh workflow run build.yml --ref <branch>
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -42,6 +44,34 @@ jobs:
         with:
           name: scterm-linux-x86_64
           path: scterm
+
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Also validates gradle-wrapper.jar against Gradle's published checksums.
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests, lint, debug APK, dev tools
+        run: >-
+          ./gradlew --no-daemon
+          :protocol:test :peer:test :app:testDebugUnitTest
+          :app:lintDebug :app:assembleDebug :peerctl:assemble
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: scterm-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

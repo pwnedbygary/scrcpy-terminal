@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">scterm</string>
+    <string name="accessibility_label">scterm remote input</string>
+    <string name="accessibility_description">Lets a paired device that you allowed to control this phone tap, swipe and press navigation keys while this phone is serving its screen. It does nothing while serving is off, and only acts for the one controller holding the input lease.</string>
+
+    <string name="section_this_device">This device</string>
+    <string name="section_serve">Serve this device</string>
+    <string name="section_peers">Paired devices</string>
+
+    <string name="backend_projection">Screen capture (standard install)</string>
+    <string name="backend_helper">Full control via ADB-activated helper (advanced)</string>
+    <string name="serve_start">Start serving</string>
+    <string name="serve_stop">Stop serving</string>
+    <string name="serve_invite">Invite a device…</string>
+    <string name="serve_kick">Disconnect everyone</string>
+    <string name="serve_enable_input">Enable remote input…</string>
+    <string name="pair_with">Pair with a device…</string>
+    <string name="copy">Copy</string>
+    <string name="share">Share</string>
+    <string name="cancel">Cancel</string>
+    <string name="done">Done</string>
+    <string name="pair">Pair</string>
+    <string name="forget">Forget</string>
+    <string name="edit_address">Edit address</string>
+    <string name="edit_access">Change what it may do here</string>
+    <string name="connect">Connect</string>
+
+    <string name="grant_view">See the screen</string>
+    <string name="grant_audio">Hear audio</string>
+    <string name="grant_control">Control (touch, keys, navigation)</string>
+    <string name="grant_clipboard">Share the clipboard</string>
+
+    <string name="notification_channel">Serving</string>
+    <string name="notification_serving">Serving this screen</string>
+    <string name="notification_stop">Stop</string>
+    <string name="notification_kick">Disconnect all</string>
+
+    <string name="viewer_take_control">Take control</string>
+    <string name="viewer_disconnect">Disconnect</string>
+
+    <string name="identity_format">Identity %1$s</string>
+    <string name="address_format">Address %1$s</string>
+    <string name="no_address">No network address</string>
+    <string name="serve_not_serving">Not serving.</string>
+    <string name="serve_starting">Starting…</string>
+    <string name="serve_failed">Serving stopped: %1$s</string>
+    <string name="pair_allow_back">Also let it see and control this device</string>
+</resources>

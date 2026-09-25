@@ -87,7 +87,7 @@ var appKeyOps = map[string]uint32{
 	"power":     26,  // KEYCODE_POWER
 	"voldown":   25,  // KEYCODE_VOLUME_DOWN
 	"volup":     24,  // KEYCODE_VOLUME_UP
-	"mute":      91,  // KEYCODE_MUTE
+	"mute":      164, // KEYCODE_VOLUME_MUTE (91, KEYCODE_MUTE, toggles the microphone)
 }
 
 // appActionOps are the app-level actions that are not a keycode: scrcpy control

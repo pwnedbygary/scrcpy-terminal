@@ -44,7 +44,7 @@ func TestAppKeyOpsAreAndroidKeycodes(t *testing.T) {
 		"power":     26,
 		"voldown":   25,
 		"volup":     24,
-		"mute":      91,
+		"mute":      164,
 	}
 	for op, code := range want {
 		got, ok := appKeyOps[op]

@@ -176,7 +176,7 @@ func kbLayout() [][]kbKey {
 			{label: "OK", key: 23, kind: kbText},
 			{label: "VOL+", key: 24, kind: kbText},
 			{label: "VOL-", key: 25, kind: kbText},
-			{label: "MUTE", key: 91, kind: kbText},
+			{label: "MUTE", key: 164, kind: kbText},
 		},
 		{ // function keys F1..F12
 			{label: "F1", key: 131, kind: kbFunc}, {label: "F2", key: 132, kind: kbFunc},
