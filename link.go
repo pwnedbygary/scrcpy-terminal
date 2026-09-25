@@ -8,6 +8,8 @@ import (
 	"net"
 	"os/exec"
 	"time"
+
+	"scterm/peer"
 )
 
 const (
@@ -32,6 +34,9 @@ type session struct {
 	listener    net.Listener
 	forwardMode bool
 	forwardPort uint16
+
+	// peer is set in peer mode (no adb): the connection to an scterm target.
+	peer *peer.Session
 }
 
 func newSession(serial string) (*session, error) {
@@ -233,6 +238,10 @@ func (s *session) closeTunnel() {
 }
 
 func (s *session) stop() {
+	if s.peer != nil {
+		s.peer.Close(false)
+		return
+	}
 	s.closeTunnel()
 	for _, c := range []net.Conn{s.video, s.audio, s.control} {
 		if c != nil {

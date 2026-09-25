@@ -448,6 +448,54 @@ At 480x1080 the mjpeg encode costs ~1 ms/frame single-threaded and lands around
 costs proportionally more; the default 1280 keeps the canvas at the video's own
 size, which is what the display actually shows.
 
+## Development roadmap
+
+The [Android peer app and cross-mode parity plan](docs/ANDROID_CLIENT_PLAN.md)
+describes one Android APK with both server and client roles, direct paired
+control in either direction, and authenticated Go TUI/web/window connections to
+Android servers while retaining legacy ADB operation. It includes permission and
+backend constraints, existing-client gap closure, milestones and release tests. Developers and LLMs should start with the
+[current checkpoint](.agent/HANDOFF.md) and reconcile it against Git and in-flight
+work before implementing the next task.
+
+Implementation has started under [`android/`](android/README.md), speaking the
+[peer protocol](docs/PEER_PROTOCOL.md): scrcpy v4.1 framing inside mutual TLS
+with paired, pinned identities. It has run on a physical Android 16 phone as
+both target and viewer. scterm's peer mode (below) connects to it without
+adb; its protocol layer is tested against the Kotlin target, but the full
+`--peer` path has not yet been run against a phone. There is no release to
+install yet.
+
+## Peer mode (`--peer`): the scterm Android app, no adb
+
+The terminal, `--web` and `--window` displays can also show a phone running
+the scterm Android app, over the network and without adb. The app sends
+scrcpy's own stream format inside mutual TLS, so everything after the
+connection (decoding, rendering, input, audio) is the same code as above.
+
+```sh
+# on the phone: Serve this device, then "Invite a device…" shows HOST:PORT CODE
+./scterm pair "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093"
+./scterm peers                  # paired devices and what each allows
+./scterm --peer "Pixel 8"       # or --peer= when only one device is paired
+./scterm --peer "Pixel 8" --window --takeover
+./scterm forget "Pixel 8"
+```
+
+- Pairing is a one-time code, valid for 10 minutes and a single use. Both
+  sides prove they know it, bound to their certificates, so a relay cannot
+  pair in the middle; afterwards each connection pins the phone's identity.
+- The phone decides what this computer may do (view, hear, control,
+  clipboard) and can change or revoke that at any time; a revoked or stopped
+  session ends with the phone's reason.
+- One device controls at a time. `--takeover` takes control from whoever has
+  it; without it scterm watches while another device is in control.
+- This computer's identity and paired devices live in `~/.config/scterm`
+  (`$SCTERM_HOME` overrides it).
+- What the phone can do depends on how it serves: the full-control helper
+  (activated once over adb) matches adb mode; screen capture on a normal
+  install has no audio and single-finger input.
+
 ## Protocol notes (from scrcpy v4.1 source)
 
 - Sockets, in order: video, audio, control (any may be absent).

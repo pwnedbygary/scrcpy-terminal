@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "about": "Pairing vectors computed by an independent Python implementation (hashlib/hmac). proof = HMAC-SHA256(secret, 'scterm-pair-v1\\0' + role + '\\0' + selfFingerprint + peerFingerprint); fingerprint = SHA-256(SubjectPublicKeyInfo DER); codes are Crockford base32.",
+  "secretHex": "0123456789abcdef0123",
+  "code": "04HM-ASW9-NF6Y-Y093",
+  "controllerSpkiUtf8": "controller-spki-der",
+  "targetSpkiUtf8": "target-spki-der",
+  "controllerFingerprint": "647e5390ec5179f20678cd01855a5e8bbb1c19d303f820d17b4b8494c79a388a",
+  "targetFingerprint": "9eb0a0151d640c5920a50305cb8921eef691fbbe645157726c14b787015dc49b",
+  "controllerFingerprintShort": "CHZ5-747C-A5WZ-41KR",
+  "controllerProof": "06bc55615d4a54c944652919999e3f65fe4002440120b5226ca4d58263f98602",
+  "targetProof": "472ffd886b69deaa252121173b21efaa2dc2a3bebb7ead1c92648d7f95dd8ea3",
+  "invitationUri": "scterm://pair?h=192.168.1.20&p=27300&c=04HMASW9NF6YY093&f=9eb0a0151d640c5920a50305cb8921eef691fbbe645157726c14b787015dc49b",
+  "invitationManual": "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093",
+  "base32": [
+    {
+      "hex": "",
+      "text": ""
+    },
+    {
+      "hex": "00",
+      "text": "00"
+    },
+    {
+      "hex": "ff",
+      "text": "ZW"
+    },
+    {
+      "hex": "f0bf",
+      "text": "Y2ZG"
+    },
+    {
+      "hex": "48656c6c6f21",
+      "text": "91JPRV3F44"
+    }
+  ]
+}

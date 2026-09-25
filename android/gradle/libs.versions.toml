@@ -1,0 +1,32 @@
+# Pinned 2026-09-24 against the then-current stable releases:
+# AGP 9.4.1 (needs Gradle >= 9.6, JDK 17, build-tools 36; max API 37),
+# Kotlin 2.4.20, Gradle 9.7.1 (see gradle-wrapper.properties).
+[versions]
+agp = "9.4.1"
+kotlin = "2.4.20"
+kotlinxSerialization = "1.11.0"
+kotlinxCoroutines = "1.11.0"
+androidxCore = "1.19.1"
+androidxActivity = "1.13.0"
+androidxAnnotation = "1.11.0"
+junit = "4.13.2"
+# Dev tool only (:peerctl): pure-Java H.264 decode to check real streams.
+jcodec = "0.2.5"
+
+[libraries]
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidxCore" }
+androidx-activity-ktx = { module = "androidx.activity:activity-ktx", version.ref = "androidxActivity" }
+androidx-annotation = { module = "androidx.annotation:annotation", version.ref = "androidxAnnotation" }
+junit = { module = "junit:junit", version.ref = "junit" }
+kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
+jcodec = { module = "org.jcodec:jcodec", version.ref = "jcodec" }
+jcodec-javase = { module = "org.jcodec:jcodec-javase", version.ref = "jcodec" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+android-lint = { id = "com.android.lint", version.ref = "agp" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
