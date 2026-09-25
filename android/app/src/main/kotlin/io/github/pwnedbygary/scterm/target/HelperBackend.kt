@@ -1,6 +1,7 @@
 package io.github.pwnedbygary.scterm.target
 
 import android.content.Context
+import android.os.Build
 import io.github.pwnedbygary.scterm.helper.HelperHandshake
 import io.github.pwnedbygary.scterm.peer.BackendSink
 import io.github.pwnedbygary.scterm.peer.PeerLog
@@ -81,7 +82,10 @@ class HelperBackend(context: Context) : ServingBackend {
             multitouch = true,
             clipboard = true,
             maxSessions = 4,
-            notes = listOf("Full control through the ADB-activated scrcpy helper."),
+            notes = listOfNotNull(
+                "Full control through the ADB-activated scrcpy helper.",
+                "This device's own speaker is muted while serving (Android 12 and older).".takeIf { Build.VERSION.SDK_INT < 33 },
+            ),
         )
 
     /** The one command to run from a computer; valid until serving stops. */
@@ -89,7 +93,8 @@ class HelperBackend(context: Context) : ServingBackend {
         "adb shell 'CLASSPATH=${context.applicationInfo.sourceDir} nohup app_process / " +
             "io.github.pwnedbygary.scterm.helper.HelperMain ${listener.localPort} ${HelperHandshake.formatToken(token)} " +
             "$SERVER_VERSION scid=%08x tunnel_forward=false cleanup=false power_on=false ".format(scid) +
-            "video_codec=h264 video_codec_options=$LOW_LATENCY_ENCODER audio_codec=opus max_size=1920 log_level=info >/dev/null 2>&1 &'"
+            "video_codec=h264 video_codec_options=$LOW_LATENCY_ENCODER audio_codec=opus $AUDIO_SOURCE " +
+            "max_size=1920 log_level=info >$HELPER_LOG 2>&1 &'"
 
     init {
         thread(name = "helper-accept", isDaemon = true) { acceptHelper() }
@@ -263,6 +268,17 @@ class HelperBackend(context: Context) : ServingBackend {
          * Qualcomm's low-latency mode. Codecs ignore keys they do not know.
          */
         const val LOW_LATENCY_ENCODER = "priority=0,latency=1,max-bframes=0,vendor.qti-ext-enc-low-latency.enable=1"
+
+        /**
+         * Android 13+ captures app playback while the device keeps playing it
+         * (loop-back-and-render). Older versions only have scrcpy's
+         * REMOTE_SUBMIX capture, which reroutes all output away from the
+         * speaker for as long as the helper runs.
+         */
+        val AUDIO_SOURCE = if (Build.VERSION.SDK_INT >= 33) "audio_source=playback audio_dup=true" else "audio_source=output"
+
+        /** scrcpy's and the relay's log, readable over adb; the helper otherwise has nowhere to report. */
+        const val HELPER_LOG = "/data/local/tmp/scterm-helper.log"
 
         val CONTROL = listOf(
             "inject_keycode", "inject_text", "inject_touch_event", "inject_scroll_event",

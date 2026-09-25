@@ -29,7 +29,7 @@ Pinned toolchain: Gradle 9.7.1 (wrapper checksum pinned), AGP 9.4.1, Kotlin
 | --- | --- |
 | `protocol` | Pure Kotlin: scrcpy v4.1 wire codecs, peer handshake/envelope schema, pairing, the shared action catalog. Tested against `../protocol/fixtures`. |
 | `peer` | Pure Kotlin: TLS identities, `TargetServer` (pairing, grants, input lease, stuck-input release, revocation), keyframe-aware `MediaFanout`, `ControllerClient`. Tested over loopback TLS. |
-| `scrcpy-server` | The vendored scrcpy v4.1 server (`../third_party/scrcpy-server-src`), compiled unchanged into the APK as the full-control helper. |
+| `scrcpy-server` | The vendored scrcpy v4.1 server (`../third_party/scrcpy-server-src`), compiled into the APK as the full-control helper. One local patch, marked `scterm patch`: playback audio capture also matches game and untagged players, not only media, so games stream their sound. |
 | `app` | Android UI, serving service and backends, viewer (MediaCodec, AudioTrack, input). |
 
 ## Using it

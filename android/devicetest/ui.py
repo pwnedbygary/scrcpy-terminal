@@ -30,7 +30,13 @@ def adb(*args, timeout=30):
 
 def dump(retries=3):
     for _ in range(retries):
-        adb('shell', 'uiautomator', 'dump', DUMP)
+        # A failed dump leaves the previous file behind; never read a stale screen.
+        adb('shell', 'rm', '-f', DUMP)
+        result = adb('shell', 'uiautomator', 'dump', DUMP)
+        if 'null root node' in result.stdout + result.stderr:
+            # The active window is unreadable when an accessibility overlay owns it
+            # (Retroid's game assistant, for one); --windows reads every window.
+            adb('shell', 'uiautomator', 'dump', '--windows', DUMP)
         out = adb('exec-out', 'cat', DUMP).stdout
         if out.strip().startswith('<?xml'):
             return ET.fromstring(out)

@@ -18,7 +18,7 @@ TEMPLATE = (
     "CLASSPATH={apk} nohup app_process / io.github.pwnedbygary.scterm.helper.HelperMain "
     "{port} {token} 4.1 scid={scid} tunnel_forward=false cleanup=false power_on=false "
     "video_codec=h264 video_codec_options=priority=0,latency=1,max-bframes=0,vendor.qti-ext-enc-low-latency.enable=1 "
-    "audio_codec=opus max_size=1920 log_level=info >/dev/null 2>&1 &"
+    "audio_codec=opus {audio} max_size=1920 log_level=info >/data/local/tmp/scterm-helper.log 2>&1 &"
 )
 
 
@@ -31,7 +31,10 @@ def main():
     apk = re.fullmatch(r'package:(/data/app/[\w.=/~+-]+/base\.apk)', path)
     if not apk:
         sys.exit(f'unexpected apk path: {path!r}')
-    ui.adb('shell', TEMPLATE.format(apk=apk[1], **found.groupdict()))
+    # Same choice as HelperBackend.AUDIO_SOURCE.
+    sdk = int(ui.adb('shell', 'getprop', 'ro.build.version.sdk').stdout.strip() or 0)
+    audio = 'audio_source=playback audio_dup=true' if sdk >= 33 else 'audio_source=output'
+    ui.adb('shell', TEMPLATE.format(apk=apk[1], audio=audio, **found.groupdict()))
     print(f"helper started for port {found['port']}")
 
 

@@ -94,6 +94,31 @@ Supersedes the "no device" statements below. Still **all uncommitted**.
   Also seen: reinstalling the app ends the helper (its relay socket closes);
   the phone moved networks mid-session (hotspot to 192.168.1.x), and new
   invitations picked up the new address.
+- Two-device session: the phone (Android 16) and a Retroid Pocket 6 (Android
+  13, QCS8550) on the same Wi-Fi, both serving through the helper in turn.
+  - Pairing works both ways. On the Retroid, uiautomator cannot read dialogs
+    (Retroid's Game Assistant accessibility overlay); `ui.py` falls back to
+    `--windows` for activities, and dialogs were driven from screenshots.
+  - Phone viewing the Retroid: 1920×1080 at 59–60 fps with a game running,
+    RTT 16–22 ms, hardware low-latency decode. Retroid viewing the phone:
+    hardware low-latency decode on Android 13, rotation 864×1920 ↔ 1920×864,
+    Home from the Retroid's bar reaches the phone.
+  - Audio bug found and fixed: the helper used scrcpy's default `output`
+    (REMOTE_SUBMIX) capture, which silenced the serving device for as long as
+    the helper ran (the user had to reboot the Retroid), and the Retroid's
+    captured stream was silent too (cause unknown; the log went to
+    /dev/null). Now Android 13+ uses `audio_source=playback audio_dup=true`,
+    the vendored scrcpy's playback capture also matches USAGE_GAME and
+    USAGE_UNKNOWN (marked `scterm patch`), and the helper logs to
+    `/data/local/tmp/scterm-helper.log`. Verified: the Retroid keeps its sound
+    while serving, its game audio streams at 127 kbps, and both directions
+    play on both devices, the viewer slightly behind.
+  - The helper needs activating again after every reboot (expected).
+  - Latency not measured yet: "show taps" dots are left out of screen
+    recordings and captures on both devices. Next approach: a touch marker
+    drawn by the viewer itself, timed against a visible reaction on the target.
+  - Left in place for the user: the phone ↔ Retroid pairing. Removed: the Mac
+    test controllers.
 - Phone restored after testing: accessibility service off, auto-rotate on,
   stay-awake off, no adb forwards/reverses, no paired peers, not serving
   (helper process gone), test screenshot deleted, `log.tag.*` properties
