@@ -54,6 +54,16 @@ Session 4's work is committed on `codex/android-client` (6763091, afcd41b,
   not-ready message on the phone. The Go client pairs with typed codes only.
 - Devices left: the phone ↔ Retroid pairing, the Retroid serving with its
   helper (started through Shizuku), no invitation open, phone stay-awake off.
+- Releases now attach a signed APK (`scterm-android-<version>.apk`) next to
+  the Linux binary: `v*` tags (and manual runs, without releasing) build
+  `:app:assembleRelease` with `-Pscterm.version` (2.0.0 → version code 20000)
+  and the key from secrets `SCTERM_KEYSTORE_BASE64` / `SCTERM_KEYSTORE_PASSWORD`
+  (PKCS12, alias `scterm`, RSA 4096, valid to 2054, certificate SHA-256
+  `8bdcc97a…cc3dca76`). The keystore also lives outside the repo on the
+  maintainer's machine, password in the macOS keychain. Without
+  `SCTERM_KEYSTORE`, local release builds stay unsigned; dev builds are
+  version `dev`, code 1. The R8 build was smoke-tested on the phone (debug key,
+  data kept): launch, identity, peer list, nearby browsing, no crashes.
 
 ## Update (2026-09-24, session 4: first physical device runs)
 

@@ -50,10 +50,20 @@ Then run with a device connected (or `-s <serial>`):
 ## CI / releases
 
 Every push to `main` and every pull request is built and tested on GitHub
-Actions (`.github/workflows/build.yml`): `go vet`, `go test`, and a stripped
-binary uploaded as an artifact. Pushing a `v*` tag also publishes a GitHub
-release with the binary attached — the version is stamped into `main.version`
-and shown in the status line.
+Actions (`.github/workflows/build.yml`): `go vet`, `go test`, a stripped
+binary, and the Android tests, lint and debug APK, uploaded as artifacts.
+Pushing a `v*` tag also publishes a GitHub release with the binary and the
+signed Android APK attached. The version is stamped into `main.version` (shown
+in the status line) and into the APK (`v2.0.0` becomes version name 2.0.0,
+version code 20000).
+
+The APK is signed with the release key in the repository secrets
+`SCTERM_KEYSTORE_BASE64` (the PKCS12 keystore, base64) and
+`SCTERM_KEYSTORE_PASSWORD` (key alias `scterm`). Android only accepts updates
+signed with the same key, so keep a backup of the keystore and its password:
+without them, every install would have to be removed (losing its identity and
+pairings) to move to a new key. `gh workflow run build.yml --ref <branch>`
+builds a signed APK without releasing, to check the signing.
 
 ## Control
 
@@ -460,11 +470,13 @@ work before implementing the next task.
 
 Implementation has started under [`android/`](android/README.md), speaking the
 [peer protocol](docs/PEER_PROTOCOL.md): scrcpy v4.1 framing inside mutual TLS
-with paired, pinned identities. It has run on a physical Android 16 phone as
-both target and viewer. scterm's peer mode (below) connects to it without
-adb; its protocol layer is tested against the Kotlin target, but the full
-`--peer` path has not yet been run against a phone. There is no release to
-install yet.
+with paired, pinned identities. It runs on an Android 16 phone and an Android
+13 handheld, as target and viewer; two devices pair by picking each other
+from a nearby list and comparing a six-digit code. Signed APKs are attached to
+GitHub releases from v2.0.0 (see [installing](android/README.md#install)).
+scterm's peer mode (below) connects to it without adb; its protocol layer is
+tested against the Kotlin target, but the full `--peer` path has not yet been
+run against a phone.
 
 ## Peer mode (`--peer`): the scterm Android app, no adb
 
@@ -493,8 +505,9 @@ connection (decoding, rendering, input, audio) is the same code as above.
 - This computer's identity and paired devices live in `~/.config/scterm`
   (`$SCTERM_HOME` overrides it).
 - What the phone can do depends on how it serves: the full-control helper
-  (activated once over adb) matches adb mode; screen capture on a normal
-  install has no audio and single-finger input.
+  (started over adb or with Shizuku, again after each reboot) matches adb
+  mode; screen capture on a normal install has no audio and single-finger
+  input.
 
 ## Protocol notes (from scrcpy v4.1 source)
 
