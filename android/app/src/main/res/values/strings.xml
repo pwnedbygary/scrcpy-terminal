@@ -17,6 +17,7 @@
     <string name="serve_enable_input">Enable remote input…</string>
     <string name="pair_with">Pair with a device…</string>
     <string name="copy">Copy</string>
+    <string name="start_with_shizuku">Start with Shizuku</string>
     <string name="share">Share</string>
     <string name="cancel">Cancel</string>
     <string name="done">Done</string>
@@ -35,6 +36,17 @@
     <string name="notification_serving">Serving this screen</string>
     <string name="notification_stop">Stop</string>
     <string name="notification_kick">Disconnect all</string>
+
+    <string name="pairing_channel">Pairing requests</string>
+    <string name="pairing_request_title">Pair with %1$s?</string>
+    <string name="pairing_request_text">Accept only if %1$s shows %2$s</string>
+    <string name="pairing_accept">Accept</string>
+    <string name="pairing_decline">Decline</string>
+    <string name="pairing_waiting">Waiting for %1$s to accept…</string>
+    <string name="pairing_nearby">Nearby</string>
+    <string name="pairing_enter_invitation">Or enter an invitation</string>
+    <string name="stop_inviting">Stop inviting</string>
+    <string name="hide">Hide</string>
 
     <string name="viewer_take_control">Take control</string>
     <string name="viewer_disconnect">Disconnect</string>

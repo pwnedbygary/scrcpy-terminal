@@ -7,9 +7,58 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-09-27, session 5: nearby pairing, Shizuku start)
+
+Session 4's work is committed on `codex/android-client` (6763091, afcd41b,
+58765f0; draft PR #1, CI green). **This session's work is uncommitted:**
+
+- Nearby pairing, so nothing is typed between devices (`PEER_PROTOCOL.md`,
+  "Nearby pairing"). While an invitation is open the serving device
+  advertises `_scterm._tcp` (`util/Nearby.kt`, tied to the invitation by
+  `TargetServer.Events.onInvitationChanged`); "Pair with a device…" lists
+  what it finds; both screens show a six-digit code (`ShortCode`:
+  commit/reveal, numeric comparison) and both users confirm. New messages
+  `pair_nearby`, `code_commit`, `code_nonce`, `code_reveal`, `code_confirm`;
+  reject `declined`; vectors under `nearby` in `protocol/fixtures/pairing.json`
+  (computed in Python). Target: one request at a time, only while inviting,
+  60 s to answer, declines/hang-ups count as failed attempts. Requests show as
+  a dialog, or a heads-up notification with Accept/Decline when the app is not
+  on screen. The invitation dialog closes itself once the invitation is used,
+  and has Stop inviting. `peerctl pair-nearby HOST[:PORT] [--confirm]`.
+  Tests: `NearbyPairingTest` (10, incl. a fake target that skips confirmation
+  or swaps its committed nonce) and two vector tests in `PairingTest`.
+- "Start with Shizuku" for the helper (`ShizukuStarter`, `ShizukuActivation`)
+  and a specific not-ready refusal ("X isn't ready: its full-control helper is
+  not running…") instead of "Serving is not ready".
+- Verified on devices (phone Android 16 as controller, Retroid Pocket 6
+  Android 13 as target, same Wi-Fi): the Retroid's advertisement is visible
+  (also from the Mac with `dns-sd -B`), the phone lists it, both screens
+  showed the code, both confirmed, both stored each other with the invited
+  grants (view, hear, control), both invitation dialogs closed, and the
+  advertisement was withdrawn. Covers both NSD resolve paths (API 34+ and the
+  legacy one).
+- Start with Shizuku verified on the Retroid (Shizuku server running as
+  shell): the helper connected with no computer involved.
+- Peer rows now name who can do what ("You can see its screen…", "It can't
+  connect to your device."): the old "Cannot connect to this device" (meaning
+  the peer has no grants here) read as a failure to reach the peer.
+- Also verified on the two devices: a decline on the Retroid reached the
+  phone within 1.5 s without the phone confirming ("Retroid Pocket 6
+  declined."), with the invitation left open; Cancel on the phone closed the
+  Retroid's request dialog by itself (toast "Pairing failed: Red Magic 9s
+  cancelled pairing"); each attempt showed a fresh code on both screens; Stop
+  inviting withdrew the advertisement; the phone then connected to the
+  Retroid (1920×1080, hardware low-latency decode) and disconnected cleanly.
+- Not yet verified on devices: the time-out (JVM test only), the
+  notification path (request while the app is not on screen), the new
+  not-ready message on the phone. The Go client pairs with typed codes only.
+- Devices left: the phone ↔ Retroid pairing, the Retroid serving with its
+  helper (started through Shizuku), no invitation open, phone stay-awake off.
+
 ## Update (2026-09-24, session 4: first physical device runs)
 
-Supersedes the "no device" statements below. Still **all uncommitted**.
+Supersedes the "no device" statements below. Uncommitted at the time
+(committed since; see session 5).
 
 - Device: RedMagic NX769J, RedMagic OS 11.0.5, Android 16 /
   SDK 36, gesture navigation, 60/90/120 Hz. This ROM suppresses logcat

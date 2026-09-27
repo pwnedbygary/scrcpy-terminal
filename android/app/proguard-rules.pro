@@ -6,6 +6,11 @@
     public static void main(java.lang.String[]);
 }
 
+# Instantiated by name inside a Shizuku-started process.
+-keep class io.github.pwnedbygary.scterm.helper.ShizukuStarter {
+    public <init>();
+}
+
 # Keep line numbers for readable crash reports; hide the source file names.
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile

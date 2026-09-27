@@ -143,10 +143,44 @@ sealed class PeerMessage {
     @Serializable
     @SerialName("paired")
     data class Paired(
-        val proof: String,
+        /** Empty after nearby pairing, where no secret was shared to prove. */
+        val proof: String = "",
         val device: DeviceInfo,
         val grants: List<String>,
     ) : PeerMessage()
+
+    /**
+     * Nearby pairing, controller -> target: pair by comparing a six-digit code
+     * on both screens instead of typing an invitation (see [ShortCode]). Only
+     * accepted while the target has an invitation open.
+     */
+    @Serializable
+    @SerialName("pair_nearby")
+    data class PairNearby(
+        val v: Int = PEER_PROTOCOL_VERSION,
+        val client: ClientInfo,
+        val servePort: Int? = null,
+    ) : PeerMessage()
+
+    /** Target -> controller: a commitment to the nonce it reveals after the controller's. */
+    @Serializable
+    @SerialName("code_commit")
+    data class CodeCommit(val commit: String) : PeerMessage()
+
+    /** Controller -> target: the controller's nonce, sent only after the commitment. */
+    @Serializable
+    @SerialName("code_nonce")
+    data class CodeNonce(val nonce: String) : PeerMessage()
+
+    /** Target -> controller: the committed nonce, and who the target is. */
+    @Serializable
+    @SerialName("code_reveal")
+    data class CodeReveal(val nonce: String, val device: DeviceInfo) : PeerMessage()
+
+    /** Controller -> target: this side's user saw the same code. */
+    @Serializable
+    @SerialName("code_confirm")
+    data object CodeConfirm : PeerMessage()
 
     @Serializable
     @SerialName("ping")
@@ -201,6 +235,9 @@ object RejectCodes {
     const val BAD_PROOF = "bad_proof"
     const val NO_INVITATION = "no_invitation"
     const val UNAVAILABLE = "unavailable"
+
+    /** Nearby pairing: the target's user declined, or did not answer in time. */
+    const val DECLINED = "declined"
 }
 
 /** `error.code` values (in session). */

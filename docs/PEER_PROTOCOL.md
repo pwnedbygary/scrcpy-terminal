@@ -66,6 +66,43 @@ The invitation carries the **grants** the target chose when creating it;
 `servePort` lets the target record where the controller serves, for the
 reverse direction. Test vectors: `protocol/fixtures/pairing.json`.
 
+### Nearby pairing (nothing typed)
+
+While an invitation is open, the Android app advertises it on the LAN as
+DNS-SD service `_scterm._tcp` (instance name = device name, port = serving
+port, nothing else). A controller that finds it can pair without the secret,
+by having both users compare a six-digit code, as in Bluetooth's numeric
+comparison. The target only accepts this while an invitation is open, one
+request at a time, and its user must accept each request:
+
+```text
+controller -> {"type":"pair_nearby","v":1,"client":{…},"servePort":27300}
+target     -> {"type":"code_commit","commit":"<hex>"}          (or reject no_invitation / unavailable)
+controller -> {"type":"code_nonce","nonce":"<64 hex>"}
+target     -> {"type":"code_reveal","nonce":"<64 hex>","device":{"name":"…"}}
+                both screens now show the code; each user compares and answers
+controller -> {"type":"code_confirm"}                            (or hangs up: cancelled)
+target     -> {"type":"paired","device":{…},"grants":[…]}        (no proof)
+           or {"type":"reject","code":"declined","message":"…"}  (declined or not answered in 60 s)
+```
+
+```text
+commit = SHA-256("scterm-code-v1" 0x00 "commit" 0x00 || targetNonce || targetFingerprint || controllerFingerprint)
+code   = first 4 bytes of SHA-256("scterm-code-v1" 0x00 "code" 0x00 ||
+         controllerFingerprint || targetFingerprint || controllerNonce || targetNonce),
+         as a big-endian unsigned integer, mod 1 000 000, shown as six digits ("482 915")
+```
+
+Nonces are 32 random bytes. The target commits to its nonce before it sees
+the controller's, and the controller reveals its nonce before the target
+does, so a relay terminating TLS on both legs (different fingerprints on each
+leg, hence different codes) cannot choose values that make the two codes
+agree: it matches with probability 10⁻⁶ per attempt, and each attempt needs
+the target's user to accept it. The controller checks the commitment and
+refuses a `paired` that arrives before its user confirmed. Declines, time-outs
+and hang-ups count as failed attempts on the invitation (5 close it). Test
+vectors are under `nearby` in `protocol/fixtures/pairing.json`.
+
 ## Directional grants
 
 Grants are stored by the target, per peer, and enforced by the target:

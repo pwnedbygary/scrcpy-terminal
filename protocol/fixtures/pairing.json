@@ -12,6 +12,21 @@
   "targetProof": "472ffd886b69deaa252121173b21efaa2dc2a3bebb7ead1c92648d7f95dd8ea3",
   "invitationUri": "scterm://pair?h=192.168.1.20&p=27300&c=04HMASW9NF6YY093&f=9eb0a0151d640c5920a50305cb8921eef691fbbe645157726c14b787015dc49b",
   "invitationManual": "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093",
+  "nearbyAbout": "Nearby pairing with the fingerprints above: commitment = SHA-256('scterm-code-v1\\0commit\\0' + targetNonce + targetFingerprint + controllerFingerprint); code = first 4 bytes of SHA-256('scterm-code-v1\\0code\\0' + controllerFingerprint + targetFingerprint + controllerNonce + targetNonce), big-endian unsigned, mod 1000000, as six digits.",
+  "nearby": [
+    {
+      "controllerNonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "targetNonce": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "commitment": "9458467d9ad3cc2effa0f8f252d84dabe79adb9e34ef4a1e383e55f2d4601f5c",
+      "code": "801700"
+    },
+    {
+      "controllerNonce": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "targetNonce": "0707070707070707070707070707070707070707070707070707070707070707",
+      "commitment": "630cf99be77b93d2dc7d1a6429e971b4698573e81987bfe951f6a430c9262eed",
+      "code": "097297"
+    }
+  ],
   "base32": [
     {
       "hex": "",

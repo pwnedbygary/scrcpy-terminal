@@ -88,13 +88,19 @@ class HelperBackend(context: Context) : ServingBackend {
             ),
         )
 
-    /** The one command to run from a computer; valid until serving stops. */
-    val activationCommand: String =
-        "adb shell 'CLASSPATH=${context.applicationInfo.sourceDir} nohup app_process / " +
+    /** What starts the helper with shell identity, over adb or through Shizuku; valid until serving stops. */
+    val shellCommand: String =
+        "CLASSPATH=${context.applicationInfo.sourceDir} nohup app_process / " +
             "io.github.pwnedbygary.scterm.helper.HelperMain ${listener.localPort} ${HelperHandshake.formatToken(token)} " +
             "$SERVER_VERSION scid=%08x tunnel_forward=false cleanup=false power_on=false ".format(scid) +
             "video_codec=h264 video_codec_options=$LOW_LATENCY_ENCODER audio_codec=opus $AUDIO_SOURCE " +
-            "max_size=1920 log_level=info >$HELPER_LOG 2>&1 &'"
+            "max_size=1920 log_level=info >$HELPER_LOG 2>&1 &"
+
+    /** The one command to run from a computer. */
+    val activationCommand: String = "adb shell '$shellCommand'"
+
+    override val notReadyReason: String
+        get() = "its full-control helper is not running. Start it on that device (Start with Shizuku) or from a computer with adb"
 
     init {
         thread(name = "helper-accept", isDaemon = true) { acceptHelper() }

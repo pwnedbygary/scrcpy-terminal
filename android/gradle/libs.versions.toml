@@ -12,6 +12,8 @@ androidxAnnotation = "1.11.0"
 junit = "4.13.2"
 # Dev tool only (:peerctl): pure-Java H.264 decode to check real streams.
 jcodec = "0.2.5"
+# Optional helper start from the device itself when Shizuku runs there.
+shizuku = "13.1.5"
 
 [libraries]
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
@@ -23,6 +25,8 @@ junit = { module = "junit:junit", version.ref = "junit" }
 kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
 jcodec = { module = "org.jcodec:jcodec", version.ref = "jcodec" }
 jcodec-javase = { module = "org.jcodec:jcodec-javase", version.ref = "jcodec" }
+shizuku-api = { module = "dev.rikka.shizuku:api", version.ref = "shizuku" }
+shizuku-provider = { module = "dev.rikka.shizuku:provider", version.ref = "shizuku" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -214,7 +214,7 @@ class ViewerActivity : ComponentActivity() {
                 val connected = ControllerClient(app.identity, app.clientInfo).connect(host, port, fingerprint)
                 main.post { onConnected(connected) }
             } catch (e: Exception) {
-                main.post { fail(describe(e, "$host:$port")) }
+                main.post { fail(describe(e, "$host:$port", name ?: "The target")) }
             }
         }
     }
@@ -487,12 +487,13 @@ class ViewerActivity : ComponentActivity() {
             .putExtra(EXTRA_PORT, peer.target?.port ?: 0)
             .putExtra(EXTRA_NAME, peer.name)
 
-        fun describe(e: Exception, address: String): String = when {
+        fun describe(e: Exception, address: String, name: String = "The target"): String = when {
             e is PeerException -> when (e.code) {
                 RejectCodes.NOT_PAIRED -> "The target no longer knows this device. Pair again."
                 RejectCodes.FORBIDDEN -> "The target does not allow this device to view or control it."
                 RejectCodes.BUSY -> "The target already has the maximum number of viewers."
-                RejectCodes.UNAVAILABLE -> "Serving is not ready on the target (screen capture not approved, or the helper not activated)."
+                RejectCodes.UNAVAILABLE -> e.message?.takeIf { it.isNotBlank() }?.let { "$name isn't ready: $it." }
+                    ?: "Serving is not ready on the target (screen capture not approved, or the helper not activated)."
                 RejectCodes.VERSION -> "The target runs an incompatible version of scterm."
                 else -> e.message ?: e.code
             }

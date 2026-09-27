@@ -15,14 +15,18 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import io.github.pwnedbygary.scterm.R
 import io.github.pwnedbygary.scterm.ScTermApp
 import io.github.pwnedbygary.scterm.peer.PeerRecord
+import io.github.pwnedbygary.scterm.peer.TargetBackend
 import io.github.pwnedbygary.scterm.peer.TargetServer
+import io.github.pwnedbygary.scterm.protocol.ShortCode
 import io.github.pwnedbygary.scterm.ui.MainActivity
+import io.github.pwnedbygary.scterm.util.Nearby
 import io.github.pwnedbygary.scterm.util.Net
 
 /**
@@ -38,6 +42,8 @@ class TargetService : Service() {
     private var kind = BackendKind.PROJECTION
     private var port = 0
     private var wifiLock: WifiManager.WifiLock? = null
+    private val advertiser by lazy { Nearby.Advertiser(this) }
+    private val expireInvitation = Runnable { server?.cancelInvitation() }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -46,6 +52,12 @@ class TargetService : Service() {
             ACTION_START -> start(intent)
             ACTION_KICK -> server?.endAllSessions("disconnected on the serving device")
             ACTION_STOP -> shutdown(null)
+            ACTION_PAIR_ACCEPT, ACTION_PAIR_DECLINE -> {
+                // Only the request the notification showed: a stale tap must not answer a newer one.
+                val request = Serving.pairingRequest.value?.takeIf { it.code == intent.getStringExtra(EXTRA_CODE) }
+                if (intent.action == ACTION_PAIR_ACCEPT) request?.accept() else request?.decline()
+                if (server == null) stopSelf()
+            }
             else -> if (server == null) stopSelf()
         }
         return START_NOT_STICKY
@@ -80,7 +92,11 @@ class TargetService : Service() {
                 identity = app.identity,
                 store = app.peers,
                 device = app.deviceInfo,
-                backends = { backend?.takeIf { it.ready } },
+                backends = object : TargetServer.BackendProvider {
+                    override fun create(): TargetBackend? = backend?.takeIf { it.ready }
+
+                    override fun notReadyReason(): String = backend?.notReadyReason ?: super.notReadyReason()
+                },
                 config = TargetServer.Config(port = app.servePort),
                 events = events,
             )
@@ -115,7 +131,37 @@ class TargetService : Service() {
         override fun onSessionStarted(session: TargetServer.SessionInfo) = changed()
         override fun onSessionEnded(session: TargetServer.SessionInfo, reason: String) = changed()
         override fun onLeaseChanged(holder: TargetServer.SessionInfo?) = changed()
-        override fun onPaired(record: PeerRecord) = changed()
+
+        override fun onPaired(record: PeerRecord) {
+            main.post {
+                toast("Paired with ${record.name}")
+                publish()
+            }
+        }
+
+        override fun onPairingRejected(reason: String) {
+            main.post { toast("Pairing failed: $reason") }
+        }
+
+        override fun onPairingRequest(request: TargetServer.PairingRequest) {
+            main.post {
+                Serving.publishPairingRequest(request)
+                if (!Serving.uiVisible) notifyPairingRequest(request)
+            }
+        }
+
+        override fun onPairingRequestEnded(request: TargetServer.PairingRequest) {
+            main.post {
+                if (Serving.pairingRequest.value === request) {
+                    Serving.publishPairingRequest(null)
+                    getSystemService(NotificationManager::class.java).cancel(PAIRING_NOTIFICATION_ID)
+                }
+            }
+        }
+
+        override fun onInvitationChanged(expiresAtMs: Long?) {
+            main.post { invitationChanged() }
+        }
 
         override fun onBackendStopped(error: String?) {
             main.post {
@@ -137,6 +183,49 @@ class TargetService : Service() {
         }
     }
 
+    /** Nearby devices can find this one exactly while an invitation is open. */
+    private fun invitationChanged() {
+        main.removeCallbacks(expireInvitation)
+        val expiresAtMs = server?.invitationExpiresAtMs
+        Serving.publishInvitation(expiresAtMs)
+        if (expiresAtMs == null) {
+            advertiser.stop()
+            return
+        }
+        advertiser.start(ScTermApp.of(this).deviceName, port)
+        main.postDelayed(expireInvitation, (expiresAtMs - System.currentTimeMillis()).coerceAtLeast(0))
+    }
+
+    private fun notifyPairingRequest(request: TargetServer.PairingRequest) {
+        val manager = getSystemService(NotificationManager::class.java)
+        if (manager.getNotificationChannel(PAIRING_CHANNEL) == null) {
+            manager.createNotificationChannel(
+                NotificationChannel(PAIRING_CHANNEL, getString(R.string.pairing_channel), NotificationManager.IMPORTANCE_HIGH),
+            )
+        }
+        val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        fun answer(action: String, requestCode: Int) = PendingIntent.getService(
+            this,
+            requestCode,
+            Intent(this, TargetService::class.java).setAction(action).putExtra(EXTRA_CODE, request.code),
+            flags,
+        )
+        val open = PendingIntent.getActivity(this, 3, Intent(this, MainActivity::class.java), flags)
+        val notification = Notification.Builder(this, PAIRING_CHANNEL)
+            .setSmallIcon(R.drawable.ic_stat_serving)
+            .setContentTitle(getString(R.string.pairing_request_title, request.peerName))
+            .setContentText(getString(R.string.pairing_request_text, request.peerName, ShortCode.display(request.code)))
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .setTimeoutAfter(PAIRING_NOTIFICATION_TIMEOUT_MS)
+            .addAction(Notification.Action.Builder(null, getString(R.string.pairing_accept), answer(ACTION_PAIR_ACCEPT, 4)).build())
+            .addAction(Notification.Action.Builder(null, getString(R.string.pairing_decline), answer(ACTION_PAIR_DECLINE, 5)).build())
+            .build()
+        manager.notify(PAIRING_NOTIFICATION_ID, notification)
+    }
+
+    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+
     private fun publish() {
         val srv = server ?: return
         val b = backend
@@ -150,6 +239,7 @@ class TargetService : Service() {
                 status = b?.status ?: "",
                 sessions = sessions,
                 helperCommand = (b as? HelperBackend)?.activationCommand,
+                helperShellCommand = (b as? HelperBackend)?.shellCommand,
             ),
         )
         val text = when {
@@ -176,6 +266,11 @@ class TargetService : Service() {
         backend = null
         Serving.server = null
         updateWifiLock(false)
+        main.removeCallbacks(expireInvitation)
+        advertiser.stop()
+        Serving.publishInvitation(null)
+        Serving.publishPairingRequest(null)
+        getSystemService(NotificationManager::class.java).cancel(PAIRING_NOTIFICATION_ID)
         val finish = {
             // After the sessions' input releases went out through the backend.
             b?.stop()
@@ -217,9 +312,17 @@ class TargetService : Service() {
     companion object {
         private const val CHANNEL = "serving"
         private const val NOTIFICATION_ID = 1
+        private const val PAIRING_CHANNEL = "pairing"
+        private const val PAIRING_NOTIFICATION_ID = 2
+
+        /** TargetServer.Config.nearbyAnswerMs: the request is over by then anyway. */
+        private const val PAIRING_NOTIFICATION_TIMEOUT_MS = 60_000L
         private const val ACTION_START = "io.github.pwnedbygary.scterm.START"
         private const val ACTION_STOP = "io.github.pwnedbygary.scterm.STOP"
         private const val ACTION_KICK = "io.github.pwnedbygary.scterm.KICK"
+        private const val ACTION_PAIR_ACCEPT = "io.github.pwnedbygary.scterm.PAIR_ACCEPT"
+        private const val ACTION_PAIR_DECLINE = "io.github.pwnedbygary.scterm.PAIR_DECLINE"
+        private const val EXTRA_CODE = "code"
         private const val EXTRA_BACKEND = "backend"
         private const val EXTRA_RESULT_CODE = "result_code"
         private const val EXTRA_RESULT_DATA = "result_data"

@@ -3,6 +3,7 @@ package io.github.pwnedbygary.scterm.protocol
 import java.io.ByteArrayOutputStream
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Mac
@@ -193,6 +194,57 @@ class Invitation(
         }
 
         private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
+    }
+}
+
+/**
+ * Nearby pairing without typing: both screens show a six-digit code derived
+ * from the two TLS identities and a nonce from each side, and both users
+ * confirm they match. The target commits to its nonce before it sees the
+ * controller's, and the controller sends its nonce before the target reveals,
+ * so a relay terminating TLS on both legs cannot steer the two codes to agree:
+ * it wins with probability 10^-6 per attempt, and every attempt needs a user
+ * to accept it on the target. (The commit/reveal order is Bluetooth's numeric
+ * comparison.)
+ */
+object ShortCode {
+    const val NONCE_BYTES = 32
+    private const val LABEL = "scterm-code-v1"
+
+    fun newNonce(random: SecureRandom = SecureRandom()): ByteArray = ByteArray(NONCE_BYTES).also(random::nextBytes)
+
+    fun commitment(targetNonce: ByteArray, target: Fingerprint, controller: Fingerprint): ByteArray =
+        sha256("$LABEL\u0000commit\u0000", targetNonce, target.bytesUnsafe(), controller.bytesUnsafe())
+
+    /** Six digits, as both screens show them. */
+    fun code(controller: Fingerprint, target: Fingerprint, controllerNonce: ByteArray, targetNonce: ByteArray): String {
+        val h = sha256("$LABEL\u0000code\u0000", controller.bytesUnsafe(), target.bytesUnsafe(), controllerNonce, targetNonce)
+        val n = ByteBuffer.wrap(h, 0, 4).int.toLong() and 0xffffffffL
+        return "%06d".format(n % 1_000_000)
+    }
+
+    /** "482915" -> "482 915", easier to compare between two screens. */
+    fun display(code: String): String = if (code.length == 6) code.substring(0, 3) + " " + code.substring(3) else code
+
+    /** Wire form of nonces and commitments. */
+    fun encode(bytes: ByteArray): String = hex(bytes)
+
+    /** A nonce as sent on the wire, or null if malformed. */
+    fun decodeNonce(text: String): ByteArray? {
+        if (text.length != NONCE_BYTES * 2 || !text.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) return null
+        return ByteArray(NONCE_BYTES) { i -> text.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    }
+
+    fun verifyCommitment(commitHex: String, targetNonce: ByteArray, target: Fingerprint, controller: Fingerprint): Boolean {
+        val expected = encode(commitment(targetNonce, target, controller)).toByteArray(Charsets.US_ASCII)
+        return MessageDigest.isEqual(expected, commitHex.lowercase().toByteArray(Charsets.US_ASCII))
+    }
+
+    private fun sha256(label: String, vararg parts: ByteArray): ByteArray {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(label.toByteArray(Charsets.US_ASCII))
+        parts.forEach(digest::update)
+        return digest.digest()
     }
 }
 

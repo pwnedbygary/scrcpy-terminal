@@ -21,6 +21,7 @@ import io.github.pwnedbygary.scterm.protocol.MediaStreamReader
 import io.github.pwnedbygary.scterm.protocol.MediaWire
 import io.github.pwnedbygary.scterm.protocol.PeerMessage
 import io.github.pwnedbygary.scterm.protocol.Position
+import io.github.pwnedbygary.scterm.protocol.ShortCode
 import io.github.pwnedbygary.scterm.protocol.StreamItem
 import io.github.pwnedbygary.scterm.protocol.StreamRequest
 import io.github.pwnedbygary.scterm.protocol.StreamStart
@@ -37,6 +38,7 @@ import java.io.InputStream
 import java.net.InetAddress
 import java.security.KeyStore
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ExecutionException
 import javax.imageio.ImageIO
 import kotlin.concurrent.thread
 import kotlin.system.exitProcess
@@ -46,6 +48,7 @@ import kotlin.system.exitProcess
  *
  *   peerctl --home DIR whoami
  *   peerctl --home DIR pair "HOST:PORT CODE" [--host H --port P]
+ *   peerctl --home DIR pair-nearby HOST[:PORT] [--confirm]
  *   peerctl --home DIR session [--host H --port P] [--seconds N] [--video out.h264]
  *           [--frame out.png] [--no-audio] [--script "wait 1; action home; tap 0.5 0.5"]
  *   peerctl --home DIR serve [--port P] [--size WxH] [--invite-host H] [--grants view,control]
@@ -67,10 +70,13 @@ fun main(args: Array<String>) {
         when (opts.command) {
             "whoami" -> println("fingerprint ${identity.fingerprint.hex} (${identity.fingerprint.short})")
             "pair" -> pair(opts, client, store)
+            "pair-nearby" -> pairNearby(opts, client, store)
             "session" -> Session(opts, client, store).run()
             "serve" -> serve(opts, identity, store)
             else -> {
-                System.err.println("usage: peerctl --home DIR (whoami | pair INVITATION | session [options] | serve [options])")
+                System.err.println(
+                    "usage: peerctl --home DIR (whoami | pair INVITATION | pair-nearby HOST[:PORT] [--confirm] | session [options] | serve [options])",
+                )
                 exitProcess(2)
             }
         }
@@ -120,6 +126,42 @@ private fun pair(opts: Options, client: ControllerClient, store: FilePeerStore) 
     }
     println("PAIRED in ${ms(started)} ms: ${result.device.name} (${result.device.model}, sdk ${result.device.sdk}) " +
         "fingerprint ${result.fingerprint.short} grants ${Grant.toWire(result.grants)}")
+}
+
+/**
+ * Nearby pairing with a target that has an invitation open: prints the code
+ * both screens show, then confirms it (asking on stdin unless --confirm);
+ * the target's user still has to accept on the device.
+ */
+private fun pairNearby(opts: Options, client: ControllerClient, store: FilePeerStore) {
+    val (host, port) = Invitation.parseAddress(opts.positional.getOrNull(0) ?: error("pair-nearby needs HOST[:PORT]"))
+    val started = System.nanoTime()
+    val pairing = client.startNearbyPairing(host, port)
+    println("CODE ${ShortCode.display(pairing.code)} shown by ${pairing.device.name} (${pairing.fingerprint.short}) after ${ms(started)} ms")
+    if (!opts.flag("--confirm")) {
+        print("Does ${pairing.device.name} show the same code? [y/N] ")
+        if (readlnOrNull()?.trim()?.lowercase() != "y") {
+            pairing.cancel()
+            println("CANCELLED")
+            return
+        }
+    }
+    pairing.confirm()
+    println("CONFIRMED; waiting for ${pairing.device.name} to accept")
+    val result = try {
+        pairing.result.get()
+    } catch (e: ExecutionException) {
+        throw e.cause as? Exception ?: e
+    }
+    val now = System.currentTimeMillis()
+    store.update(result.fingerprint) { old ->
+        (old ?: PeerRecord(result.fingerprint.hex, result.device.name, pairedAtMs = now)).copy(
+            name = result.device.name,
+            target = TargetAddress(host, port),
+            grantedByPeer = Grant.toWire(result.grants),
+        )
+    }
+    println("PAIRED in ${ms(started)} ms: ${result.device.name} fingerprint ${result.fingerprint.short} grants ${Grant.toWire(result.grants)}")
 }
 
 private fun serve(opts: Options, identity: StaticIdentity, store: FilePeerStore) {
@@ -431,6 +473,6 @@ private class Options(args: List<String>) {
     fun flag(name: String) = name in flags
 
     companion object {
-        val FLAGS = setOf("--no-audio", "--no-video", "--no-control", "--end-session")
+        val FLAGS = setOf("--no-audio", "--no-video", "--no-control", "--end-session", "--confirm")
     }
 }

@@ -19,6 +19,7 @@ import io.github.pwnedbygary.scterm.protocol.PeerFrames
 import io.github.pwnedbygary.scterm.protocol.PeerMessage
 import io.github.pwnedbygary.scterm.protocol.ProtocolException
 import io.github.pwnedbygary.scterm.protocol.RejectCodes
+import io.github.pwnedbygary.scterm.protocol.ShortCode
 import io.github.pwnedbygary.scterm.protocol.StreamItem
 import io.github.pwnedbygary.scterm.protocol.StreamRequest
 import io.github.pwnedbygary.scterm.protocol.StreamStart
@@ -37,7 +38,9 @@ import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLSocket
 import kotlin.concurrent.thread
 
@@ -57,6 +60,9 @@ class TargetServer(
     /** Creates the backend on first use; null means serving is not ready yet. */
     fun interface BackendProvider {
         fun create(): TargetBackend?
+
+        /** Why [create] returned null, sent to the refused controller. */
+        fun notReadyReason(): String = "serving has not finished starting"
     }
 
     data class Config(
@@ -78,6 +84,8 @@ class TargetServer(
         val tokenTtlMs: Long = 15_000,
         val invitationTtlMs: Long = 10 * 60_000L,
         val maxPairingFailures: Int = 5,
+        /** How long both users have to compare a nearby pairing code and answer. */
+        val nearbyAnswerMs: Long = 60_000,
     )
 
     data class SessionInfo(
@@ -96,11 +104,44 @@ class TargetServer(
         fun onPaired(record: PeerRecord) {}
         fun onPairingRejected(reason: String) {}
         fun onBackendStopped(error: String?) {}
+
+        /** A nearby device wants to pair: show [PairingRequest.code] and ask. */
+        fun onPairingRequest(request: PairingRequest) {}
+
+        /** [request] is over, however it ended: dismiss anything showing it. */
+        fun onPairingRequestEnded(request: PairingRequest) {}
+
+        /** An invitation opened, valid until [expiresAtMs], or closed (null). */
+        fun onInvitationChanged(expiresAtMs: Long?) {}
+    }
+
+    /**
+     * A nearby device asked to pair and shows [code] too. The user here
+     * compares the two and answers, from any thread, within
+     * [Config.nearbyAnswerMs]; the other device's user confirms on their side.
+     * [peerName] is what the other device calls itself, unverified.
+     */
+    class PairingRequest internal constructor(
+        val peer: Fingerprint,
+        val peerName: String,
+        val code: String,
+        private val answer: (Boolean) -> Unit,
+    ) {
+        fun accept() = answer(true)
+
+        fun decline() = answer(false)
     }
 
     private class PendingInvitation(val secret: ByteArray, val grants: Set<Grant>, val expiresAtMs: Long) {
         var failures = 0
+
+        /** One nearby pairing at a time: each one asks the user here. */
+        var nearbyBusy = false
     }
+
+    private enum class NearbyAnswer { ACCEPTED, DECLINED, CONFIRMED, GONE }
+
+    private enum class NearbyOutcome { PAIRED, DECLINED, CANCELLED, TIMED_OUT }
 
     private val tls = PeerTls.serverContext(identity)
     private val random = SecureRandom()
@@ -208,13 +249,24 @@ class TargetServer(
     fun invite(host: String, grants: Set<Grant>): Invitation {
         check(running) { "not serving" }
         val secret = PairingCode.newSecret(random)
-        synchronized(lock) {
-            invitation = PendingInvitation(secret, grants, System.currentTimeMillis() + config.invitationTtlMs)
-        }
+        val expiresAtMs = System.currentTimeMillis() + config.invitationTtlMs
+        synchronized(lock) { invitation = PendingInvitation(secret, grants, expiresAtMs) }
+        events.onInvitationChanged(expiresAtMs)
         return Invitation(host, port, secret, identity.fingerprint)
     }
 
-    fun cancelInvitation() = synchronized(lock) { invitation = null }
+    fun cancelInvitation() {
+        val had = synchronized(lock) { (invitation != null).also { invitation = null } }
+        if (had) events.onInvitationChanged(null)
+    }
+
+    /**
+     * When the open invitation expires, or null if none is open. Reading this
+     * on [Events.onInvitationChanged] is immune to events from different
+     * threads arriving out of order.
+     */
+    val invitationExpiresAtMs: Long?
+        get() = synchronized(lock) { invitation?.expiresAtMs?.takeIf { it >= System.currentTimeMillis() } }
 
     // ---------------------------------------------------------------- accept
 
@@ -251,6 +303,7 @@ class TargetServer(
         val output = ssl.outputStream
         when (val first = PeerFrames.read(input)) {
             is PeerMessage.Pair -> handlePair(raw, output, peer, first)
+            is PeerMessage.PairNearby -> handlePairNearby(raw, ssl, input, output, peer, first)
             is PeerMessage.Hello -> {
                 val version = negotiate(first) ?: return reject(output, RejectCodes.VERSION, "peer protocol $PEER_PROTOCOL_VERSION required")
                 when (first.channel) {
@@ -278,41 +331,176 @@ class TargetServer(
         val now = System.currentTimeMillis()
         var failure: Pair<String, String>? = null
         var accepted: PendingInvitation? = null
+        var closed = false
         synchronized(lock) {
             val inv = invitation
             when {
                 inv == null || now > inv.expiresAtMs -> {
+                    closed = inv != null
                     invitation = null
                     failure = RejectCodes.NO_INVITATION to "this device is not waiting to pair"
                 }
                 !PairingProof.verify(inv.secret, PairingProof.Role.CONTROLLER, peer, identity.fingerprint, msg.proof) -> {
                     inv.failures++
-                    if (inv.failures >= config.maxPairingFailures) invitation = null
+                    if (inv.failures >= config.maxPairingFailures) {
+                        invitation = null
+                        closed = true
+                    }
                     failure = RejectCodes.BAD_PROOF to "wrong pairing code"
                 }
                 else -> {
                     invitation = null // single use
+                    closed = true
                     accepted = inv
                 }
             }
         }
+        if (closed) events.onInvitationChanged(null)
         failure?.let { (code, text) ->
             events.onPairingRejected(text)
             return reject(output, code, text)
         }
         val inv = accepted!!
+        val proof = PairingProof.encode(PairingProof.compute(inv.secret, PairingProof.Role.TARGET, identity.fingerprint, peer))
+        completePairing(raw, output, peer, sanitizeName(msg.client.name), msg.servePort, inv.grants, proof)
+    }
+
+    /**
+     * Pairing by comparing a code on both screens (see [ShortCode]), while an
+     * invitation is open. The user here must accept, and the other device's
+     * user must confirm; either one saying no, or hanging up, ends it.
+     */
+    private fun handlePairNearby(
+        raw: Socket,
+        ssl: SSLSocket,
+        input: DataInputStream,
+        output: OutputStream,
+        peer: Fingerprint,
+        msg: PeerMessage.PairNearby,
+    ) {
+        var closed = false
+        var busy = false
+        val inv = synchronized(lock) {
+            val inv = invitation
+            when {
+                inv == null || System.currentTimeMillis() > inv.expiresAtMs -> {
+                    closed = inv != null
+                    invitation = null
+                    null
+                }
+                inv.nearbyBusy -> {
+                    busy = true
+                    null
+                }
+                else -> inv.also { it.nearbyBusy = true }
+            }
+        }
+        if (closed) events.onInvitationChanged(null)
+        if (busy) return reject(output, RejectCodes.UNAVAILABLE, "it is pairing with another device; try again in a minute")
+        if (inv == null) return reject(output, RejectCodes.NO_INVITATION, "this device is not waiting to pair")
+
         val name = sanitizeName(msg.client.name)
+        var request: PairingRequest? = null
+        try {
+            val targetNonce = ShortCode.newNonce(random)
+            PeerFrames.write(output, PeerMessage.CodeCommit(ShortCode.encode(ShortCode.commitment(targetNonce, identity.fingerprint, peer))))
+            val controllerNonce = (PeerFrames.read(input) as? PeerMessage.CodeNonce)?.let { ShortCode.decodeNonce(it.nonce) }
+                ?: return reject(output, RejectCodes.BAD_REQUEST, "expected code_nonce")
+            PeerFrames.write(output, PeerMessage.CodeReveal(ShortCode.encode(targetNonce), device))
+
+            val answers = LinkedBlockingQueue<NearbyAnswer>()
+            val code = ShortCode.code(peer, identity.fingerprint, controllerNonce, targetNonce)
+            request = PairingRequest(peer, name, code) { yes -> answers.offer(if (yes) NearbyAnswer.ACCEPTED else NearbyAnswer.DECLINED) }
+            // The other user's confirmation arrives while this one decides; a hang-up at any point cancels.
+            ssl.soTimeout = (config.nearbyAnswerMs + 5_000).toInt()
+            thread(name = "peer-pair-nearby", isDaemon = true) {
+                try {
+                    if (PeerFrames.read(input) is PeerMessage.CodeConfirm) {
+                        answers.offer(NearbyAnswer.CONFIRMED)
+                        PeerFrames.read(input) // nothing else is expected: this returns on hang-up
+                    }
+                } catch (_: Exception) {
+                }
+                answers.offer(NearbyAnswer.GONE)
+            }
+            events.onPairingRequest(request)
+
+            val outcome = awaitNearbyAnswers(answers)
+            // Free before any reply goes out, so a retry right after it is not refused as busy.
+            synchronized(lock) { inv.nearbyBusy = false }
+            when (outcome) {
+                NearbyOutcome.PAIRED -> {
+                    // Accepted here, so it pairs even if the invitation was replaced meanwhile.
+                    val consumed = synchronized(lock) { (invitation === inv).also { if (it) invitation = null } }
+                    if (consumed) events.onInvitationChanged(null)
+                    completePairing(raw, output, peer, name, msg.servePort, inv.grants, proof = "")
+                }
+                NearbyOutcome.DECLINED -> {
+                    countNearbyFailure(inv)
+                    reject(output, RejectCodes.DECLINED, "${device.name} declined")
+                }
+                NearbyOutcome.TIMED_OUT -> {
+                    countNearbyFailure(inv)
+                    events.onPairingRejected("the request from $name was not answered in time")
+                    reject(output, RejectCodes.DECLINED, "no one answered on ${device.name}")
+                }
+                NearbyOutcome.CANCELLED -> {
+                    countNearbyFailure(inv)
+                    events.onPairingRejected("$name cancelled pairing")
+                }
+            }
+        } finally {
+            synchronized(lock) { inv.nearbyBusy = false }
+            request?.let(events::onPairingRequestEnded)
+        }
+    }
+
+    private fun awaitNearbyAnswers(answers: LinkedBlockingQueue<NearbyAnswer>): NearbyOutcome {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(config.nearbyAnswerMs)
+        var accepted = false
+        var confirmed = false
+        while (!(accepted && confirmed)) {
+            val left = deadline - System.nanoTime()
+            when (if (left > 0) answers.poll(left, TimeUnit.NANOSECONDS) else null) {
+                NearbyAnswer.ACCEPTED -> accepted = true
+                NearbyAnswer.CONFIRMED -> confirmed = true
+                NearbyAnswer.DECLINED -> return NearbyOutcome.DECLINED
+                NearbyAnswer.GONE -> return NearbyOutcome.CANCELLED
+                null -> return NearbyOutcome.TIMED_OUT
+            }
+        }
+        return NearbyOutcome.PAIRED
+    }
+
+    /** Declines and hang-ups count like wrong codes, so no one can keep asking. */
+    private fun countNearbyFailure(inv: PendingInvitation) {
+        val closed = synchronized(lock) {
+            inv.failures++
+            (inv.failures >= config.maxPairingFailures && invitation === inv).also { if (it) invitation = null }
+        }
+        if (closed) events.onInvitationChanged(null)
+    }
+
+    private fun completePairing(
+        raw: Socket,
+        output: OutputStream,
+        peer: Fingerprint,
+        name: String,
+        servePort: Int?,
+        grants: Set<Grant>,
+        proof: String,
+    ) {
+        val now = System.currentTimeMillis()
         val host = raw.inetAddress.hostAddress ?: ""
         store.update(peer) { old ->
             (old ?: PeerRecord(fingerprint = peer.hex, name = name, pairedAtMs = now)).copy(
                 name = name,
-                inbound = Grant.toWire(inv.grants),
-                target = msg.servePort?.let { TargetAddress(host, it) } ?: old?.target,
+                inbound = Grant.toWire(grants),
+                target = servePort?.let { TargetAddress(host, it) } ?: old?.target,
                 lastSeenMs = now,
             )
         }
-        val proof = PairingProof.encode(PairingProof.compute(inv.secret, PairingProof.Role.TARGET, identity.fingerprint, peer))
-        PeerFrames.write(output, PeerMessage.Paired(proof, device, Grant.toWire(inv.grants)))
+        PeerFrames.write(output, PeerMessage.Paired(proof, device, Grant.toWire(grants)))
         store.find(peer)?.let(events::onPaired)
         PeerLog.i("paired with ${peer.short} ($name)")
     }
@@ -341,7 +529,7 @@ class TargetServer(
         if (synchronized(lock) { sessions.size } >= config.maxSessions) {
             return reject(output, RejectCodes.BUSY, "too many sessions")
         }
-        val backend = obtainBackend() ?: return reject(output, RejectCodes.UNAVAILABLE, "serving is not ready on the target")
+        val backend = obtainBackend() ?: return reject(output, RejectCodes.UNAVAILABLE, backends.notReadyReason())
         val caps = backend.capabilities
 
         val session = Session(

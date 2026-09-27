@@ -17,6 +17,7 @@ import io.github.pwnedbygary.scterm.protocol.PeerFrames
 import io.github.pwnedbygary.scterm.protocol.PeerMessage
 import io.github.pwnedbygary.scterm.protocol.ProtocolException
 import io.github.pwnedbygary.scterm.protocol.RejectCodes
+import io.github.pwnedbygary.scterm.protocol.ShortCode
 import io.github.pwnedbygary.scterm.protocol.StreamRequest
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -25,6 +26,8 @@ import java.io.DataInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.SocketTimeoutException
+import java.util.concurrent.CancellationException
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -59,6 +62,37 @@ class ControllerClient(private val identity: PeerIdentity, private val client: C
                 is PeerMessage.Reject -> throw PeerException(reply.code, reply.message)
                 else -> throw ProtocolException("unexpected pairing reply")
             }
+        }
+    }
+
+    /**
+     * Starts pairing with a nearby target that has an invitation open, with
+     * nothing typed: both devices then show [NearbyPairing.code] for their
+     * users to compare. Blocks for a few round trips.
+     */
+    fun startNearbyPairing(host: String, port: Int, servePort: Int? = null, timeoutMs: Int = 10_000): NearbyPairing {
+        val socket = PeerTls.connect(PeerTls.clientContext(identity, null), host, port, timeoutMs)
+        try {
+            val target = PeerTls.peerFingerprint(socket)
+            val input = DataInputStream(socket.inputStream)
+            val output = socket.outputStream
+            PeerFrames.write(output, PeerMessage.PairNearby(client = client, servePort = servePort))
+            val commit = when (val reply = PeerFrames.read(input)) {
+                is PeerMessage.CodeCommit -> reply.commit
+                is PeerMessage.Reject -> throw PeerException(reply.code, reply.message)
+                else -> throw ProtocolException("expected code_commit")
+            }
+            val nonce = ShortCode.newNonce()
+            PeerFrames.write(output, PeerMessage.CodeNonce(ShortCode.encode(nonce)))
+            val reveal = PeerFrames.read(input) as? PeerMessage.CodeReveal ?: throw ProtocolException("expected code_reveal")
+            val targetNonce = ShortCode.decodeNonce(reveal.nonce) ?: throw ProtocolException("malformed code_reveal")
+            if (!ShortCode.verifyCommitment(commit, targetNonce, target, identity.fingerprint)) {
+                throw PeerException(RejectCodes.BAD_PROOF, "the other device broke the pairing protocol")
+            }
+            return NearbyPairing(socket, input, target, reveal.device, ShortCode.code(identity.fingerprint, target, nonce, targetNonce))
+        } catch (e: Exception) {
+            socket.closeQuietly()
+            throw e
         }
     }
 
@@ -119,6 +153,67 @@ class ControllerClient(private val identity: PeerIdentity, private val client: C
         msg is PeerMessage.Welcome && msg.channel == channel -> msg
         msg is PeerMessage.Reject -> throw PeerException(msg.code, msg.message)
         else -> throw ProtocolException("expected a ${channel.name.lowercase()} welcome")
+    }
+}
+
+/**
+ * A nearby pairing waiting on its two users, both shown [code]. Call
+ * [confirm] once this side's user sees the same code on the other device, or
+ * [cancel]. [result] completes when the other device's user has answered too,
+ * or as soon as the pairing fails (they declined, or the connection dropped),
+ * on a network thread. Safe to use from any thread; nothing here blocks.
+ */
+class NearbyPairing internal constructor(
+    private val socket: SSLSocket,
+    private val input: DataInputStream,
+    val fingerprint: Fingerprint,
+    val device: DeviceInfo,
+    val code: String,
+) {
+    val result = CompletableFuture<ControllerClient.PairResult>()
+    private val confirmed = AtomicBoolean(false)
+
+    init {
+        socket.soTimeout = ANSWER_TIMEOUT_MS
+        thread(name = "peer-pair-result", isDaemon = true) {
+            try {
+                when (val reply = PeerFrames.read(input)) {
+                    is PeerMessage.Paired ->
+                        if (confirmed.get()) {
+                            result.complete(ControllerClient.PairResult(fingerprint, reply.device, Grant.parse(reply.grants)))
+                        } else {
+                            result.completeExceptionally(ProtocolException("the other device did not wait for confirmation"))
+                        }
+                    is PeerMessage.Reject -> result.completeExceptionally(PeerException(reply.code, reply.message))
+                    else -> result.completeExceptionally(ProtocolException("unexpected pairing reply"))
+                }
+            } catch (e: Exception) {
+                result.completeExceptionally(e)
+            } finally {
+                socket.closeQuietly()
+            }
+        }
+    }
+
+    fun confirm() {
+        if (result.isDone || !confirmed.compareAndSet(false, true)) return
+        thread(name = "peer-pair-confirm", isDaemon = true) {
+            try {
+                PeerFrames.write(socket.outputStream, PeerMessage.CodeConfirm)
+            } catch (_: IOException) {
+                // The reader reports why: a refusal already sent, or the lost connection.
+            }
+        }
+    }
+
+    fun cancel() {
+        result.completeExceptionally(CancellationException("pairing cancelled"))
+        thread(name = "peer-pair-cancel", isDaemon = true) { socket.closeQuietly() }
+    }
+
+    internal companion object {
+        /** Longer than a target waits for its user, so its refusal arrives first. */
+        const val ANSWER_TIMEOUT_MS = 90_000
     }
 }
 

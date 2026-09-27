@@ -25,6 +25,9 @@ interface ServingBackend : TargetBackend {
 
     /** Set by the service; the backend calls it when [ready] or [status] change. */
     var onChanged: (() -> Unit)?
+
+    /** Why controllers are refused while not [ready], worded for the controller's user. */
+    val notReadyReason: String get() = status
 }
 
 sealed interface ServeState {
@@ -40,6 +43,8 @@ sealed interface ServeState {
         val sessions: List<TargetServer.SessionInfo>,
         /** HELPER only: the one-time ADB command that starts the helper. */
         val helperCommand: String? = null,
+        /** HELPER only: the same command without `adb shell`, for starting it through Shizuku. */
+        val helperShellCommand: String? = null,
     ) : ServeState
 
     data class Failed(val message: String) : ServeState
@@ -50,6 +55,20 @@ object Serving {
     private val mutableState = MutableStateFlow<ServeState>(ServeState.Stopped)
     val state: StateFlow<ServeState> = mutableState
 
+    private val mutableInvitation = MutableStateFlow<Long?>(null)
+
+    /** When the open invitation expires; null while none is open. */
+    val invitationExpiresAtMs: StateFlow<Long?> = mutableInvitation
+
+    private val mutablePairingRequest = MutableStateFlow<TargetServer.PairingRequest?>(null)
+
+    /** A nearby device waiting for this device's user to accept or decline. */
+    val pairingRequest: StateFlow<TargetServer.PairingRequest?> = mutablePairingRequest
+
+    /** True while the main screen is showing, which then asks about pairing requests itself. */
+    @Volatile
+    var uiVisible = false
+
     @Volatile
     internal var server: TargetServer? = null
 
@@ -57,6 +76,18 @@ object Serving {
         mutableState.value = value
     }
 
+    internal fun publishInvitation(expiresAtMs: Long?) {
+        mutableInvitation.value = expiresAtMs
+    }
+
+    internal fun publishPairingRequest(request: TargetServer.PairingRequest?) {
+        mutablePairingRequest.value = request
+    }
+
     /** A single-use invitation from the running server, or null when not serving. */
     fun invite(host: String, grants: Set<Grant>): Invitation? = server?.invite(host, grants)
+
+    fun cancelInvitation() {
+        server?.cancelInvitation()
+    }
 }

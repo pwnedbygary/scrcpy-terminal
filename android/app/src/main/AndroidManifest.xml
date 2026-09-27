@@ -9,10 +9,17 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <!-- Wi-Fi locks keep the radio out of power save while streaming. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Nearby pairing: receive mDNS while an invitation is open or the pair dialog searches. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Package visibility (Android 11+): offer "Start with Shizuku" only when it is installed. -->
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
 
     <application
         android:name=".ScTermApp"
@@ -70,5 +77,15 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/remote_input_service" />
         </service>
+
+        <!-- How a running Shizuku hands this app its binder, for starting the
+             helper without a computer. Only the system can use it. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
 </manifest>

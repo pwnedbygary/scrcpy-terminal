@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.PersistableBundle
 import android.provider.Settings
 import android.text.InputType
+import android.text.format.DateFormat
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -38,23 +39,31 @@ import androidx.lifecycle.repeatOnLifecycle
 import io.github.pwnedbygary.scterm.R
 import io.github.pwnedbygary.scterm.ScTermApp
 import io.github.pwnedbygary.scterm.peer.ControllerClient
+import io.github.pwnedbygary.scterm.peer.NearbyPairing
 import io.github.pwnedbygary.scterm.peer.PeerException
 import io.github.pwnedbygary.scterm.peer.PeerRecord
 import io.github.pwnedbygary.scterm.peer.TargetAddress
+import io.github.pwnedbygary.scterm.peer.TargetServer
 import io.github.pwnedbygary.scterm.protocol.Grant
 import io.github.pwnedbygary.scterm.protocol.Invitation
+import io.github.pwnedbygary.scterm.protocol.ProtocolException
 import io.github.pwnedbygary.scterm.protocol.RejectCodes
+import io.github.pwnedbygary.scterm.protocol.ShortCode
 import io.github.pwnedbygary.scterm.target.BackendKind
 import io.github.pwnedbygary.scterm.target.RemoteInputService
 import io.github.pwnedbygary.scterm.target.ServeState
 import io.github.pwnedbygary.scterm.target.Serving
+import io.github.pwnedbygary.scterm.target.ShizukuActivation
 import io.github.pwnedbygary.scterm.target.TargetService
+import io.github.pwnedbygary.scterm.util.Nearby
 import io.github.pwnedbygary.scterm.util.Net
 import io.github.pwnedbygary.scterm.util.Permissions
 import io.github.pwnedbygary.scterm.viewer.ViewerActivity
 import kotlinx.coroutines.launch
 import java.net.ConnectException
 import java.net.SocketTimeoutException
+import java.util.Date
+import java.util.concurrent.CancellationException
 import javax.net.ssl.SSLException
 import kotlin.concurrent.thread
 
@@ -73,10 +82,18 @@ class MainActivity : ComponentActivity() {
     private lateinit var inputButton: Button
     private lateinit var helperBox: LinearLayout
     private lateinit var helperCommand: TextView
+    private lateinit var shizukuButton: Button
+    private var helperShellCommand: String? = null
     private lateinit var peersList: LinearLayout
 
     private var pendingAfterPermissions: (() -> Unit)? = null
     private var storeListener: AutoCloseable? = null
+
+    private var invitationExpiresAtMs: Long? = null
+    private var invitationDialog: AlertDialog? = null
+    private var requestDialog: AlertDialog? = null
+    private var requestShown: TargetServer.PairingRequest? = null
+    private var nearbyPairing: NearbyPairing? = null
 
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val next = pendingAfterPermissions
@@ -103,9 +120,21 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(buildUi())
         lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) { Serving.state.collect(::renderServing) }
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch { Serving.state.collect(::renderServing) }
+                launch { Serving.invitationExpiresAtMs.collect(::renderInvitation) }
+                launch { Serving.pairingRequest.collect(::renderPairingRequest) }
+            }
         }
         handleIntent(intent)
+    }
+
+    override fun onDestroy() {
+        // Dialogs die with this window; a pairing waiting on one cannot finish.
+        nearbyPairing?.cancel()
+        invitationDialog?.dismiss()
+        requestDialog?.dismiss()
+        super.onDestroy()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -115,6 +144,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        Serving.uiVisible = true
         storeListener = app.peers.addListener { runOnUiThread { renderPeers() } }
         renderIdentity()
         renderPeers()
@@ -122,6 +152,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        Serving.uiVisible = false
         storeListener?.close()
         storeListener = null
         super.onStop()
@@ -178,10 +209,11 @@ class MainActivity : ComponentActivity() {
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         }
+        shizukuButton = button(getString(R.string.start_with_shizuku)) { startHelperWithShizuku() }
         helperBox = column(
-            text("Run once from a computer with adb (the phone connected over USB or wireless debugging):", 13f, color = R.color.muted),
+            text("Run once from a computer with adb (the phone connected over USB or wireless debugging), or start it with Shizuku if it runs on this device:", 13f, color = R.color.muted),
             helperCommand,
-            button(getString(R.string.copy)) { copy("scterm helper command", helperCommand.text, sensitive = false) },
+            row(button(getString(R.string.copy)) { copy("scterm helper command", helperCommand.text, sensitive = false) }, shizukuButton),
         )
         column.addView(card(
             getString(R.string.section_serve),
@@ -246,6 +278,10 @@ class MainActivity : ComponentActivity() {
                             append(if (s.holdsLease) " controlling" else " viewing")
                         }
                     }
+                    invitationExpiresAtMs?.let {
+                        append("\nInvitation open until ").append(DateFormat.getTimeFormat(this@MainActivity).format(Date(it)))
+                        append(": nearby devices can find this one.")
+                    }
                 }
                 serveButton.text = getString(R.string.serve_stop)
                 serveButton.isEnabled = true
@@ -254,10 +290,41 @@ class MainActivity : ComponentActivity() {
                 if (state.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) inputButton.visibility = View.VISIBLE
                 state.helperCommand?.takeIf { !state.ready }?.let {
                     helperCommand.text = it
+                    helperShellCommand = state.helperShellCommand
+                    shizukuButton.visibility = if (ShizukuActivation.installed(this)) View.VISIBLE else View.GONE
                     helperBox.visibility = View.VISIBLE
                 }
             }
         }
+    }
+
+    private fun renderInvitation(expiresAtMs: Long?) {
+        invitationExpiresAtMs = expiresAtMs
+        if (expiresAtMs == null) {
+            // Used, cancelled or expired: its code is useless now.
+            invitationDialog?.dismiss()
+            invitationDialog = null
+        }
+        renderServing(Serving.state.value)
+    }
+
+    private fun renderPairingRequest(request: TargetServer.PairingRequest?) {
+        if (request === requestShown) return
+        requestDialog?.dismiss()
+        requestDialog = null
+        requestShown = request
+        if (request == null) return
+        requestDialog = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.pairing_request_title, request.peerName))
+            .setMessage("Accept only if ${request.peerName} shows this same code.")
+            .setView(padded(codeView(request.code)))
+            .setPositiveButton(R.string.pairing_accept) { _, _ ->
+                request.accept()
+                toast("Waiting for ${request.peerName} to confirm…")
+            }
+            .setNegativeButton(R.string.pairing_decline) { _, _ -> request.decline() }
+            .setCancelable(false)
+            .show()
     }
 
     private fun renderPeers() {
@@ -268,19 +335,26 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun peerRow(peer: PeerRecord): View {
-        val inbound = peer.inboundGrants
         val lines = mutableListOf<View>(
             text(peer.name, 16f, Typeface.BOLD),
             text("Identity ${peer.id.short}", 12f, color = R.color.muted),
-            text(
-                if (inbound.isEmpty()) "Cannot connect to this device" else "May ${describe(inbound)} on this device",
+        )
+        // Name who acts on whom in every line: under a peer's name, a bare "this device" reads both ways.
+        peer.target?.let { t ->
+            val granted = Grant.parse(peer.grantedByPeer)
+            lines += text("Address ${t.host}:${t.port}", 13f, color = R.color.muted)
+            lines += text(
+                if (granted.isEmpty()) "It gives you no access." else "You can ${describeAccess(granted, theirs = true)}.",
                 13f,
                 color = R.color.muted,
-            ),
-        )
-        peer.target?.let { t ->
-            lines += text("Serves at ${t.host}:${t.port}; allows this device to ${describe(Grant.parse(peer.grantedByPeer))}", 13f, color = R.color.muted)
+            )
         }
+        val inbound = peer.inboundGrants
+        lines += text(
+            if (inbound.isEmpty()) "It can't connect to your device." else "It can ${describeAccess(inbound, theirs = false)}.",
+            13f,
+            color = R.color.muted,
+        )
         val buttons = mutableListOf<View>()
         if (peer.target != null) buttons += button(getString(R.string.connect)) { connect(peer) }
         buttons += button("Manage…") { showManageDialog(peer) }
@@ -289,6 +363,15 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------------------- actions
+
+    private fun startHelperWithShizuku() {
+        val command = helperShellCommand ?: return
+        shizukuButton.isEnabled = false
+        ShizukuActivation.start(this, command) { error ->
+            shizukuButton.isEnabled = true
+            if (error == null) toast("Starting the helper through Shizuku…") else alert("Shizuku", error)
+        }
+    }
 
     private fun toggleServing() {
         when (Serving.state.value) {
@@ -372,37 +455,72 @@ class MainActivity : ComponentActivity() {
             setTextIsSelectable(true)
             gravity = Gravity.CENTER
         }
-        AlertDialog.Builder(this)
+        val body = column(
+            text(
+                "On the other device choose \"${getString(R.string.pair_with)}\": this device is listed there under " +
+                    "${getString(R.string.pairing_nearby)}. Or enter this there:",
+                14f,
+            ),
+            code,
+            text("It works once, for 10 minutes.", 13f, color = R.color.muted),
+            row(
+                button(getString(R.string.copy)) { copy("scterm invitation", invitation.manualText, sensitive = true) },
+                button(getString(R.string.share)) {
+                    startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, invitation.toUri()),
+                            getString(R.string.share),
+                        ),
+                    )
+                },
+            ),
+        )
+        invitationDialog?.dismiss()
+        invitationDialog = AlertDialog.Builder(this)
             .setTitle("Invitation")
-            .setMessage("On the other device choose \"${getString(R.string.pair_with)}\" and enter this. It works once, for 10 minutes.")
-            .setView(padded(code))
-            .setPositiveButton(R.string.done, null)
-            .setNeutralButton(R.string.copy) { _, _ -> copy("scterm invitation", invitation.manualText, sensitive = true) }
-            .setNegativeButton(R.string.share) { _, _ ->
-                startActivity(
-                    Intent.createChooser(
-                        Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, invitation.toUri()),
-                        getString(R.string.share),
-                    ),
-                )
-            }
+            .setView(padded(body))
+            .setPositiveButton(R.string.hide, null)
+            .setNegativeButton(R.string.stop_inviting) { _, _ -> Serving.cancelInvitation() }
             .show()
     }
 
-    private fun showPairDialog(prefill: String?) {
+    private fun showPairDialog(prefill: String?) = withNetworkPermissions(serving = false) {
         val input = EditText(this).apply {
             hint = "192.168.1.20:${Invitation.DEFAULT_PORT} ABCD-EFGH-JKMN-PQRS"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             prefill?.let(::setText)
         }
         val allowBack = CheckBox(this).apply { text = getString(R.string.pair_allow_back) }
-        AlertDialog.Builder(this)
+        val searching = text("Looking for devices showing an invitation on this network…", 14f, color = R.color.muted)
+        val nearbyList = column(searching)
+        lateinit var dialog: AlertDialog
+        val browser = Nearby.Browser(this) { services ->
+            nearbyList.removeAllViews()
+            if (services.isEmpty()) nearbyList.addView(searching)
+            for (service in services) {
+                nearbyList.addView(button(service.name) {
+                    dialog.dismiss()
+                    pairNearby(service, allowBack.isChecked)
+                })
+            }
+        }
+        val body = column(
+            sectionLabel(getString(R.string.pairing_nearby)),
+            nearbyList,
+            sectionLabel(getString(R.string.pairing_enter_invitation)).apply { setPadding(0, dp(16), 0, dp(2)) },
+            input,
+            allowBack,
+        )
+        dialog = AlertDialog.Builder(this)
             .setTitle(R.string.pair_with)
-            .setMessage("Enter the invitation shown on the device you want to control.")
-            .setView(padded(column(input, allowBack)))
-            .setPositiveButton(R.string.pair) { _, _ -> pair(input.text.toString(), allowBack.isChecked) }
+            .setView(ScrollView(this).apply { addView(padded(body)) })
+            .setPositiveButton(R.string.pair) { _, _ ->
+                if (input.text.isBlank()) toast("Pick a nearby device, or enter an invitation.") else pair(input.text.toString(), allowBack.isChecked)
+            }
             .setNegativeButton(R.string.cancel, null)
+            .setOnDismissListener { browser.stop() }
             .show()
+        browser.start()
     }
 
     private fun pair(text: String, allowBack: Boolean) {
@@ -417,21 +535,91 @@ class MainActivity : ComponentActivity() {
             thread(name = "pairing", isDaemon = true) {
                 try {
                     val result = ControllerClient(app.identity, app.clientInfo).pair(invitation, servePort)
-                    val now = System.currentTimeMillis()
-                    app.peers.update(result.fingerprint) { old ->
-                        (old ?: PeerRecord(result.fingerprint.hex, result.device.name, pairedAtMs = now)).copy(
-                            name = result.device.name,
-                            target = TargetAddress(invitation.host, invitation.port),
-                            grantedByPeer = Grant.toWire(result.grants),
-                            inbound = if (allowBack) Grant.toWire(Grant.FULL) else old?.inbound ?: emptyList(),
-                            lastSeenMs = now,
-                        )
-                    }
+                    savePairing(result, invitation.host, invitation.port, allowBack)
                     runOnUiThread { toast("Paired with ${result.device.name}") }
                 } catch (e: Exception) {
                     runOnUiThread { alert("Pairing failed", describePairingFailure(e)) }
                 }
             }
+        }
+    }
+
+    /** Connects to a device found nearby; both screens then show a code to compare. */
+    private fun pairNearby(service: Nearby.Service, allowBack: Boolean) {
+        var cancelled = false
+        val progress = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.pairing_request_title, service.name))
+            .setMessage("Connecting…")
+            .setNegativeButton(R.string.cancel) { _, _ -> cancelled = true }
+            .setOnCancelListener { cancelled = true }
+            .show()
+        val servePort = (Serving.state.value as? ServeState.Serving)?.port
+        Nearby.resolve(this, service) { address ->
+            if (cancelled || isDestroyed) return@resolve
+            if (address == null) {
+                progress.dismiss()
+                alert("Pairing failed", "${service.name} can no longer be found on this network.")
+                return@resolve
+            }
+            val (host, port) = address
+            thread(name = "pairing", isDaemon = true) {
+                val started = runCatching { ControllerClient(app.identity, app.clientInfo).startNearbyPairing(host, port, servePort) }
+                runOnUiThread {
+                    progress.dismiss()
+                    val pairing = started.getOrNull()
+                    when {
+                        cancelled || isDestroyed -> pairing?.cancel()
+                        pairing != null -> confirmNearby(pairing, host, port, allowBack)
+                        else -> alert("Pairing failed", describePairingFailure(started.exceptionOrNull()!!, nearby = true))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun confirmNearby(pairing: NearbyPairing, host: String, port: Int, allowBack: Boolean) {
+        val name = pairing.device.name
+        nearbyPairing = pairing
+        val status = text("Pair only if $name shows this same code, then accept there too.", 14f).apply { gravity = Gravity.CENTER }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.pairing_request_title, name))
+            .setView(padded(column(codeView(pairing.code), status)))
+            .setPositiveButton(R.string.pair, null)
+            .setNegativeButton(R.string.cancel, null)
+            .setCancelable(false)
+            .show()
+        // Replaced listeners keep the dialog up while waiting for the other device.
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { button ->
+            button.isEnabled = false
+            status.text = getString(R.string.pairing_waiting, name)
+            pairing.confirm()
+        }
+        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener { pairing.cancel() }
+        pairing.result.whenComplete { result, error ->
+            // Saved even if this screen is gone: the other device has already saved this one.
+            result?.let { savePairing(it, host, port, allowBack) }
+            runOnUiThread {
+                if (nearbyPairing === pairing) nearbyPairing = null
+                if (isDestroyed) return@runOnUiThread
+                dialog.dismiss()
+                when {
+                    result != null -> toast("Paired with ${result.device.name}")
+                    error != null && error !is CancellationException -> alert("Pairing failed", describePairingFailure(error, nearby = true))
+                }
+            }
+        }
+    }
+
+    private fun savePairing(result: ControllerClient.PairResult, host: String, port: Int, allowBack: Boolean) {
+        val now = System.currentTimeMillis()
+        app.peers.update(result.fingerprint) { old ->
+            (old ?: PeerRecord(result.fingerprint.hex, result.device.name, pairedAtMs = now)).copy(
+                name = result.device.name,
+                target = TargetAddress(host, port),
+                grantedByPeer = Grant.toWire(result.grants),
+                inbound = if (allowBack) Grant.toWire(Grant.FULL) else old?.inbound ?: emptyList(),
+                lastSeenMs = now,
+            )
         }
     }
 
@@ -496,24 +684,50 @@ class MainActivity : ComponentActivity() {
 
     // --------------------------------------------------------------- helpers
 
-    private fun describePairingFailure(e: Exception): String = when {
+    private fun describePairingFailure(e: Throwable, nearby: Boolean = false): String = when {
+        e is PeerException && e.code == RejectCodes.DECLINED -> e.message.orEmpty().replaceFirstChar(Char::uppercaseChar) + "."
+        e is PeerException && e.code == RejectCodes.UNAVAILABLE -> "That device is already pairing with another one. Try again in a minute."
+        e is PeerException && e.code == RejectCodes.NO_INVITATION ->
+            if (nearby) {
+                "That device is no longer inviting. Create a new invitation on it."
+            } else {
+                "That device is not waiting to pair (the invitation expired or was replaced)."
+            }
+        nearby && (e is ProtocolException || e is PeerException && e.code == RejectCodes.BAD_PROOF) ->
+            "That device did not follow the pairing protocol, so nothing was paired."
         e is PeerException && e.code == RejectCodes.BAD_PROOF -> "The code was wrong, or the invitation was already used. Create a new invitation."
-        e is PeerException && e.code == RejectCodes.NO_INVITATION -> "That device is not waiting to pair (the invitation expired or was replaced)."
-        e is SSLException -> "The device at that address is not the one that created the invitation."
-        e is ConnectException || e is SocketTimeoutException -> "Could not reach the device. Check the address and that both are on the same network."
+        e is SSLException ->
+            if (nearby) "Could not set up a secure connection with that device." else "The device at that address is not the one that created the invitation."
+        e is ConnectException || e is SocketTimeoutException ->
+            if (nearby) {
+                "Could not reach that device. Check that both are on the same network."
+            } else {
+                "Could not reach the device. Check the address and that both are on the same network."
+            }
         else -> e.message ?: e.javaClass.simpleName
     }
 
-    private fun describe(grants: Set<Grant>): String {
-        if (grants.isEmpty()) return "nothing"
-        return grants.joinToString(", ") {
+    /** A pairing code, large and grouped the same way on both screens. */
+    private fun codeView(code: String) = text(ShortCode.display(code), 36f).apply {
+        setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+        gravity = Gravity.CENTER
+        setPadding(0, dp(12), 0, dp(12))
+    }
+
+    private fun sectionLabel(title: String) = text(title.uppercase(), 13f, Typeface.BOLD, R.color.accent)
+
+    /** "see its screen, hear its audio and control it", or the same about "your" device. */
+    private fun describeAccess(grants: Set<Grant>, theirs: Boolean): String {
+        val owner = if (theirs) "its" else "your"
+        val phrases = Grant.entries.filter { it in grants }.map {
             when (it) {
-                Grant.VIEW -> "view"
-                Grant.AUDIO -> "hear"
-                Grant.CONTROL -> "control"
-                Grant.CLIPBOARD -> "share the clipboard"
+                Grant.VIEW -> "see $owner screen"
+                Grant.AUDIO -> "hear $owner audio"
+                Grant.CONTROL -> if (theirs) "control it" else "control your device"
+                Grant.CLIPBOARD -> "share $owner clipboard"
             }
         }
+        return if (phrases.size < 2) phrases.joinToString() else phrases.dropLast(1).joinToString(", ") + " and " + phrases.last()
     }
 
     private fun grantLabel(grant: Grant): Int = when (grant) {

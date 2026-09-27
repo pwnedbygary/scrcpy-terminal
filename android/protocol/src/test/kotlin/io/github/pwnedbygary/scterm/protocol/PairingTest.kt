@@ -80,6 +80,34 @@ class PairingTest {
     }
 
     @Test
+    fun nearbyCodesMatchTheIndependentImplementation() {
+        for (e in v.getValue("nearby").jsonArray.map { it.jsonObject }) {
+            val controllerNonce = unhex(e.str("controllerNonce"))
+            val targetNonce = unhex(e.str("targetNonce"))
+            assertEquals(e.str("commitment"), hex(ShortCode.commitment(targetNonce, target, controller)))
+            assertEquals(e.str("code"), ShortCode.code(controller, target, controllerNonce, targetNonce))
+        }
+        assertEquals("097 297", ShortCode.display("097297"))
+        assertEquals(ShortCode.NONCE_BYTES, ShortCode.newNonce().size)
+    }
+
+    @Test
+    fun nearbyCodesAreBoundToBothIdentitiesAndOrder() {
+        val cn = ShortCode.newNonce()
+        val tn = ShortCode.newNonce()
+        val code = ShortCode.code(controller, target, cn, tn)
+        val relay = Fingerprint.ofPublicKey("mitm".toByteArray())
+        // Collisions are possible (one in a million) but not with these fixed inputs.
+        val fixed = unhex(v.getValue("nearby").jsonArray[0].jsonObject.str("controllerNonce"))
+        val base = ShortCode.code(controller, target, fixed, fixed)
+        assertTrue(base != ShortCode.code(target, controller, fixed, fixed))
+        assertTrue(base != ShortCode.code(controller, relay, fixed, fixed))
+        assertEquals(code, ShortCode.code(controller, target, cn.copyOf(), tn.copyOf()))
+        assertEquals(6, code.length)
+        assertTrue(code.all(Char::isDigit))
+    }
+
+    @Test
     fun invitationsRoundTripInBothForms() {
         val inv = Invitation("192.168.1.20", 27300, secret, target)
         assertEquals(v.str("invitationUri"), inv.toUri())
