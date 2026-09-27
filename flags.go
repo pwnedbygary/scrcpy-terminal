@@ -33,10 +33,22 @@ func parseFlags(cfg *config, mirrorFPS *float64) {
 	fs.StringVar(&cfg.webAddr, "web-addr", cfg.webAddr, "interface to bind for --web/--window (default 127.0.0.1; 0.0.0.0 exposes it to your network)")
 	fs.IntVar(&cfg.webQuality, "web-quality", cfg.webQuality, "mjpeg quality for the web display: 2 (best, big) .. 31 (small)")
 	fs.StringVar(&cfg.windowSize, "window-size", cfg.windowSize, "window size for --window as WxH (default: fitted to the device)")
+
+	// ---- peer mode (the scterm Android app, no adb) -----------------------
+	fs.StringVar(&cfg.peerQuery, "peer", "", "connect to a paired scterm device over the network instead of adb: its name or identity (--peer= for the only paired device; see 'scterm peers')")
+	fs.BoolVar(&cfg.takeover, "takeover", cfg.takeover, "with --peer: take control even if another device has it")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "scterm - scrcpy in your terminal\n\n")
-		fmt.Fprintf(os.Stderr, "usage: scterm [flags]\n\nflags:\n")
+		fmt.Fprintf(os.Stderr, "usage: scterm [flags]\n")
+		fmt.Fprintf(os.Stderr, "       scterm pair \"HOST:PORT CODE\"   pair with an scterm device from its invitation\n")
+		fmt.Fprintf(os.Stderr, "       scterm peers                   list paired devices\n")
+		fmt.Fprintf(os.Stderr, "       scterm forget NAME             forget a paired device\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	fs.Parse(os.Args[1:])
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "peer" {
+			cfg.usePeer = true
+		}
+	})
 }

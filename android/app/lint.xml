@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- Vendored upstream scrcpy server: reviewed upstream, kept byte-identical. -->
+    <issue id="all">
+        <ignore path="**/third_party/scrcpy-server-src/**" />
+        <ignore path="**/scrcpy-server/build/**" />
+    </issue>
+</lint>

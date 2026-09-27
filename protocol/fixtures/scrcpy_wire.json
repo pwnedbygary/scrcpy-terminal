@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "about": "Golden scrcpy v4.1 wire bytes, derived by hand from third_party/scrcpy-server-src (ControlMessageReader, DeviceMessageWriter, Streamer, DesktopConnection) and the C client's sc_float_to_u16fp/sc_float_to_i16fp. Consumed by android/protocol tests and the Go client tests; never regenerate these from either serializer.",
+  "control": [
+    {"name": "keycode_down_home", "type": 0, "fields": {"action": 0, "keycode": 3, "repeat": 0, "metaState": 0}, "hex": "0000000000030000000000000000"},
+    {"name": "keycode_up_enter_ctrl_repeat", "type": 0, "fields": {"action": 1, "keycode": 66, "repeat": 5, "metaState": 4096}, "hex": "0001000000420000000500001000"},
+    {"name": "text_utf8", "type": 1, "fields": {"text": "h\u00e9llo"}, "hex": "010000000668c3a96c6c6f"},
+    {"name": "touch_down_mouse_primary", "type": 2, "fields": {"action": 0, "pointerId": -1, "x": 100, "y": 200, "screenWidth": 1080, "screenHeight": 1920, "pressure": 65535, "actionButton": 1, "buttons": 1}, "hex": "0200ffffffffffffffff00000064000000c804380780ffff0000000100000001"},
+    {"name": "touch_move_generic_finger_negative_x", "type": 2, "fields": {"action": 2, "pointerId": -2, "x": -5, "y": 10, "screenWidth": 720, "screenHeight": 1280, "pressure": 32768, "actionButton": 0, "buttons": 0}, "hex": "0202fffffffffffffffefffffffb0000000a02d0050080000000000000000000"},
+    {"name": "touch_up_finger_3", "type": 2, "fields": {"action": 1, "pointerId": 3, "x": 540, "y": 960, "screenWidth": 1080, "screenHeight": 1920, "pressure": 0, "actionButton": 0, "buttons": 0}, "hex": "020100000000000000030000021c000003c00438078000000000000000000000"},
+    {"name": "scroll_one_notch_up", "type": 3, "fields": {"x": 10, "y": 20, "screenWidth": 1080, "screenHeight": 1920, "hScroll": 0, "vScroll": 2048, "buttons": 0}, "hex": "030000000a00000014043807800000080000000000"},
+    {"name": "scroll_one_notch_down", "type": 3, "fields": {"x": 10, "y": 20, "screenWidth": 1080, "screenHeight": 1920, "hScroll": 0, "vScroll": -2048, "buttons": 0}, "hex": "030000000a00000014043807800000f80000000000"},
+    {"name": "back_down", "type": 4, "fields": {"action": 0}, "hex": "0400"},
+    {"name": "back_up", "type": 4, "fields": {"action": 1}, "hex": "0401"},
+    {"name": "expand_notification_panel", "type": 5, "fields": {}, "hex": "05"},
+    {"name": "expand_settings_panel", "type": 6, "fields": {}, "hex": "06"},
+    {"name": "collapse_panels", "type": 7, "fields": {}, "hex": "07"},
+    {"name": "get_clipboard_copy", "type": 8, "fields": {"copyKey": 1}, "hex": "0801"},
+    {"name": "set_clipboard_paste", "type": 9, "fields": {"sequence": 72623859790382856, "paste": true, "text": "hi"}, "hex": "09010203040506070801000000026869"},
+    {"name": "set_display_power_off", "type": 10, "fields": {"on": false}, "hex": "0a00"},
+    {"name": "rotate_device", "type": 11, "fields": {}, "hex": "0b"},
+    {"name": "uhid_create", "type": 12, "fields": {"id": 1, "vendorId": 1133, "productId": 50475, "name": "kbd", "data": "0501"}, "hex": "0c0001046dc52b036b626400020501"},
+    {"name": "uhid_input", "type": 13, "fields": {"id": 1, "data": "000004"}, "hex": "0d00010003000004"},
+    {"name": "uhid_destroy", "type": 14, "fields": {"id": 1}, "hex": "0e0001"},
+    {"name": "open_hard_keyboard_settings", "type": 15, "fields": {}, "hex": "0f"},
+    {"name": "start_app", "type": 16, "fields": {"name": "org.example"}, "hex": "100b6f72672e6578616d706c65"},
+    {"name": "reset_video", "type": 17, "fields": {}, "hex": "11"},
+    {"name": "camera_set_torch_on", "type": 18, "fields": {"on": true}, "hex": "1201"},
+    {"name": "camera_zoom_in", "type": 19, "fields": {}, "hex": "13"},
+    {"name": "camera_zoom_out", "type": 20, "fields": {}, "hex": "14"},
+    {"name": "resize_display", "type": 21, "fields": {"width": 1920, "height": 1080}, "hex": "1507800438"},
+    {"name": "scan_file", "type": 22, "fields": {"path": "/sdcard/a.mp4"}, "hex": "160000000d2f7364636172642f612e6d7034"}
+  ],
+  "device": [
+    {"name": "clipboard_utf8", "type": 0, "fields": {"text": "h\u00e9"}, "hex": "000000000368c3a9"},
+    {"name": "ack_clipboard", "type": 1, "fields": {"sequence": 42}, "hex": "01000000000000002a"},
+    {"name": "uhid_output", "type": 2, "fields": {"id": 2, "data": "01"}, "hex": "020002000101"}
+  ],
+  "fixedPoint": [
+    {"kind": "u16", "value": 1.0, "raw": 65535},
+    {"kind": "u16", "value": 0.5, "raw": 32768},
+    {"kind": "u16", "value": 0.0, "raw": 0},
+    {"kind": "scroll", "value": 1.0, "raw": 2048},
+    {"kind": "scroll", "value": -1.0, "raw": -2048},
+    {"kind": "scroll", "value": 16.0, "raw": 32767},
+    {"kind": "scroll", "value": 40.0, "raw": 32767},
+    {"kind": "scroll", "value": -16.0, "raw": -32768},
+    {"kind": "scroll", "value": -40.0, "raw": -32768}
+  ],
+  "media": [
+    {"name": "codec_h264", "kind": "codec", "fields": {"codec": "h264"}, "hex": "68323634"},
+    {"name": "codec_opus", "kind": "codec", "fields": {"codec": "opus"}, "hex": "6f707573"},
+    {"name": "stream_disabled", "kind": "disabled", "fields": {"error": false}, "hex": "00000000"},
+    {"name": "stream_config_error", "kind": "disabled", "fields": {"error": true}, "hex": "00000001"},
+    {"name": "session_1080x2400", "kind": "session", "fields": {"width": 1080, "height": 2400, "clientResize": false}, "hex": "800000000000043800000960"},
+    {"name": "session_client_resize", "kind": "session", "fields": {"width": 1920, "height": 1080, "clientResize": true}, "hex": "800000010000078000000438"},
+    {"name": "config_packet", "kind": "packet", "fields": {"ptsUs": 0, "config": true, "keyFrame": false, "data": "000001"}, "hex": "400000000000000000000003000001"},
+    {"name": "key_frame", "kind": "packet", "fields": {"ptsUs": 1000000, "config": false, "keyFrame": true, "data": "6588"}, "hex": "20000000000f4240000000026588"},
+    {"name": "delta_frame", "kind": "packet", "fields": {"ptsUs": 1016666, "config": false, "keyFrame": false, "data": "41"}, "hex": "00000000000f835a0000000141"}
+  ]
+}

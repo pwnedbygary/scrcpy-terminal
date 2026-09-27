@@ -259,9 +259,9 @@ func (s *webServer) scroll(pos position, delta int) {
 
 // isVolumeKey reports whether an Android keycode can change the media volume,
 // so the HUD's device-volume reading can be refreshed right after injection
-// instead of waiting for the next poll. 91 (MUTE) is included even though it is
-// the microphone keycode, because the app sends it for its own mute action and
-// a refresh is cheaper than assuming it cannot matter.
+// instead of waiting for the next poll. 91 (the microphone MUTE) stays in the
+// set so a raw key event carrying it still refreshes; the app's own mute
+// action sends 164.
 func isVolumeKey(code uint32) bool {
 	switch code {
 	case 24, 25, 91, 164: // VOLUME_UP, VOLUME_DOWN, MUTE, VOLUME_MUTE

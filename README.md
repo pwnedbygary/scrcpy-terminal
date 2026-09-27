@@ -50,10 +50,20 @@ Then run with a device connected (or `-s <serial>`):
 ## CI / releases
 
 Every push to `main` and every pull request is built and tested on GitHub
-Actions (`.github/workflows/build.yml`): `go vet`, `go test`, and a stripped
-binary uploaded as an artifact. Pushing a `v*` tag also publishes a GitHub
-release with the binary attached — the version is stamped into `main.version`
-and shown in the status line.
+Actions (`.github/workflows/build.yml`): `go vet`, `go test`, a stripped
+binary, and the Android tests, lint and debug APK, uploaded as artifacts.
+Pushing a `v*` tag also publishes a GitHub release with the binary and the
+signed Android APK attached. The version is stamped into `main.version` (shown
+in the status line) and into the APK (`v2.0.0` becomes version name 2.0.0,
+version code 20000).
+
+The APK is signed with the release key in the repository secrets
+`SCTERM_KEYSTORE_BASE64` (the PKCS12 keystore, base64) and
+`SCTERM_KEYSTORE_PASSWORD` (key alias `scterm`). Android only accepts updates
+signed with the same key, so keep a backup of the keystore and its password:
+without them, every install would have to be removed (losing its identity and
+pairings) to move to a new key. `gh workflow run build.yml --ref <branch>`
+builds a signed APK without releasing, to check the signing.
 
 ## Control
 
@@ -447,6 +457,57 @@ At 480x1080 the mjpeg encode costs ~1 ms/frame single-threaded and lands around
 14 KB/frame. `-max-size 0` streams the device's native resolution instead and
 costs proportionally more; the default 1280 keeps the canvas at the video's own
 size, which is what the display actually shows.
+
+## Development roadmap
+
+The [Android peer app and cross-mode parity plan](docs/ANDROID_CLIENT_PLAN.md)
+describes one Android APK with both server and client roles, direct paired
+control in either direction, and authenticated Go TUI/web/window connections to
+Android servers while retaining legacy ADB operation. It includes permission and
+backend constraints, existing-client gap closure, milestones and release tests. Developers and LLMs should start with the
+[current checkpoint](.agent/HANDOFF.md) and reconcile it against Git and in-flight
+work before implementing the next task.
+
+Implementation has started under [`android/`](android/README.md), speaking the
+[peer protocol](docs/PEER_PROTOCOL.md): scrcpy v4.1 framing inside mutual TLS
+with paired, pinned identities. It runs on an Android 16 phone and an Android
+13 handheld, as target and viewer; two devices pair by picking each other
+from a nearby list and comparing a six-digit code. Signed APKs are attached to
+GitHub releases from v2.0.0 (see [installing](android/README.md#install)).
+scterm's peer mode (below) connects to it without adb; its protocol layer is
+tested against the Kotlin target, but the full `--peer` path has not yet been
+run against a phone.
+
+## Peer mode (`--peer`): the scterm Android app, no adb
+
+The terminal, `--web` and `--window` displays can also show a phone running
+the scterm Android app, over the network and without adb. The app sends
+scrcpy's own stream format inside mutual TLS, so everything after the
+connection (decoding, rendering, input, audio) is the same code as above.
+
+```sh
+# on the phone: Serve this device, then "Invite a device…" shows HOST:PORT CODE
+./scterm pair "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093"
+./scterm peers                  # paired devices and what each allows
+./scterm --peer "Pixel 8"       # or --peer= when only one device is paired
+./scterm --peer "Pixel 8" --window --takeover
+./scterm forget "Pixel 8"
+```
+
+- Pairing is a one-time code, valid for 10 minutes and a single use. Both
+  sides prove they know it, bound to their certificates, so a relay cannot
+  pair in the middle; afterwards each connection pins the phone's identity.
+- The phone decides what this computer may do (view, hear, control,
+  clipboard) and can change or revoke that at any time; a revoked or stopped
+  session ends with the phone's reason.
+- One device controls at a time. `--takeover` takes control from whoever has
+  it; without it scterm watches while another device is in control.
+- This computer's identity and paired devices live in `~/.config/scterm`
+  (`$SCTERM_HOME` overrides it).
+- What the phone can do depends on how it serves: the full-control helper
+  (started over adb or with Shizuku, again after each reboot) matches adb
+  mode; screen capture on a normal install has no audio and single-finger
+  input.
 
 ## Protocol notes (from scrcpy v4.1 source)
 

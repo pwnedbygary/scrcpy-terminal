@@ -6,6 +6,8 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  # Run on any branch from the Actions tab or: gh workflow run build.yml --ref <branch>
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -43,9 +45,68 @@ jobs:
           name: scterm-linux-x86_64
           path: scterm
 
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Also validates gradle-wrapper.jar against Gradle's published checksums.
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests, lint, debug APK, dev tools
+        run: >-
+          ./gradlew --no-daemon
+          :protocol:test :peer:test :app:testDebugUnitTest
+          :app:lintDebug :app:assembleDebug :peerctl:assemble
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: scterm-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      # Tags build the signed release APK; manual runs do too, to check the
+      # signing without releasing. The key comes from repository secrets.
+      - name: Signed release APK
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          SCTERM_KEYSTORE_BASE64: ${{ secrets.SCTERM_KEYSTORE_BASE64 }}
+          SCTERM_KEYSTORE_PASSWORD: ${{ secrets.SCTERM_KEYSTORE_PASSWORD }}
+        run: |
+          export SCTERM_KEYSTORE="$RUNNER_TEMP/scterm-release.p12"
+          printf %s "$SCTERM_KEYSTORE_BASE64" | base64 --decode > "$SCTERM_KEYSTORE"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            ./gradlew --no-daemon --no-configuration-cache :app:assembleRelease "-Pscterm.version=$VERSION"
+          else
+            VERSION=dev
+            ./gradlew --no-daemon --no-configuration-cache :app:assembleRelease
+          fi
+          rm -f "$SCTERM_KEYSTORE"
+          APK=app/build/outputs/apk/release/app-release.apk
+          APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          "$APKSIGNER" verify --print-certs "$APK" | grep 'certificate SHA-256'
+          mv "$APK" "app/build/outputs/apk/release/scterm-android-$VERSION.apk"
+
+      - name: Upload signed release APK
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scterm-android-release
+          path: android/app/build/outputs/apk/release/scterm-android-*.apk
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,10 +128,17 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o scterm .
 
+      - name: Signed Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: scterm-android-release
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: "scterm ${{ github.ref_name }}"
           body: |
             ${{ github.event.head_commit.message }}
-          files: scterm
+          files: |
+            scterm
+            scterm-android-*.apk

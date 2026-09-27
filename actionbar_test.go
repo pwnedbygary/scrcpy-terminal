@@ -507,7 +507,7 @@ func captureStdout(t *testing.T, fn func()) string {
 }
 
 // TestBarMuteHasNoChordButWorks: Mute has no Alt chord on purpose, and the bar
-// is the path that reaches it (keycode 91, MUTE).
+// is the path that reaches it (keycode 164, VOLUME_MUTE).
 func TestBarMuteHasNoChordButWorks(t *testing.T) {
 	withTermSize(t, 200, 30) // wide enough that Mute is on screen
 	cc := &capConn{}
@@ -523,8 +523,8 @@ func TestBarMuteHasNoChordButWorks(t *testing.T) {
 				t.Fatalf("Mute wrote %d messages, want down+up", len(cc.captured))
 			}
 			_, code, _ := keycoded(t, cc.captured[0])
-			if code != 91 {
-				t.Errorf("Mute sent keycode %d, want 91", code)
+			if code != 164 {
+				t.Errorf("Mute sent keycode %d, want 164", code)
 			}
 			return
 		}

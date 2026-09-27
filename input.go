@@ -541,7 +541,7 @@ func seqKeyMap(b []byte) (uint32, uint32, bool) {
 		case 136:
 			return 24, 0, true // VOLUME_UP
 		case 137:
-			return 91, 0, true // MUTE
+			return 164, 0, true // VOLUME_MUTE (not 91: that is the microphone)
 		case 138:
 			return 3, 0, false // F8 handled in app (rotate)
 		case 139:

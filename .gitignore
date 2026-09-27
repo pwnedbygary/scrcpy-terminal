@@ -2,3 +2,5 @@
 /sct
 /scterm
 *.stackdump
+# Local Pi runtime state
+.atl/

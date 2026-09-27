@@ -463,7 +463,7 @@ func TestWebControlEvents(t *testing.T) {
 		op   string
 		code uint32
 	}{{"home", 3}, {"menu", 82}, {"appswitch", 187}, {"power", 26},
-		{"volup", 24}, {"voldown", 25}, {"mute", 91}} {
+		{"volup", 24}, {"voldown", 25}, {"mute", 164}} {
 		drain()
 		cl.send(webEvent{Op: c.op})
 		data = readDeviceMsg()

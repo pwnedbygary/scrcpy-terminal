@@ -50,6 +50,12 @@ public final class AudioPlaybackCapture implements AudioCapture {
             Method addMixRuleMethod = audioMixingRuleBuilderClass.getMethod("addMixRule", int.class, Object.class);
             addMixRuleMethod.invoke(audioMixingRuleBuilder, ruleMatchAttributeUsageConstant, attributes);
 
+            // scterm patch: games and untagged players too, not only media (rules of one type are OR'ed).
+            for (int usage : new int[] {AudioAttributes.USAGE_GAME, AudioAttributes.USAGE_UNKNOWN}) {
+                AudioAttributes extra = new AudioAttributes.Builder().setUsage(usage).build();
+                addMixRuleMethod.invoke(audioMixingRuleBuilder, ruleMatchAttributeUsageConstant, extra);
+            }
+
             // AudioMixingRule audioMixingRule = builder.build();
             Object audioMixingRule = audioMixingRuleBuilderClass.getMethod("build").invoke(audioMixingRuleBuilder);
 

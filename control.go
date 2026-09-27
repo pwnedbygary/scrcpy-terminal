@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"unicode/utf8"
 )
 
 // dbgControl: when non-empty, log control messages to stderr.
@@ -60,13 +61,31 @@ func (c *controller) injectKey(keycode uint32, metastate uint32) error {
 	return c.send(ctrlInjectKeycode, keycodeMsg(keyActionUp, keycode, 0, metastate))
 }
 
-// injectText sends a text payload (utf-8).
+// injectTextMaxBytes is the scrcpy client's per-message text limit
+// (SC_CONTROL_MSG_INJECT_TEXT_MAX_LENGTH); Android peers reject longer ones.
+const injectTextMaxBytes = 300
+
+// injectText sends a text payload (utf-8), split into messages of at most
+// injectTextMaxBytes without cutting a UTF-8 sequence.
 func (c *controller) injectText(text string) error {
-	// msg layout: [pad(1), len(4)?] -- we write pad(1) then the writer adds len
-	payload := make([]byte, 1+4+len(text))
-	copy(payload[1+4:], text)
-	// serializeControlMsg for injectText re-derives len from msg[5:]
-	return c.send(ctrlInjectText, payload)
+	for len(text) > 0 {
+		n := len(text)
+		if n > injectTextMaxBytes {
+			n = injectTextMaxBytes
+			for n > 0 && !utf8.RuneStart(text[n]) {
+				n--
+			}
+		}
+		// msg layout: [pad(1), len(4)?] -- we write pad(1) then the writer adds len
+		payload := make([]byte, 1+4+n)
+		copy(payload[1+4:], text[:n])
+		// serializeControlMsg for injectText re-derives len from msg[5:]
+		if err := c.send(ctrlInjectText, payload); err != nil {
+			return err
+		}
+		text = text[n:]
+	}
+	return nil
 }
 
 // backOrScreenOn sends the back key action.
@@ -188,14 +207,26 @@ func parseDeviceMessage(b []byte) (int, bool) {
 		if len(b) < 5+l {
 			return 0, false
 		}
-		text := string(b[5 : 5+l])
-		fmt.Fprintf(stderrWriter(), "scterm: clipboard: %q\n", text)
+		// Never print the text itself: it is the device clipboard, which
+		// routinely holds passwords and one-time codes.
+		if dbgControl != "" {
+			fmt.Fprintf(stderrWriter(), "scterm: device clipboard changed (%d bytes)\n", l)
+		}
 		return 5 + l, true
 	case 1: // ack clipboard: 8-byte sequence
 		if len(b) < 9 {
 			return 0, false
 		}
 		return 9, true
+	case 2: // uhid output: u16 id, u16 length, data
+		if len(b) < 5 {
+			return 0, false
+		}
+		l := int(binary.BigEndian.Uint16(b[3:5]))
+		if len(b) < 5+l {
+			return 0, false
+		}
+		return 5 + l, true
 	default:
 		fmt.Fprintf(stderrWriter(), "scterm: unknown device msg %d\n", b[0])
 		return 1, true
