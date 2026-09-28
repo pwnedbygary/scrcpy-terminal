@@ -63,7 +63,7 @@ The APK is signed with the release key in the repository secrets
 signed with the same key, so keep a backup of the keystore and its password:
 without them, every install would have to be removed (losing its identity and
 pairings) to move to a new key. `gh workflow run build.yml --ref <branch>`
-builds a signed APK without releasing, to check the signing.
+rehearses a release, signed APK included, without publishing anything.
 
 ## Control
 
