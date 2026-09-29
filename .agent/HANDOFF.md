@@ -7,6 +7,26 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-09-29, session 6: nearby pairing for scterm, releases)
+
+- Released v2.0.0 (signed APK + Linux binary); CI moved to Node 24 actions
+  and ubuntu-26.04 (setup-gradle stays on v5: v6's caching is under Gradle's
+  separate terms).
+- scterm: `scterm pair` with no arguments finds inviting devices (DNS-SD
+  `_scterm._tcp`, `peer/discover.go`: legacy-unicast query plus a shared
+  multicast listener, via `golang.org/x/net` dnsmessage/ipv4, the module's
+  first dependency) and runs nearby pairing (`peer/nearby.go`, same
+  derivation as the app; `peer/nearby_test.go`: shared vectors, a scripted
+  target for agree/decline/skipped-confirm/swapped-nonce/cancel, answer
+  parsing). `--peer` takes the start of a name or of a word in it, and asks
+  which device when several match (`peernearby.go`, `Store.Matches`).
+- App: peer rows refresh what the other device allows on every connection;
+  the empty Nearby list says what to do on the other device.
+- Tooling: macOS's tmp cleanup removes files under /tmp and the sandbox
+  cache after a few days. Go now lives in ~/Library/Caches/scterm-tools; a
+  Gradle "Could not find ... GradleWorkerMain" means a purged worker jar:
+  stop the daemon and delete `caches/<version>/workerMain/workerMain.lock`.
+
 ## Update (2026-09-27, session 5: nearby pairing, Shizuku start)
 
 Session 4's work is committed on `codex/android-client` (6763091, afcd41b,

@@ -30,6 +30,13 @@ const (
 	TypeError    = "error"
 	TypeStatus   = "status"
 	TypeBye      = "bye"
+
+	// Nearby pairing: both users compare a six-digit code (see nearby.go).
+	TypePairNearby  = "pair_nearby"
+	TypeCodeCommit  = "code_commit"
+	TypeCodeNonce   = "code_nonce"
+	TypeCodeReveal  = "code_reveal"
+	TypeCodeConfirm = "code_confirm"
 )
 
 // Channels, one TCP connection each.
@@ -123,7 +130,12 @@ type Message struct {
 	Holder      string         `json:"holder,omitempty"`
 	Reason      string         `json:"reason,omitempty"`
 	EndSession  bool           `json:"endSession,omitempty"`
+	Commit      string         `json:"commit,omitempty"`
+	Nonce       string         `json:"nonce,omitempty"`
 }
+
+// RejectDeclined: in nearby pairing, the target's user declined or did not answer in time.
+const RejectDeclined = "declined"
 
 // RejectError is a target's explicit refusal; Code is one of the protocol's
 // reject codes (not_paired, bad_proof, busy, ...).

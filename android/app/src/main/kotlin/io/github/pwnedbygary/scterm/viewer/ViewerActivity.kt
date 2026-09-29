@@ -212,6 +212,7 @@ class ViewerActivity : ComponentActivity() {
             try {
                 val app = ScTermApp.of(this)
                 val connected = ControllerClient(app.identity, app.clientInfo).connect(host, port, fingerprint)
+                app.peers.update(fingerprint) { it?.copy(grantedByPeer = Grant.toWire(connected.grants), lastSeenMs = System.currentTimeMillis()) }
                 main.post { onConnected(connected) }
             } catch (e: Exception) {
                 main.post { fail(describe(e, "$host:$port", name ?: "The target")) }

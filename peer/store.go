@@ -71,13 +71,14 @@ func (s *Store) Remove(fingerprint string) (bool, error) {
 	return false, nil
 }
 
-// Find picks a target by exact name (case-insensitive), or by a prefix of at
-// least four characters of its fingerprint in hex or short form. An empty
-// query matches when exactly one target is paired.
-func (s *Store) Find(query string) (Record, error) {
+// Matches lists the targets a query could mean: the one whose name it is
+// (case-insensitive), else those whose name, or any word in it, starts with
+// the query, or whose fingerprint starts with it (at least four characters,
+// hex or short form). An empty query matches every target.
+func (s *Store) Matches(query string) ([]Record, error) {
 	recs, err := s.All()
 	if err != nil {
-		return Record{}, err
+		return nil, err
 	}
 	q := strings.ToLower(strings.TrimSpace(query))
 	compact := strings.ReplaceAll(q, "-", "")
@@ -92,23 +93,56 @@ func (s *Store) Find(query string) (Record, error) {
 		case q == "":
 			hits = append(hits, r)
 		case strings.EqualFold(r.Name, q):
-			return r, nil
-		case len(compact) >= 4 && (strings.HasPrefix(r.Fingerprint, compact) || strings.HasPrefix(short, compact)):
+			return []Record{r}, nil
+		case startsNameOrWord(r.Name, q),
+			len(compact) >= 4 && (strings.HasPrefix(r.Fingerprint, compact) || strings.HasPrefix(short, compact)):
 			hits = append(hits, r)
 		}
 	}
+	return hits, nil
+}
+
+func startsNameOrWord(name, q string) bool {
+	name = strings.ToLower(name)
+	if strings.HasPrefix(name, q) {
+		return true
+	}
+	for i := 0; i < len(name); i++ {
+		if c := name[i]; (c == ' ' || c == '-' || c == '_') && strings.HasPrefix(name[i+1:], q) {
+			return true
+		}
+	}
+	return false
+}
+
+// Find is Matches narrowed to exactly one target.
+func (s *Store) Find(query string) (Record, error) {
+	hits, err := s.Matches(query)
+	if err != nil {
+		return Record{}, err
+	}
+	q := strings.TrimSpace(query)
 	switch {
 	case len(hits) == 1:
 		return hits[0], nil
 	case len(hits) > 1 && q == "":
-		return Record{}, fmt.Errorf("%d devices are paired; name one", len(hits))
+		return Record{}, fmt.Errorf("%d devices are paired (%s); name one", len(hits), Names(hits))
 	case len(hits) > 1:
-		return Record{}, fmt.Errorf("%q matches %d paired devices; give more of the identity", query, len(hits))
+		return Record{}, fmt.Errorf("%q matches %s; give more of the name", query, Names(hits))
 	case q == "":
 		return Record{}, errors.New("no paired devices yet: pair one first")
 	default:
 		return Record{}, fmt.Errorf("no paired device matches %q", query)
 	}
+}
+
+// Names lists records' names for messages: "Pixel, Tablet".
+func Names(recs []Record) string {
+	names := make([]string, len(recs))
+	for i, r := range recs {
+		names[i] = r.Name
+	}
+	return strings.Join(names, ", ")
 }
 
 func (s *Store) load() ([]Record, error) {
