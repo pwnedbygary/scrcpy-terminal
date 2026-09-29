@@ -486,17 +486,23 @@ scrcpy's own stream format inside mutual TLS, so everything after the
 connection (decoding, rendering, input, audio) is the same code as above.
 
 ```sh
-# on the phone: Serve this device, then "Invite a device…" shows HOST:PORT CODE
-./scterm pair "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093"
+# on the phone: "Start serving", then "Invite a device…"
+./scterm pair                   # finds it on this network; compare the six-digit code
+./scterm pair "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093"   # or type the invitation
 ./scterm peers                  # paired devices and what each allows
-./scterm --peer "Pixel 8"       # or --peer= when only one device is paired
-./scterm --peer "Pixel 8" --window --takeover
+./scterm --peer pixel           # the start of its name, or of a word in it, is enough
+./scterm --peer=                # the only paired device; asks which when there are several
+./scterm --peer pixel --window --takeover
 ./scterm forget "Pixel 8"
 ```
 
-- Pairing is a one-time code, valid for 10 minutes and a single use. Both
-  sides prove they know it, bound to their certificates, so a relay cannot
-  pair in the middle; afterwards each connection pins the phone's identity.
+- `scterm pair` finds the phone while its invitation is open (DNS-SD on the
+  local network), then both screens show the same six-digit code: check it
+  and confirm on both, as with Bluetooth. Typing the invitation instead works
+  from anywhere the phone is reachable, such as another network or Tailscale.
+- An invitation works once, for 10 minutes. Both sides prove they are the
+  ones pairing, bound to their certificates, so a relay cannot pair in the
+  middle; afterwards each connection pins the phone's identity.
 - The phone decides what this computer may do (view, hear, control,
   clipboard) and can change or revoke that at any time; a revoked or stopped
   session ends with the phone's reason.

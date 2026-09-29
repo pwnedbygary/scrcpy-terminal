@@ -70,7 +70,8 @@ reverse direction. Test vectors: `protocol/fixtures/pairing.json`.
 
 While an invitation is open, the Android app advertises it on the LAN as
 DNS-SD service `_scterm._tcp` (instance name = device name, port = serving
-port, nothing else). A controller that finds it can pair without the secret,
+port, nothing else). Controllers (the app's "Pair with a device…", and
+`scterm pair` with no arguments) browse for it and can pair without the secret,
 by having both users compare a six-digit code, as in Bluetooth's numeric
 comparison. The target only accepts this while an invitation is open, one
 request at a time, and its user must accept each request:

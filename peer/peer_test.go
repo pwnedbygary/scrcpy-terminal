@@ -34,6 +34,12 @@ type pairingFixture struct {
 		Hex  string `json:"hex"`
 		Text string `json:"text"`
 	} `json:"base32"`
+	Nearby []struct {
+		ControllerNonce string `json:"controllerNonce"`
+		TargetNonce     string `json:"targetNonce"`
+		Commitment      string `json:"commitment"`
+		Code            string `json:"code"`
+	} `json:"nearby"`
 }
 
 // The same vectors the Kotlin implementation is tested against.
@@ -218,6 +224,22 @@ func TestStoreFind(t *testing.T) {
 			t.Errorf("Find(%q) should fail with two paired devices", query)
 		}
 	}
+	// Name starts and word starts, but not fragments inside a word.
+	s.Put(Record{Fingerprint: strings.Repeat("ef", 32), Name: "Retroid Pocket 6", Host: "10.0.0.4", Port: DefaultPort})
+	for query, want := range map[string]string{"retro": "Retroid Pocket 6", "POCKET": "Retroid Pocket 6", "6": "Retroid Pocket 6", "tab": "Tablet"} {
+		if r, err := s.Find(query); err != nil || r.Name != want {
+			t.Errorf("Find(%q) = %q, %v", query, r.Name, err)
+		}
+	}
+	for _, query := range []string{"troid", "ocket", "blet"} {
+		if _, err := s.Find(query); err == nil {
+			t.Errorf("Find(%q) matched the middle of a word", query)
+		}
+	}
+	if hits, _ := s.Matches(""); len(hits) != 3 {
+		t.Errorf("Matches(\"\") = %d records", len(hits))
+	}
+	s.Remove(strings.Repeat("ef", 32))
 	a.Name = "Pixel 9"
 	s.Put(a)
 	if recs, _ := s.All(); len(recs) != 2 || recs[0].Name != "Pixel 9" {

@@ -70,7 +70,7 @@ func runPeerCommand(args []string) bool {
 
 func pairCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf(`usage: scterm pair "HOST:PORT CODE" (from the device's invitation) or an scterm://pair link`)
+		return pairNearbyCommand()
 	}
 	inv, err := peer.ParseInvitation(strings.Join(args, " "))
 	if err != nil {
@@ -92,9 +92,13 @@ func pairCommand(args []string) error {
 	if err := store.Put(rec); err != nil {
 		return err
 	}
-	fmt.Printf("Paired with %s (%s); it allows this computer to %s.\n", name, res.Fingerprint.Short(), describeGrants(res.Grants))
-	fmt.Printf("This computer is %s. Connect with: scterm --peer %q\n", client.Identity.Fingerprint.Short(), name)
+	reportPaired(client, name, res.Fingerprint, res.Grants)
 	return nil
+}
+
+func reportPaired(client *peer.Client, name string, fp peer.Fingerprint, grants []string) {
+	fmt.Printf("Paired with %s (%s); it allows this computer to %s.\n", name, fp.Short(), describeGrants(grants))
+	fmt.Printf("This computer is %s. Connect with: scterm --peer %q\n", client.Identity.Fingerprint.Short(), name)
 }
 
 func peersCommand() error {
@@ -151,14 +155,14 @@ func describeGrants(grants []string) string {
 	return strings.Join(out, ", ")
 }
 
-// newPeerSession connects to a paired device, found by name or identity
-// ("" picks the only paired device).
+// newPeerSession connects to a paired device, found by (the start of) its
+// name or its identity; "" picks the only paired device, or asks which.
 func newPeerSession(query string, cfg config) (*session, error) {
 	client, store, err := openPeerClient()
 	if err != nil {
 		return nil, err
 	}
-	rec, err := store.Find(query)
+	rec, err := pickPeer(store, query)
 	if err != nil {
 		return nil, err
 	}
