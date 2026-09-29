@@ -491,7 +491,12 @@ class MainActivity : ComponentActivity() {
             prefill?.let(::setText)
         }
         val allowBack = CheckBox(this).apply { text = getString(R.string.pair_allow_back) }
-        val searching = text("Looking for devices showing an invitation on this network…", 14f, color = R.color.muted)
+        val searching = text(
+            "Searching this network. On the device you want to control, tap \"${getString(R.string.serve_start)}\", then " +
+                "\"${getString(R.string.serve_invite)}\": it appears here while its invitation is open.",
+            14f,
+            color = R.color.muted,
+        )
         val nearbyList = column(searching)
         lateinit var dialog: AlertDialog
         val browser = Nearby.Browser(this) { services ->
