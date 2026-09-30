@@ -48,6 +48,29 @@
     <string name="stop_inviting">Stop inviting</string>
     <string name="hide">Hide</string>
 
+    <string name="version_format">scterm %1$s</string>
+    <string name="version_dev">scterm (development build)</string>
+    <string name="update_check">Check for updates</string>
+    <string name="update_checking">Checking for updates…</string>
+    <string name="update_none">scterm %1$s is the latest version.</string>
+    <string name="update_available">Update available: %1$s</string>
+    <string name="update_to">Update to %1$s</string>
+    <string name="update_title">Update to scterm %1$s?</string>
+    <string name="update_you_have">You have %1$s.</string>
+    <string name="update_serving_note">Serving stops while Android installs the update; start it again afterwards.</string>
+    <string name="update_install">Update</string>
+    <string name="update_page">Release page</string>
+    <string name="update_later">Later</string>
+    <string name="update_permission_title">Allow scterm to install updates</string>
+    <string name="update_permission_text">Android asks once: turn on \"Allow from this source\" for scterm, then come back here.</string>
+    <string name="update_permission_open">Open settings</string>
+    <string name="update_downloading">Downloading scterm %1$s… %2$d%%</string>
+    <string name="update_failed_title">Update failed</string>
+    <string name="update_failed">scterm was not updated: %1$s</string>
+    <string name="update_channel">Updates</string>
+    <string name="update_done">scterm updated to %1$s</string>
+    <string name="update_done_text">Tap to open it.</string>
+
     <string name="viewer_take_control">Take control</string>
     <string name="viewer_disconnect">Disconnect</string>
 

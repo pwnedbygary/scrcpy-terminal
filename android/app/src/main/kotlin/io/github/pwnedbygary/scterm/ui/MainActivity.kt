@@ -1,6 +1,7 @@
 package io.github.pwnedbygary.scterm.ui
 
 import android.app.AlertDialog
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
@@ -30,12 +31,14 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import io.github.pwnedbygary.scterm.BuildConfig
 import io.github.pwnedbygary.scterm.R
 import io.github.pwnedbygary.scterm.ScTermApp
 import io.github.pwnedbygary.scterm.peer.ControllerClient
@@ -55,6 +58,7 @@ import io.github.pwnedbygary.scterm.target.ServeState
 import io.github.pwnedbygary.scterm.target.Serving
 import io.github.pwnedbygary.scterm.target.ShizukuActivation
 import io.github.pwnedbygary.scterm.target.TargetService
+import io.github.pwnedbygary.scterm.update.AppUpdates
 import io.github.pwnedbygary.scterm.util.Nearby
 import io.github.pwnedbygary.scterm.util.Net
 import io.github.pwnedbygary.scterm.util.Permissions
@@ -88,6 +92,11 @@ class MainActivity : ComponentActivity() {
 
     private var pendingAfterPermissions: (() -> Unit)? = null
     private var storeListener: AutoCloseable? = null
+
+    private lateinit var versionView: TextView
+    private lateinit var updateButton: Button
+    private var availableUpdate: AppUpdates.Release? = null
+    private var awaitingInstallPermission: AppUpdates.Release? = null
 
     private var invitationExpiresAtMs: Long? = null
     private var invitationDialog: AlertDialog? = null
@@ -149,6 +158,10 @@ class MainActivity : ComponentActivity() {
         renderIdentity()
         renderPeers()
         renderServing(Serving.state.value)
+        renderUpdate()
+        // Back from the "install unknown apps" setting.
+        awaitingInstallPermission?.takeIf { packageManager.canRequestPackageInstalls() }?.let(::startUpdate)
+        maybeCheckForUpdate()
     }
 
     override fun onStop() {
@@ -178,10 +191,12 @@ class MainActivity : ComponentActivity() {
         nameView = text("", 17f, Typeface.BOLD)
         identityView = text("", 13f, color = R.color.muted)
         addressView = text("", 13f, color = R.color.muted)
+        versionView = text("", 13f, color = R.color.muted)
+        updateButton = button(getString(R.string.update_check)) { onUpdateButton() }
         column.addView(card(
             getString(R.string.section_this_device),
-            nameView, identityView, addressView,
-            button("Rename") { showRenameDialog() },
+            nameView, identityView, addressView, versionView,
+            row(button("Rename") { showRenameDialog() }, updateButton),
         ))
 
         backendGroup = RadioGroup(this).apply {
@@ -687,6 +702,126 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
+    // --------------------------------------------------------------- updates
+
+    private fun renderUpdate() {
+        val update = availableUpdate
+        versionView.text = buildString {
+            append(if (AppUpdates.isReleaseBuild) getString(R.string.version_format, BuildConfig.VERSION_NAME) else getString(R.string.version_dev))
+            if (update != null) append('\n').append(getString(R.string.update_available, update.version))
+        }
+        updateButton.text = if (update != null) getString(R.string.update_to, update.version) else getString(R.string.update_check)
+    }
+
+    /** Release builds look for a newer release at most once a day, and only say so. */
+    private fun maybeCheckForUpdate() {
+        val now = System.currentTimeMillis()
+        if (!AppUpdates.isReleaseBuild || availableUpdate != null || now - app.lastUpdateCheckMs < UPDATE_CHECK_INTERVAL_MS) return
+        app.lastUpdateCheckMs = now
+        thread(name = "update-check", isDaemon = true) {
+            val release = runCatching { AppUpdates.fetchLatest() }.getOrNull()
+            runOnUiThread {
+                if (release != null && release.versionCode > BuildConfig.VERSION_CODE && !isDestroyed) {
+                    availableUpdate = release
+                    renderUpdate()
+                }
+            }
+        }
+    }
+
+    private fun onUpdateButton() {
+        availableUpdate?.let { return confirmUpdate(it) }
+        updateButton.isEnabled = false
+        toast(getString(R.string.update_checking))
+        thread(name = "update-check", isDaemon = true) {
+            val result = runCatching { AppUpdates.fetchLatest() }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                updateButton.isEnabled = true
+                app.lastUpdateCheckMs = System.currentTimeMillis()
+                val release = result.getOrNull()
+                when {
+                    result.isFailure -> alert(getString(R.string.update_check), "Could not reach the release list: ${result.exceptionOrNull()?.message}")
+                    release == null -> alert(getString(R.string.update_check), "The latest release has no Android app.")
+                    release.versionCode <= BuildConfig.VERSION_CODE -> toast(getString(R.string.update_none, BuildConfig.VERSION_NAME))
+                    else -> {
+                        availableUpdate = release
+                        renderUpdate()
+                        confirmUpdate(release)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun confirmUpdate(release: AppUpdates.Release) {
+        val notes = release.notes.trim().let { if (it.length > 700) it.take(700).trimEnd() + "…" else it }
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.update_title, release.version))
+            .setMessage(buildString {
+                append(getString(R.string.update_you_have, BuildConfig.VERSION_NAME))
+                if (notes.isNotEmpty()) append("\n\n").append(notes)
+                append("\n\n").append(getString(R.string.update_serving_note))
+            })
+            .setPositiveButton(R.string.update_install) { _, _ -> startUpdate(release) }
+            .setNeutralButton(R.string.update_page) { _, _ -> openPage(release.page) }
+            .setNegativeButton(R.string.update_later, null)
+            .show()
+    }
+
+    private fun startUpdate(release: AppUpdates.Release) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            awaitingInstallPermission = release
+            AlertDialog.Builder(this)
+                .setTitle(R.string.update_permission_title)
+                .setMessage(R.string.update_permission_text)
+                .setPositiveButton(R.string.update_permission_open) { _, _ ->
+                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, "package:$packageName".toUri()))
+                }
+                .setNegativeButton(R.string.cancel) { _, _ -> awaitingInstallPermission = null }
+                .show()
+            return
+        }
+        awaitingInstallPermission = null
+        var cancelled = false
+        val status = text(getString(R.string.update_downloading, release.version, 0), 14f)
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.update_title, release.version))
+            .setView(padded(status))
+            .setNegativeButton(R.string.cancel) { _, _ -> cancelled = true }
+            .setCancelable(false)
+            .show()
+        thread(name = "update-download", isDaemon = true) {
+            val outcome = runCatching {
+                val apk = AppUpdates.download(this, release, progress = { p ->
+                    runOnUiThread { status.text = getString(R.string.update_downloading, release.version, (p * 100).toInt()) }
+                }, cancelled = { cancelled })
+                AppUpdates.problemWith(this, apk)?.let { throw AppUpdates.Refused(it) }
+                app.updatingTo = release.version
+                AppUpdates.install(this, apk)
+            }
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                dialog.dismiss()
+                val error = outcome.exceptionOrNull() ?: return@runOnUiThread
+                app.updatingTo = null
+                if (error is AppUpdates.Cancelled) return@runOnUiThread
+                alert(
+                    getString(R.string.update_failed_title),
+                    if (error is AppUpdates.Refused) error.message.orEmpty() else "The update could not be downloaded: ${error.message}",
+                )
+            }
+        }
+    }
+
+    private fun openPage(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
+        } catch (_: ActivityNotFoundException) {
+            toast(url)
+        }
+    }
+
     // --------------------------------------------------------------- helpers
 
     private fun describePairingFailure(e: Throwable, nearby: Boolean = false): String = when {
@@ -800,5 +935,9 @@ class MainActivity : ComponentActivity() {
     private fun padded(view: View) = LinearLayout(this).apply {
         setPadding(dp(20), dp(8), dp(20), 0)
         addView(view, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+    }
+
+    private companion object {
+        const val UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L
     }
 }
