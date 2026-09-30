@@ -204,7 +204,9 @@ class ViewerActivity : ComponentActivity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        applyOrientation(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        // Other changes (a controller connecting, night mode) arrive here too.
+        val landscape = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (landscape != this.landscape) applyOrientation(landscape)
     }
 
     /**
@@ -442,6 +444,8 @@ class ViewerActivity : ComponentActivity() {
     }
 
     private fun showKeyboard() {
+        // The panel takes no focus, so Android layers it over the keyboard.
+        panel.hide()
         keyboardSink.requestFocus()
         getSystemService(InputMethodManager::class.java)?.showSoftInput(keyboardSink, 0)
         keyboardShown = true

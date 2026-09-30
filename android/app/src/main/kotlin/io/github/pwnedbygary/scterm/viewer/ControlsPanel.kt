@@ -65,7 +65,8 @@ class ControlsPanel(
     }
 
     fun show() {
-        if (activity.isFinishing || activity.isDestroyed) return
+        // A dialog needs its activity's window to be added first.
+        if (activity.isFinishing || activity.isDestroyed || !activity.window.decorView.isAttachedToWindow) return
         if (!dialog.isShowing) {
             val window = dialog.window ?: return
             val blur = configure(window)

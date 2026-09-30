@@ -7,6 +7,31 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-09-30, session 7: landscape viewer)
+
+- Viewer: in landscape the video fills the screen and `ControlsPanel` floats
+  the button row in a dialog window (the video is a SurfaceView layer that no
+  view can blur; Android 12+ blurs behind a window). The blur needs
+  `windowIsTranslucent` and a radius set after the window is attached,
+  cleared before dismissing. The panel is not focusable, so keys stay with the
+  viewer, but that layers it over the keyboard: opening the keyboard hides it.
+  It starts hidden (it covers where games put touch controls), comes up from
+  the handle, and hides after the set seconds without touches on it. Main
+  screen *Viewer* card: always show the controls, the delay, always show the
+  statistics (`ScTermApp.viewer*`).
+- A black picture with working audio and touch happened once on the phone and
+  was not reproduced in portrait or landscape starts. Likely cause: a decoder
+  left waiting for a keyframe after its one request fell inside the viewer's
+  1 s throttle (scrcpy's natural keyframes are 10 s of frames apart). The
+  viewer now re-asks every 2 s while `VideoDecoder.waitingForKeyFrame`, and
+  the statistics say "Waiting for a keyframe".
+- Updates: a build not signed with the release certificate
+  (`BuildConfig.RELEASE_CERT_SHA256`; `-Pscterm.releaseCert=` empties it for
+  debug-key update tests) explains instead of offering a release.
+- Device notes: the Red Magic sets `log.tag=S` at boot, so apps log nothing;
+  `adb shell setprop log.tag D` lasts until reboot. Rotate device cannot
+  override an app that locks its orientation.
+
 ## Update (2026-09-29, session 6: nearby pairing for scterm, releases)
 
 - Released v2.0.0 (signed APK + Linux binary); CI moved to Node 24 actions

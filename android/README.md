@@ -80,7 +80,11 @@ under *Nearby*. Both screens show the same six-digit code; check it matches
 and accept on both. Or enter the invitation's `address:port CODE` (or open a
 shared `scterm://pair` link), for devices on another network. Then *Connect*.
 System Back is the remote Back; the bar has every action the terminal and web
-clients have; Disconnect leaves. Leaving the screen ends the session.
+clients have; Disconnect leaves. Leaving the screen ends the session. In
+portrait the bar sits below the video; in landscape the video fills the screen
+and the handle at the bottom brings the bar up in a floating panel, which hides
+a few seconds after the last touch on it. The main screen's *Viewer* settings
+keep the bar or the statistics up, and set the delay.
 
 Both devices need Android 17's local network permission (asked on first use)
 and the same network. Forget a device or reduce what it may do at any time;
