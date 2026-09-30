@@ -20,4 +20,20 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
 
+    <!-- The viewer's floating controls (ControlsPanel): an undimmed window
+         whose frosted background is set in code. Android only blurs behind
+         translucent windows. -->
+    <style name="Theme.ScTerm.ControlsPanel" parent="android:Theme.Material.Dialog.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowCloseOnTouchOutside">false</item>
+        <item name="android:windowAnimationStyle">@style/ControlsPanelAnimation</item>
+    </style>
+
+    <style name="ControlsPanelAnimation">
+        <item name="android:windowEnterAnimation">@anim/controls_in</item>
+        <item name="android:windowExitAnimation">@anim/controls_out</item>
+    </style>
+
 </resources>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The floating controls in landscape (ControlsPanel); the viewer moves its
+     button row into panel_scroll. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_horizontal"
+    android:orientation="vertical"
+    android:paddingBottom="8dp">
+
+    <ImageView
+        android:id="@+id/controls_collapse"
+        android:layout_width="64dp"
+        android:layout_height="24dp"
+        android:alpha="0.8"
+        android:contentDescription="@string/viewer_hide_controls"
+        android:scaleType="center"
+        android:src="@drawable/ic_chevron_down" />
+
+    <HorizontalScrollView
+        android:id="@+id/panel_scroll"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fillViewport="true"
+        android:paddingHorizontal="8dp"
+        android:scrollbars="none" />
+</LinearLayout>

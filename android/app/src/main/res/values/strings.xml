@@ -56,6 +56,7 @@
     <string name="update_available">Update available: %1$s</string>
     <string name="update_to">Update to %1$s</string>
     <string name="update_title">Update to scterm %1$s?</string>
+    <string name="update_released">scterm %1$s is available</string>
     <string name="update_you_have">You have %1$s.</string>
     <string name="update_serving_note">Serving stops while Android installs the update; start it again afterwards.</string>
     <string name="update_install">Update</string>
@@ -73,6 +74,17 @@
 
     <string name="viewer_take_control">Take control</string>
     <string name="viewer_disconnect">Disconnect</string>
+    <string name="viewer_show_controls">Show the controls</string>
+    <string name="viewer_hide_controls">Hide the controls</string>
+
+    <string name="section_viewer">Viewer</string>
+    <string name="viewer_settings_hint">In landscape the video fills the screen, and the handle at the bottom brings up the controls.</string>
+    <string name="viewer_controls_always">Always show the controls</string>
+    <string name="viewer_stats_always">Always show statistics</string>
+    <plurals name="viewer_hide_after">
+        <item quantity="one">Hide the controls %d second after the last touch on them</item>
+        <item quantity="other">Hide the controls %d seconds after the last touch on them</item>
+    </plurals>
 
     <string name="identity_format">Identity %1$s</string>
     <string name="address_format">Address %1$s</string>

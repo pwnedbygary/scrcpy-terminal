@@ -50,6 +50,16 @@ object AppUpdates {
     /** Development builds are version code 1 and update from source instead. */
     val isReleaseBuild: Boolean get() = BuildConfig.VERSION_CODE > 1
 
+    const val DIFFERENT_KEY = "This copy of scterm is signed with a different key than the release (it was built from source), so " +
+        "Android won't let the release replace it. To switch, uninstall scterm, which removes its pairings, then install the release APK."
+
+    /** Whether a release may replace this install, as far as can be told before downloading it. */
+    fun releaseCanReplace(context: Context): Boolean {
+        if (BuildConfig.RELEASE_CERT_SHA256.isEmpty()) return true
+        val installed = packageInfo(context.packageManager, name = context.packageName) ?: return true
+        return BuildConfig.RELEASE_CERT_SHA256 in signers(installed)
+    }
+
     /** "2.1.0" -> 20100, the same numbering as release builds (app/build.gradle.kts). */
     fun versionCodeOf(version: String): Int? {
         val parts = version.removePrefix("v").split('.').map { it.toIntOrNull() ?: -1 }
@@ -145,10 +155,7 @@ object AppUpdates {
             return "The download is not newer than this version."
         }
         val theirs = signers(archive)
-        if (theirs.isEmpty() || theirs != signers(installed)) {
-            return "This copy of scterm is signed with a different key than the release (it was built from source), so Android " +
-                "won't let the release replace it. To switch, uninstall scterm, which removes its pairings, then install the release APK."
-        }
+        if (theirs.isEmpty() || theirs != signers(installed)) return DIFFERENT_KEY
         return null
     }
 

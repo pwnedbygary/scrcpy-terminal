@@ -6,7 +6,9 @@ import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
@@ -22,9 +24,11 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -36,6 +40,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePadding
 import io.github.pwnedbygary.scterm.R
 import io.github.pwnedbygary.scterm.ScTermApp
@@ -76,6 +81,11 @@ class ViewerActivity : ComponentActivity() {
     private lateinit var keyboardSink: RemoteKeyboardView
     private lateinit var stats: TextView
     private lateinit var bar: LinearLayout
+    private lateinit var barScroll: HorizontalScrollView
+    private lateinit var handle: View
+    private lateinit var panel: ControlsPanel
+    private var landscape = false
+    private var statsAlways = false
     private lateinit var overlay: View
     private lateinit var overlayText: TextView
     private lateinit var takeControl: Button
@@ -136,6 +146,19 @@ class ViewerActivity : ComponentActivity() {
         preferFastestRefresh()
         surfaceView.holder.addCallback(surfaceCallback)
         buildBar()
+        barScroll = findViewById(R.id.bar_scroll)
+        handle = findViewById(R.id.controls_handle)
+        val app = ScTermApp.of(this)
+        statsAlways = app.viewerStatsAlwaysVisible
+        panel = ControlsPanel(this, app.viewerControlsAlwaysVisible, app.viewerControlsHideSeconds * 1000L) { renderChrome() }
+        handle.setOnClickListener { panel.show() }
+        ViewCompat.setOnApplyWindowInsetsListener(handle) { view, insets ->
+            val gestures = insets.getInsets(WindowInsetsCompat.Type.mandatorySystemGestures()).bottom
+            view.updateLayoutParams<ViewGroup.MarginLayoutParams> { bottomMargin = gestures + (6 * resources.displayMetrics.density).toInt() }
+            insets
+        }
+        // The panel is a window of its own: it can only be added once this one is.
+        window.decorView.post { applyOrientation(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) }
         // System Back is the remote Back; leaving uses the Disconnect button.
         onBackPressedDispatcher.addCallback(this) {
             if (keyboardShown) hideKeyboard() else input.press(DeviceAction.BACK)
@@ -179,6 +202,39 @@ class ViewerActivity : ComponentActivity() {
         if (!hasFocus) input.releaseAll()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // Other changes (a controller connecting, night mode) arrive here too.
+        val landscape = newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (landscape != this.landscape) applyOrientation(landscape)
+    }
+
+    /**
+     * Portrait docks the controls below the video; landscape gives the video
+     * the whole screen and floats the controls over it, brought up by the
+     * handle unless set to always show. They start hidden there because they
+     * cover the bottom of the video, where games put their touch controls.
+     */
+    private fun applyOrientation(landscape: Boolean) {
+        if (isFinishing || isDestroyed) return
+        this.landscape = landscape
+        val home = if (landscape) panel.scroll else barScroll
+        if (bar.parent !== home) {
+            (bar.parent as? ViewGroup)?.removeView(bar)
+            home.addView(bar)
+        }
+        barScroll.visibility = if (landscape) View.GONE else View.VISIBLE
+        if (landscape && panel.alwaysVisible) panel.show() else panel.hide()
+        renderChrome()
+    }
+
+    /** The handle shows while the floating controls are hidden; the statistics show with the controls. */
+    private fun renderChrome() {
+        val controlsShown = !landscape || panel.isShowing
+        handle.visibility = if (controlsShown) View.GONE else View.VISIBLE
+        stats.visibility = if (controlsShown || statsAlways) View.VISIBLE else View.GONE
+    }
+
     override fun onStop() {
         super.onStop()
         if (!isChangingConfigurations) {
@@ -189,6 +245,7 @@ class ViewerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         leaving = true
+        if (::panel.isInitialized) panel.hide()
         main.removeCallbacksAndMessages(null)
         input.releaseAll()
         session?.disconnect()
@@ -337,6 +394,8 @@ class ViewerActivity : ComponentActivity() {
     // ------------------------------------------------------------ action bar
 
     private fun buildBar() {
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
         fun add(label: String, onClick: () -> Unit): Button = Button(this).apply {
             text = label
             isAllCaps = false
@@ -345,9 +404,17 @@ class ViewerActivity : ComponentActivity() {
             textSize = 13f
             minWidth = 0
             minimumWidth = 0
-            setPadding(24, 0, 24, 0)
+            minHeight = 0
+            minimumHeight = 0
+            setBackgroundResource(R.drawable.bar_button_background)
+            setTextColor(Color.WHITE)
+            stateListAnimator = null
+            setPadding(dp(14), 0, dp(14), 0)
             setOnClickListener { onClick() }
-            bar.addView(this)
+            bar.addView(this, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)).apply {
+                marginStart = dp(3)
+                marginEnd = dp(3)
+            })
         }
         fun device(label: String, action: DeviceAction) = add(label) { input.press(action) }
 
@@ -359,7 +426,7 @@ class ViewerActivity : ComponentActivity() {
         device("Vol +", DeviceAction.VOLUME_UP)
         device("Mute", DeviceAction.MUTE)
         device("Power", DeviceAction.POWER)
-        device("Rotate", DeviceAction.ROTATE)
+        device("Rotate device", DeviceAction.ROTATE)
         device("Notifications", DeviceAction.NOTIFICATIONS)
         device("Quick settings", DeviceAction.SETTINGS)
         device("Collapse", DeviceAction.COLLAPSE)
@@ -377,6 +444,8 @@ class ViewerActivity : ComponentActivity() {
     }
 
     private fun showKeyboard() {
+        // The panel takes no focus, so Android layers it over the keyboard.
+        panel.hide()
         keyboardSink.requestFocus()
         getSystemService(InputMethodManager::class.java)?.showSoftInput(keyboardSink, 0)
         keyboardShown = true
@@ -431,6 +500,9 @@ class ViewerActivity : ComponentActivity() {
             val s = session ?: return
             val d = decoder
             val now = SystemClock.elapsedRealtime()
+            // The target only re-asks for viewers it knows are waiting; a decoder that
+            // restarted after its keyframe arrived must keep asking itself.
+            if (d != null && d.waitingForKeyFrame && now - lastKeyFrameRequest >= KEYFRAME_RETRY_MS) requestKeyFrame()
             val frames = d?.framesRendered ?: 0
             // Averaged over a window: frames arriving in bursts would make a single interval swing wildly.
             frameSamples.addLast(now to frames)
@@ -448,6 +520,7 @@ class ViewerActivity : ComponentActivity() {
                 }
                 val dropped = d?.packetsDropped ?: 0
                 if (dropped > 0) append(" · $dropped dropped")
+                if (d?.waitingForKeyFrame == true) append("\nWaiting for a keyframe")
                 if (s.lease != LeaseState.HELD && Grant.CONTROL in s.grants) append("\nViewing: another device has control")
                 if (Grant.CONTROL !in s.grants) append("\nView only")
             }
@@ -481,6 +554,7 @@ class ViewerActivity : ComponentActivity() {
         private const val EXTRA_NAME = "name"
         private const val STATS_INTERVAL_MS = 500L
         private const val FPS_WINDOW_MS = 2_000L
+        private const val KEYFRAME_RETRY_MS = 2_000L
 
         fun intent(context: Context, peer: PeerRecord): Intent = Intent(context, ViewerActivity::class.java)
             .putExtra(EXTRA_FINGERPRINT, peer.fingerprint)

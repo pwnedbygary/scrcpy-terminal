@@ -26,6 +26,8 @@ import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -237,6 +239,7 @@ class MainActivity : ComponentActivity() {
 
         peersList = column()
         column.addView(card(getString(R.string.section_peers), peersList, button(getString(R.string.pair_with)) { showPairDialog(null) }))
+        column.addView(card(getString(R.string.section_viewer), *viewerSettings()))
 
         return ScrollView(this).apply {
             addView(column)
@@ -246,6 +249,45 @@ class MainActivity : ComponentActivity() {
                 insets
             }
         }
+    }
+
+    /** How the viewer shows its controls and statistics over a fullscreen (landscape) video. */
+    private fun viewerSettings(): Array<View> {
+        fun hideLabel(seconds: Int) = resources.getQuantityString(R.plurals.viewer_hide_after, seconds, seconds)
+        val hideAfter = text(hideLabel(app.viewerControlsHideSeconds), 14f)
+        val seconds = SeekBar(this).apply {
+            max = ScTermApp.MAX_CONTROLS_HIDE_SECONDS - 1
+            progress = app.viewerControlsHideSeconds - 1
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
+                    hideAfter.text = hideLabel(value + 1)
+                    if (fromUser) app.viewerControlsHideSeconds = value + 1
+                }
+
+                override fun onStartTrackingTouch(bar: SeekBar) {}
+
+                override fun onStopTrackingTouch(bar: SeekBar) {}
+            })
+        }
+        fun enableDelay(enabled: Boolean) {
+            seconds.isEnabled = enabled
+            hideAfter.alpha = if (enabled) 1f else 0.5f
+        }
+        val controlsAlways = Switch(this).apply {
+            text = getString(R.string.viewer_controls_always)
+            isChecked = app.viewerControlsAlwaysVisible
+            setOnCheckedChangeListener { _, on ->
+                app.viewerControlsAlwaysVisible = on
+                enableDelay(!on)
+            }
+        }
+        val statsAlways = Switch(this).apply {
+            text = getString(R.string.viewer_stats_always)
+            isChecked = app.viewerStatsAlwaysVisible
+            setOnCheckedChangeListener { _, on -> app.viewerStatsAlwaysVisible = on }
+        }
+        enableDelay(!controlsAlways.isChecked)
+        return arrayOf(text(getString(R.string.viewer_settings_hint), 13f, color = R.color.muted), controlsAlways, hideAfter, seconds, statsAlways)
     }
 
     private fun renderIdentity() {
@@ -717,6 +759,7 @@ class MainActivity : ComponentActivity() {
     private fun maybeCheckForUpdate() {
         val now = System.currentTimeMillis()
         if (!AppUpdates.isReleaseBuild || availableUpdate != null || now - app.lastUpdateCheckMs < UPDATE_CHECK_INTERVAL_MS) return
+        if (!AppUpdates.releaseCanReplace(this)) return
         app.lastUpdateCheckMs = now
         thread(name = "update-check", isDaemon = true) {
             val release = runCatching { AppUpdates.fetchLatest() }.getOrNull()
@@ -744,6 +787,12 @@ class MainActivity : ComponentActivity() {
                     result.isFailure -> alert(getString(R.string.update_check), "Could not reach the release list: ${result.exceptionOrNull()?.message}")
                     release == null -> alert(getString(R.string.update_check), "The latest release has no Android app.")
                     release.versionCode <= BuildConfig.VERSION_CODE -> toast(getString(R.string.update_none, BuildConfig.VERSION_NAME))
+                    !AppUpdates.releaseCanReplace(this) -> AlertDialog.Builder(this)
+                        .setTitle(getString(R.string.update_released, release.version))
+                        .setMessage(AppUpdates.DIFFERENT_KEY)
+                        .setPositiveButton(R.string.update_page) { _, _ -> openPage(release.page) }
+                        .setNegativeButton(R.string.done, null)
+                        .show()
                     else -> {
                         availableUpdate = release
                         renderUpdate()
