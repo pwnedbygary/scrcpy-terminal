@@ -8,6 +8,11 @@ plugins {
 val releaseVersion: String? = providers.gradleProperty("scterm.version").orNull
 val releaseKeystore: String? = providers.environmentVariable("SCTERM_KEYSTORE").orNull
 
+// Where the app looks for newer releases; -Pscterm.updateUrl points a test
+// build at a local server (devicetest/update_server.py).
+val updateUrl: String = providers.gradleProperty("scterm.updateUrl")
+    .getOrElse("https://api.github.com/repos/pwnedbygary/scrcpy-terminal/releases/latest")
+
 /** "2.0.0" -> 20000: grows with every release, as Android requires of updates. */
 fun versionCodeOf(version: String): Int {
     val parts = version.split('.').map { it.toIntOrNull() ?: -1 }
@@ -25,6 +30,7 @@ android {
         targetSdk = 37
         versionCode = releaseVersion?.let(::versionCodeOf) ?: 1
         versionName = releaseVersion ?: "dev"
+        buildConfigField("String", "UPDATE_URL", "\"$updateUrl\"")
     }
 
     signingConfigs {

@@ -38,6 +38,16 @@ class ScTermApp : Application() {
         get() = prefs.getString(KEY_BACKEND, null).let { name -> BackendKind.entries.firstOrNull { it.name == name } } ?: BackendKind.PROJECTION
         set(value) = prefs.edit { putString(KEY_BACKEND, value.name) }
 
+    /** When the main screen last looked for a newer release. */
+    var lastUpdateCheckMs: Long
+        get() = prefs.getLong(KEY_UPDATE_CHECK, 0)
+        set(value) = prefs.edit { putLong(KEY_UPDATE_CHECK, value) }
+
+    /** The version an in-app update is installing, announced once it runs. */
+    var updatingTo: String?
+        get() = prefs.getString(KEY_UPDATING_TO, null)
+        set(value) = prefs.edit { if (value == null) remove(KEY_UPDATING_TO) else putString(KEY_UPDATING_TO, value) }
+
     val clientInfo: ClientInfo
         get() = ClientInfo(deviceName, "scterm-android/${BuildConfig.VERSION_NAME}", "android ${Build.VERSION.SDK_INT}")
 
@@ -65,6 +75,8 @@ class ScTermApp : Application() {
         private const val KEY_NAME = "device_name"
         private const val KEY_PORT = "serve_port"
         private const val KEY_BACKEND = "serve_backend"
+        private const val KEY_UPDATE_CHECK = "update_checked_at"
+        private const val KEY_UPDATING_TO = "updating_to"
 
         fun of(context: Context): ScTermApp = context.applicationContext as ScTermApp
     }

@@ -9,7 +9,8 @@ import (
 //go:embed third_party/scrcpy-server.jar.d/scrcpy-server
 var embeddedServer []byte
 
-// version is stamped at build time: -ldflags "-X main.version=v1.0.0".
+// version is stamped at build time: -ldflags "-X main.version=2.1.0" (the
+// release tag without its "v"). Source builds stay "dev".
 var version = "dev"
 
 func serverJarData() []byte { return embeddedServer }
@@ -49,7 +50,7 @@ type config struct {
 }
 
 func main() {
-	if runPeerCommand(os.Args[1:]) {
+	if runPeerCommand(os.Args[1:]) || runUpdateCommand(os.Args[1:]) {
 		return
 	}
 	cfg := config{

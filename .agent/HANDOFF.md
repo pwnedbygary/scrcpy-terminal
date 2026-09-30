@@ -22,10 +22,22 @@ here is a snapshot, not proof that no other work has started.
   which device when several match (`peernearby.go`, `Store.Matches`).
 - App: peer rows refresh what the other device allows on every connection;
   the empty Nearby list says what to do on the other device.
+- Updates: the app checks GitHub's latest release (`update/AppUpdates.kt`;
+  `BuildConfig.UPDATE_URL`, `-Pscterm.updateUrl` for tests), verifies the
+  APK's digest, package, version and signing certificate, and installs it
+  through `PackageInstaller` (`InstallResultReceiver` shows the confirmation
+  and, after `MY_PACKAGE_REPLACED`, an "updated" notification). Verified on
+  the Retroid with debug builds and `devicetest/update_server.py`: a real
+  update (0.0.2), "latest version", and the refusal of a release-signed APK
+  over a debug build. `scterm update` (`update.go`, `internal/release`):
+  release binaries download, verify, test-run and replace themselves; a
+  source build pulls and rebuilds its checkout. `scterm version`.
 - Tooling: macOS's tmp cleanup removes files under /tmp and the sandbox
-  cache after a few days. Go now lives in ~/Library/Caches/scterm-tools; a
-  Gradle "Could not find ... GradleWorkerMain" means a purged worker jar:
-  stop the daemon and delete `caches/<version>/workerMain/workerMain.lock`.
+  cache after a few days. Go and Gradle now live in
+  ~/Library/Caches/scterm-tools (fetched with curl: Java does not trust this
+  network's TLS proxy, so the Gradle wrapper cannot download). A Gradle
+  "Could not find ... GradleWorkerMain" means a purged worker jar: stop the
+  daemon and delete `caches/<version>/workerMain/workerMain.lock`.
 
 ## Update (2026-09-27, session 5: nearby pairing, Shizuku start)
 

@@ -23,6 +23,14 @@ replace an app signed with one key by the same app signed with another:
 switching between the two means uninstalling first, which deletes the device's
 identity and pairings (pair again afterwards).
 
+Updates, from 2.1.0 on: *Check for updates* on the main screen (release builds
+also look once a day and say when one is out). The app downloads the new APK,
+checks it against the digest GitHub publishes and against its own signing
+key, and hands it to Android's installer, which asks before replacing the app;
+the first time, Android asks you to allow installs from scterm. Serving stops
+during the update. Test builds can point at a local server instead
+(`devicetest/update_server.py`, `-Pscterm.updateUrl`).
+
 ## Build
 
 Requires JDK 17 and an Android SDK (AGP installs platform 37 and build-tools 36

@@ -15,6 +15,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- In-app updates: hand a downloaded release to Android's installer, which asks first. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Package visibility (Android 11+): offer "Start with Shizuku" only when it is installed. -->
     <queries>
@@ -77,6 +79,16 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/remote_input_service" />
         </service>
+
+        <!-- The installer's verdict on an in-app update, and the new version
+             announcing itself afterwards. -->
+        <receiver
+            android:name=".update.InstallResultReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- How a running Shizuku hands this app its binder, for starting the
              helper without a computer. Only the system can use it. -->
