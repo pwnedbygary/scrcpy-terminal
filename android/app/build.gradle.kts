@@ -13,6 +13,13 @@ val releaseKeystore: String? = providers.environmentVariable("SCTERM_KEYSTORE").
 val updateUrl: String = providers.gradleProperty("scterm.updateUrl")
     .getOrElse("https://api.github.com/repos/pwnedbygary/scrcpy-terminal/releases/latest")
 
+// SHA-256 of the certificate releases are signed with. Android only lets an
+// app be replaced by one signed with the same key, so a build signed with any
+// other key says so instead of offering a release it can't install. Empty
+// skips that check, for update tests signed with the debug key.
+val releaseCert: String = providers.gradleProperty("scterm.releaseCert")
+    .getOrElse("8bdcc97a6221ad9e037512eb79e12b5a396319fb395f2b23a0fddc50cc3dca76")
+
 /** "2.0.0" -> 20000: grows with every release, as Android requires of updates. */
 fun versionCodeOf(version: String): Int {
     val parts = version.split('.').map { it.toIntOrNull() ?: -1 }
@@ -31,6 +38,7 @@ android {
         versionCode = releaseVersion?.let(::versionCodeOf) ?: 1
         versionName = releaseVersion ?: "dev"
         buildConfigField("String", "UPDATE_URL", "\"$updateUrl\"")
+        buildConfigField("String", "RELEASE_CERT_SHA256", "\"$releaseCert\"")
     }
 
     signingConfigs {

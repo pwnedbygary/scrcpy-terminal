@@ -70,6 +70,11 @@ class VideoDecoder(private val listener: Listener) {
     var packetsDropped = 0L
         private set
 
+    /** Configured, but with no keyframe to start from yet: the picture stays blank or frozen. */
+    @Volatile
+    var waitingForKeyFrame = false
+        private set
+
     private val thread = HandlerThread("video-decoder", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
     private val handler = Handler(thread.looper)
 
@@ -80,6 +85,10 @@ class VideoDecoder(private val listener: Listener) {
     private var height = 0
     private var config: ByteArray? = null
     private var needKeyFrame = true
+        set(value) {
+            field = value
+            waitingForKeyFrame = value && codec != null
+        }
     private val freeInputs = ArrayDeque<Int>()
     private val pending = ArrayDeque<StreamItem.Packet>()
 
@@ -207,6 +216,7 @@ class VideoDecoder(private val listener: Listener) {
     private fun releaseCodec() {
         val c = codec ?: return
         codec = null
+        waitingForKeyFrame = false
         freeInputs.clear()
         pending.clear()
         try {

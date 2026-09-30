@@ -4,11 +4,13 @@ in-app update without publishing anything:
 
     android/devicetest/update_server.py NEW.apk 0.0.2 [PORT]
     adb reverse tcp:8765 tcp:8765
-    ./gradlew :app:assembleDebug -Pscterm.updateUrl=http://127.0.0.1:8765/latest
+    ./gradlew :app:assembleDebug -Pscterm.updateUrl=http://127.0.0.1:8765/latest -Pscterm.releaseCert=
 
 Install that debug build, then "Check for updates" in the app. NEW.apk must be
 signed like the installed app (the debug key, for debug builds) and have a
-higher version code: -Pscterm.version=0.0.2 gives it version code 2.
+higher version code: -Pscterm.version=0.0.2 gives it version code 2. The empty
+scterm.releaseCert lets a debug-signed build offer it; otherwise it expects
+releases signed with the release key and explains instead.
 """
 import hashlib
 import http.server

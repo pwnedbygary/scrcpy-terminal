@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The bar sits below the video, never over it: a target's bottom edge holds
-     its navigation gestures and the space bar of its on-screen keyboard. -->
+<!-- In portrait the bar sits below the video, never over it: a target's bottom
+     edge holds its navigation gestures and the space bar of its on-screen
+     keyboard. In landscape the video gets the whole screen, and the bar moves
+     into a panel floating over it (ControlsPanel), brought up by the handle. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -72,6 +74,19 @@
                 android:text="@string/done"
                 android:visibility="gone" />
         </LinearLayout>
+
+        <ImageView
+            android:id="@+id/controls_handle"
+            android:layout_width="64dp"
+            android:layout_height="24dp"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="6dp"
+            android:alpha="0.8"
+            android:background="@drawable/controls_handle_background"
+            android:contentDescription="@string/viewer_show_controls"
+            android:scaleType="center"
+            android:src="@drawable/ic_chevron_up"
+            android:visibility="gone" />
     </FrameLayout>
 
     <!-- fillViewport + the row's own gravity centers a short bar; layout_gravity

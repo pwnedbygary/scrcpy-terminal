@@ -38,6 +38,21 @@ class ScTermApp : Application() {
         get() = prefs.getString(KEY_BACKEND, null).let { name -> BackendKind.entries.firstOrNull { it.name == name } } ?: BackendKind.PROJECTION
         set(value) = prefs.edit { putString(KEY_BACKEND, value.name) }
 
+    /** In landscape, keep the viewer's controls up instead of hiding them. */
+    var viewerControlsAlwaysVisible: Boolean
+        get() = prefs.getBoolean(KEY_CONTROLS_ALWAYS, false)
+        set(value) = prefs.edit { putBoolean(KEY_CONTROLS_ALWAYS, value) }
+
+    /** Seconds after the last touch on the viewer's controls before they hide. */
+    var viewerControlsHideSeconds: Int
+        get() = prefs.getInt(KEY_CONTROLS_HIDE_SECONDS, DEFAULT_CONTROLS_HIDE_SECONDS).coerceIn(1, MAX_CONTROLS_HIDE_SECONDS)
+        set(value) = prefs.edit { putInt(KEY_CONTROLS_HIDE_SECONDS, value.coerceIn(1, MAX_CONTROLS_HIDE_SECONDS)) }
+
+    /** Keep the viewer's statistics up while its controls are hidden. */
+    var viewerStatsAlwaysVisible: Boolean
+        get() = prefs.getBoolean(KEY_STATS_ALWAYS, false)
+        set(value) = prefs.edit { putBoolean(KEY_STATS_ALWAYS, value) }
+
     /** When the main screen last looked for a newer release. */
     var lastUpdateCheckMs: Long
         get() = prefs.getLong(KEY_UPDATE_CHECK, 0)
@@ -72,6 +87,11 @@ class ScTermApp : Application() {
 
     companion object {
         const val TAG = "scterm"
+        const val MAX_CONTROLS_HIDE_SECONDS = 30
+        private const val DEFAULT_CONTROLS_HIDE_SECONDS = 4
+        private const val KEY_CONTROLS_ALWAYS = "viewer_controls_always"
+        private const val KEY_CONTROLS_HIDE_SECONDS = "viewer_controls_hide_seconds"
+        private const val KEY_STATS_ALWAYS = "viewer_stats_always"
         private const val KEY_NAME = "device_name"
         private const val KEY_PORT = "serve_port"
         private const val KEY_BACKEND = "serve_backend"

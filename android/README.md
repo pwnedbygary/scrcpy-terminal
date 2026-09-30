@@ -28,8 +28,10 @@ also look once a day and say when one is out). The app downloads the new APK,
 checks it against the digest GitHub publishes and against its own signing
 key, and hands it to Android's installer, which asks before replacing the app;
 the first time, Android asks you to allow installs from scterm. Serving stops
-during the update. Test builds can point at a local server instead
-(`devicetest/update_server.py`, `-Pscterm.updateUrl`).
+during the update. A build from source that isn't signed with the release key
+says so when a release is out, rather than offering one it can't install. Test
+builds can point at a local server instead (`devicetest/update_server.py`,
+`-Pscterm.updateUrl`).
 
 ## Build
 
