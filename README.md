@@ -47,6 +47,12 @@ Then run with a device connected (or `-s <serial>`):
 ./scterm
 ```
 
+Later, `./scterm update` brings it up to date: a build in its source checkout
+pulls and rebuilds itself; a release binary downloads the latest release,
+checks it against the digest GitHub publishes, and only replaces itself once
+the new binary has started on this system (it needs the same ffmpeg libraries
+it was built against). `./scterm version` prints the version.
+
 ## CI / releases
 
 Every push to `main` and every pull request is built and tested on GitHub
