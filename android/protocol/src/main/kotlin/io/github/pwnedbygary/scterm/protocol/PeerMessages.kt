@@ -95,6 +95,23 @@ data class StreamsState(
 
 @Serializable
 sealed class PeerMessage {
+    /** Optional v1 extension: inspect readiness without creating a session. */
+    @Serializable
+    @SerialName("probe")
+    data class Probe(val v: Int = PEER_PROTOCOL_VERSION, val minV: Int = PEER_PROTOCOL_VERSION) : PeerMessage()
+
+    @Serializable
+    @SerialName("probe_result")
+    data class ProbeResult(
+        val v: Int,
+        val device: DeviceInfo,
+        val ready: Boolean,
+        val grants: List<String>,
+        val caps: Capabilities? = null,
+        val controlOccupied: Boolean = false,
+        val reason: String = "",
+    ) : PeerMessage()
+
     /** First frame on every channel, controller -> target. */
     @Serializable
     @SerialName("hello")

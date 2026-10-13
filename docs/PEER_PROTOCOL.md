@@ -216,3 +216,24 @@ their own schedule so continuous input never starves the keepalive.
 ## Default port
 
 TCP 27300, outside 27183–27282, which the Go client binds for its adb tunnels.
+
+## Optional readiness probe (v1 extension)
+
+A paired controller may open pinned mutual TLS and send `probe` with `v` and
+`minV`, both 1. The target authorizes the client certificate against its peer
+store and replies with `probe_result`: `v`, `device`, `ready`, caller-specific
+`grants`, optional `caps`, `controlOccupied`, and `reason`. It then closes.
+Readiness includes backend availability and session capacity. It does not mean
+control is granted or free. No capture is started, session created, or lease
+acquired. Unknown/revoked identities receive `not_paired`.
+
+Clients classify explicit `bad_request`, `unsupported`, or `version` rejections
+as unavailable status on older peers; ordinary streaming remains unchanged.
+A silent/closed connection cannot establish support and is a failed check.
+Checks have one five-second deadline and are cancellable.
+
+While serving, Android advertises `_scterm-presence._tcp`, independently of
+invitation-only `_scterm._tcp`. Presence TXT `id` is a public fingerprint hint,
+never authentication. Candidates must pass pinned TLS before any stored address
+is replaced. Direct saved addresses remain usable without multicast discovery.
+Shared message examples live in `protocol/fixtures/probe.json`.

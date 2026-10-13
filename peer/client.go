@@ -2,6 +2,7 @@ package peer
 
 import (
 	"bufio"
+	"context"
 	"crypto/hmac"
 	"crypto/tls"
 	"encoding/binary"
@@ -28,6 +29,8 @@ const (
 // pingInterval is kept regardless of input: the target only answers, so
 // pings starved by continuous input would let readTimeout end a healthy
 // session. A variable only so tests can shorten it.
+var ErrIdentityMismatch = errors.New("identity mismatch")
+
 var pingInterval = 5 * time.Second
 
 // Client pairs with and connects to targets as one identity.
@@ -46,6 +49,10 @@ type PairResult struct {
 // dial opens mutual TLS, pinning the target when pin is set, and reports
 // the identity the target presented.
 func (c *Client) dial(host string, port int, pin *Fingerprint) (*tls.Conn, Fingerprint, error) {
+	return c.dialContext(context.Background(), host, port, pin)
+}
+
+func (c *Client) dialContext(ctx context.Context, host string, port int, pin *Fingerprint) (*tls.Conn, Fingerprint, error) {
 	var seen Fingerprint
 	cfg := &tls.Config{
 		Certificates: []tls.Certificate{c.Identity.Certificate},
@@ -58,18 +65,22 @@ func (c *Client) dial(host string, port int, pin *Fingerprint) (*tls.Conn, Finge
 			}
 			seen = FingerprintOf(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
 			if pin != nil && !seen.Equal(*pin) {
-				return fmt.Errorf("the device at %s is %s, not the paired %s", host, seen.Short(), pin.Short())
+				return fmt.Errorf("%w: the device at %s is %s, not the paired %s", ErrIdentityMismatch, host, seen.Short(), pin.Short())
 			}
 			return nil
 		},
 	}
-	raw, err := (&net.Dialer{Timeout: dialTimeout}).Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	raw, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		return nil, seen, err
 	}
 	conn := tls.Client(raw, cfg)
-	conn.SetDeadline(time.Now().Add(dialTimeout))
-	if err := conn.Handshake(); err != nil {
+	deadline := time.Now().Add(dialTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	conn.SetDeadline(deadline)
+	if err := conn.HandshakeContext(ctx); err != nil {
 		raw.Close()
 		return nil, seen, err
 	}

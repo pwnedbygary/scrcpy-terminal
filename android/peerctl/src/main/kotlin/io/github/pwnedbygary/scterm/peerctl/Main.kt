@@ -173,7 +173,10 @@ private fun serve(opts: Options, identity: StaticIdentity, store: FilePeerStore)
         identity,
         store,
         DeviceInfo(opts.value("--name") ?: "peerctl test pattern", model = "JVM", manufacturer = "scterm"),
-        backends = { TestPatternBackend(width, height, log = log) },
+        backends = object : TargetServer.BackendProvider {
+            override fun create() = TestPatternBackend(width, height, log = log)
+            override fun status() = TargetServer.BackendStatus(true, TestPatternBackend(width, height, log = log).capabilities)
+        },
         config = TargetServer.Config(port = opts.value("--port")?.toInt() ?: 27401, bindAddress = InetAddress.getLoopbackAddress()),
         events = object : TargetServer.Events {
             override fun onSessionStarted(session: TargetServer.SessionInfo) =

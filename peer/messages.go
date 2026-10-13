@@ -18,18 +18,20 @@ const (
 
 // Message types, as in the JSON "type" field.
 const (
-	TypeHello    = "hello"
-	TypeWelcome  = "welcome"
-	TypeReject   = "reject"
-	TypePair     = "pair"
-	TypePaired   = "paired"
-	TypePing     = "ping"
-	TypePong     = "pong"
-	TypeTakeover = "takeover"
-	TypeLease    = "lease"
-	TypeError    = "error"
-	TypeStatus   = "status"
-	TypeBye      = "bye"
+	TypeProbe       = "probe"
+	TypeProbeResult = "probe_result"
+	TypeHello       = "hello"
+	TypeWelcome     = "welcome"
+	TypeReject      = "reject"
+	TypePair        = "pair"
+	TypePaired      = "paired"
+	TypePing        = "ping"
+	TypePong        = "pong"
+	TypeTakeover    = "takeover"
+	TypeLease       = "lease"
+	TypeError       = "error"
+	TypeStatus      = "status"
+	TypeBye         = "bye"
 
 	// Nearby pairing: both users compare a six-digit code (see nearby.go).
 	TypePairNearby  = "pair_nearby"
@@ -107,31 +109,33 @@ type StreamsState struct {
 // Message is every handshake and envelope message: Type decides which fields
 // mean anything, exactly as in the protocol's JSON. Unknown fields are ignored.
 type Message struct {
-	Type        string         `json:"type"`
-	V           int            `json:"v,omitempty"`
-	MinV        int            `json:"minV,omitempty"`
-	Channel     string         `json:"channel,omitempty"`
-	Session     string         `json:"session,omitempty"`
-	Token       string         `json:"token,omitempty"`
-	Request     *StreamRequest `json:"request,omitempty"`
-	Client      *ClientInfo    `json:"client,omitempty"`
-	Grants      []string       `json:"grants,omitempty"`
-	Caps        *Capabilities  `json:"caps,omitempty"`
-	Device      *DeviceInfo    `json:"device,omitempty"`
-	Streams     *StreamsState  `json:"streams,omitempty"`
-	Lease       string         `json:"lease,omitempty"`
-	Proof       string         `json:"proof,omitempty"`
-	ServePort   int            `json:"servePort,omitempty"`
-	Code        string         `json:"code,omitempty"`
-	Message     string         `json:"message,omitempty"`
-	ControlType string         `json:"controlType,omitempty"`
-	T           int64          `json:"t,omitempty"`
-	State       string         `json:"state,omitempty"`
-	Holder      string         `json:"holder,omitempty"`
-	Reason      string         `json:"reason,omitempty"`
-	EndSession  bool           `json:"endSession,omitempty"`
-	Commit      string         `json:"commit,omitempty"`
-	Nonce       string         `json:"nonce,omitempty"`
+	Ready           *bool          `json:"ready,omitempty"`
+	ControlOccupied bool           `json:"controlOccupied,omitempty"`
+	Type            string         `json:"type"`
+	V               int            `json:"v,omitempty"`
+	MinV            int            `json:"minV,omitempty"`
+	Channel         string         `json:"channel,omitempty"`
+	Session         string         `json:"session,omitempty"`
+	Token           string         `json:"token,omitempty"`
+	Request         *StreamRequest `json:"request,omitempty"`
+	Client          *ClientInfo    `json:"client,omitempty"`
+	Grants          []string       `json:"grants,omitempty"`
+	Caps            *Capabilities  `json:"caps,omitempty"`
+	Device          *DeviceInfo    `json:"device,omitempty"`
+	Streams         *StreamsState  `json:"streams,omitempty"`
+	Lease           string         `json:"lease,omitempty"`
+	Proof           string         `json:"proof,omitempty"`
+	ServePort       int            `json:"servePort,omitempty"`
+	Code            string         `json:"code,omitempty"`
+	Message         string         `json:"message,omitempty"`
+	ControlType     string         `json:"controlType,omitempty"`
+	T               int64          `json:"t,omitempty"`
+	State           string         `json:"state,omitempty"`
+	Holder          string         `json:"holder,omitempty"`
+	Reason          string         `json:"reason,omitempty"`
+	EndSession      bool           `json:"endSession,omitempty"`
+	Commit          string         `json:"commit,omitempty"`
+	Nonce           string         `json:"nonce,omitempty"`
 }
 
 // RejectDeclined: in nearby pairing, the target's user declined or did not answer in time.

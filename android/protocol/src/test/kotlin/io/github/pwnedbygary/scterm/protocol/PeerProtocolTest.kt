@@ -19,6 +19,22 @@ import kotlin.test.assertTrue
 
 class PeerProtocolTest {
     @Test
+    fun sharedProbeFixtures() {
+        val fixture = Fixtures.load("probe.json")
+        for (value in fixture.values) {
+            val bytes = value.toString().toByteArray()
+            val message = PeerFrames.decode(bytes)
+            assertTrue(message is PeerMessage.Probe || message is PeerMessage.ProbeResult)
+            val output = ByteArrayOutputStream()
+            PeerFrames.write(output, message)
+            assertEquals(message, PeerFrames.read(ByteArrayInputStream(output.toByteArray())))
+        }
+        val blocked = PeerFrames.decode(fixture.getValue("blocked").toString().toByteArray()) as PeerMessage.ProbeResult
+        assertTrue(!blocked.ready)
+        assertEquals("Start the helper on RP6", blocked.reason)
+    }
+
+    @Test
     fun everyMessageRoundTripsThroughAFrame() {
         val caps = Capabilities(
             backend = "fixture",

@@ -55,6 +55,7 @@ class StaticIdentity(override val certificate: X509Certificate, override val pri
 }
 
 object PeerTls {
+    private val probeResolver = BoundedResolver()
     private val PROTOCOLS = listOf("TLSv1.3", "TLSv1.2")
 
     /** Accepts any client certificate: authorization happens after the handshake. */
@@ -74,11 +75,13 @@ object PeerTls {
         return ssl
     }
 
-    fun connect(context: SSLContext, host: String, port: Int, timeoutMs: Int): SSLSocket {
+    fun connect(context: SSLContext, host: String, port: Int, timeoutMs: Int, boundedDns: Boolean = false, onSocket: (Socket) -> Unit = {}): SSLSocket {
         val raw = Socket()
         try {
+            onSocket(raw)
             raw.tcpNoDelay = true
-            raw.connect(InetSocketAddress(host, port), timeoutMs)
+            val address = if (boundedDns) InetSocketAddress(probeResolver.resolve(host, timeoutMs), port) else InetSocketAddress(host, port)
+            raw.connect(address, timeoutMs)
             val ssl = context.socketFactory.createSocket(raw, host, port, true) as SSLSocket
             ssl.useClientMode = true
             configure(ssl)

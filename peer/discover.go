@@ -29,6 +29,15 @@ var mdnsGroup = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
 // inviting. An answer only says where a device listens: who it is gets
 // settled by the code both users compare, never by the answer.
 func DiscoverNearby(ctx context.Context, wait time.Duration) ([]NearbyDevice, error) {
+	return discoverService(ctx, wait, nearbyService)
+}
+
+// DiscoverPresence finds serving endpoints; every candidate still needs pinned TLS.
+func DiscoverPresence(ctx context.Context, wait time.Duration) ([]NearbyDevice, error) {
+	return discoverService(ctx, wait, "_scterm-presence._tcp.local.")
+}
+
+func discoverService(ctx context.Context, wait time.Duration, service string) ([]NearbyDevice, error) {
 	ifaces := multicastInterfaces()
 	if len(ifaces) == 0 {
 		return nil, errors.New("no network interface can reach the local network")
@@ -65,6 +74,7 @@ func DiscoverNearby(ctx context.Context, wait time.Duration) ([]NearbyDevice, er
 	}()
 
 	found := newNearbyCollector()
+	found.service = service
 	var wg sync.WaitGroup
 	for _, c := range conns {
 		wg.Add(1)
@@ -84,7 +94,7 @@ func DiscoverNearby(ctx context.Context, wait time.Duration) ([]NearbyDevice, er
 	pc := ipv4.NewPacketConn(conn)
 	pc.SetMulticastTTL(255)
 	send := func() {
-		query, err := nearbyQuery(found.unresolved())
+		query, err := serviceQuery(service, found.unresolved())
 		if err != nil {
 			return
 		}
@@ -136,12 +146,16 @@ func multicastInterfaces() []net.Interface {
 // nearbyQuery asks for the service, plus the SRV record of any device heard
 // of without one.
 func nearbyQuery(unresolved []string) ([]byte, error) {
+	return serviceQuery(nearbyService, unresolved)
+}
+
+func serviceQuery(service string, unresolved []string) ([]byte, error) {
 	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{})
 	b.EnableCompression()
 	if err := b.StartQuestions(); err != nil {
 		return nil, err
 	}
-	names := append([]string{nearbyService}, unresolved...)
+	names := append([]string{service}, unresolved...)
 	for i, n := range names {
 		name, err := dnsmessage.NewName(n)
 		if err != nil {
@@ -166,6 +180,7 @@ type nearbyEntry struct {
 
 // nearbyCollector assembles devices from answers arriving in any order.
 type nearbyCollector struct {
+	service   string
 	mu        sync.Mutex
 	instances map[string]*nearbyEntry // full instance name, lower case
 	names     map[string]string       // lower case -> as advertised
@@ -173,7 +188,7 @@ type nearbyCollector struct {
 }
 
 func newNearbyCollector() *nearbyCollector {
-	return &nearbyCollector{instances: map[string]*nearbyEntry{}, names: map[string]string{}, addrs: map[string]net.IP{}}
+	return &nearbyCollector{service: nearbyService, instances: map[string]*nearbyEntry{}, names: map[string]string{}, addrs: map[string]net.IP{}}
 }
 
 func (c *nearbyCollector) instance(name string) *nearbyEntry {
@@ -214,11 +229,11 @@ func (c *nearbyCollector) add(packet []byte, from net.IP) {
 		name := r.Header.Name.String()
 		switch body := r.Body.(type) {
 		case *dnsmessage.PTRResource:
-			if strings.EqualFold(name, nearbyService) {
+			if strings.EqualFold(name, c.service) {
 				c.instance(body.PTR.String())
 			}
 		case *dnsmessage.SRVResource:
-			if isNearbyInstance(name) {
+			if isServiceInstance(name, c.service) {
 				e := c.instance(name)
 				e.target, e.port, e.from = strings.ToLower(body.Target.String()), int(body.Port), from.To4()
 			}
@@ -228,8 +243,10 @@ func (c *nearbyCollector) add(packet []byte, from net.IP) {
 	}
 }
 
-func isNearbyInstance(name string) bool {
-	return len(name) > len(nearbyService) && strings.EqualFold(name[len(name)-len(nearbyService)-1:], "."+nearbyService)
+func isNearbyInstance(name string) bool { return isServiceInstance(name, nearbyService) }
+
+func isServiceInstance(name, service string) bool {
+	return len(name) > len(service) && strings.EqualFold(name[len(name)-len(service)-1:], "."+service)
 }
 
 // unresolved lists devices heard of whose port is not known yet.
@@ -261,8 +278,8 @@ func (c *nearbyCollector) devices() []NearbyDevice {
 			continue
 		}
 		name := c.names[key]
-		if isNearbyInstance(name) {
-			name = name[:len(name)-len(nearbyService)-1]
+		if isServiceInstance(name, c.service) {
+			name = name[:len(name)-len(c.service)-1]
 		}
 		out = append(out, NearbyDevice{Name: name, Host: host.String(), Port: e.port})
 	}

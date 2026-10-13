@@ -1,0 +1,46 @@
+{
+  "probe": {
+    "type": "probe",
+    "v": 1,
+    "minV": 1
+  },
+  "ready": {
+    "type": "probe_result",
+    "v": 1,
+    "device": {
+      "name": "RP6"
+    },
+    "ready": true,
+    "grants": [
+      "view",
+      "control"
+    ],
+    "caps": {
+      "backend": "helper",
+      "video": true,
+      "audio": true,
+      "control": [
+        "inject_touch_event"
+      ],
+      "multitouch": true,
+      "clipboard": true,
+      "maxSessions": 4,
+      "notes": []
+    },
+    "controlOccupied": false,
+    "reason": ""
+  },
+  "blocked": {
+    "type": "probe_result",
+    "v": 1,
+    "device": {
+      "name": "RP6"
+    },
+    "ready": false,
+    "grants": [
+      "view"
+    ],
+    "controlOccupied": false,
+    "reason": "Start the helper on RP6"
+  }
+}

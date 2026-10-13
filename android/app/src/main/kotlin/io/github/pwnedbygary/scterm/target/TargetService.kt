@@ -43,6 +43,7 @@ class TargetService : Service() {
     private var port = 0
     private var wifiLock: WifiManager.WifiLock? = null
     private val advertiser by lazy { Nearby.Advertiser(this) }
+    private val presenceAdvertiser by lazy { Nearby.Advertiser(this, presence = true) }
     private val expireInvitation = Runnable { server?.cancelInvitation() }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -95,6 +96,10 @@ class TargetService : Service() {
                 backends = object : TargetServer.BackendProvider {
                     override fun create(): TargetBackend? = backend?.takeIf { it.ready }
 
+                    override fun status(): TargetServer.BackendStatus = backend.let { b ->
+                        TargetServer.BackendStatus(b?.ready == true, b?.capabilities, if (b?.ready == true) "" else b?.notReadyReason ?: "serving stopped")
+                    }
+
                     override fun notReadyReason(): String = backend?.notReadyReason ?: super.notReadyReason()
                 },
                 config = TargetServer.Config(port = app.servePort),
@@ -103,6 +108,7 @@ class TargetService : Service() {
             port = srv.start()
             server = srv
             Serving.server = srv
+            presenceAdvertiser.start(app.deviceName, port)
             if (kind == BackendKind.PROJECTION) RemoteInputService.servingActive = true
             publish()
         } catch (e: Exception) {
@@ -268,6 +274,7 @@ class TargetService : Service() {
         updateWifiLock(false)
         main.removeCallbacks(expireInvitation)
         advertiser.stop()
+        presenceAdvertiser.stop()
         Serving.publishInvitation(null)
         Serving.publishPairingRequest(null)
         getSystemService(NotificationManager::class.java).cancel(PAIRING_NOTIFICATION_ID)

@@ -96,6 +96,36 @@ class ControllerClient(private val identity: PeerIdentity, private val client: C
         }
     }
 
+    /** Bounded, pinned check. onSocket lets a lifecycle owner cancel in-flight I/O. */
+    fun probe(host: String, port: Int, pin: Fingerprint, timeoutMs: Int = 5_000, onSocket: (java.net.Socket) -> Unit = {}): PeerMessage.ProbeResult {
+        var expiry: java.util.concurrent.ScheduledFuture<*>? = null
+        try {
+            val socket = PeerTls.connect(PeerTls.clientContext(identity, pin), host, port, timeoutMs, boundedDns = true) { raw ->
+                expiry = probeTimer.schedule({ raw.closeQuietly() }, timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+                onSocket(raw)
+            }
+            socket.use {
+                PeerFrames.write(it.outputStream, PeerMessage.Probe())
+                return when (val reply = PeerFrames.read(DataInputStream(it.inputStream))) {
+                    is PeerMessage.ProbeResult -> {
+                        if (reply.v != io.github.pwnedbygary.scterm.protocol.PEER_PROTOCOL_VERSION) throw ProtocolException("unsupported probe version")
+                        reply
+                    }
+                    is PeerMessage.Reject -> throw PeerException(reply.code, reply.message)
+                    else -> throw ProtocolException("unexpected probe reply")
+                }
+            }
+        } finally {
+            expiry?.cancel(false)
+        }
+    }
+
+    private companion object {
+        val probeTimer = java.util.concurrent.ScheduledThreadPoolExecutor(1) { task ->
+            Thread(task, "peer-probe-timeout").apply { isDaemon = true }
+        }.apply { removeOnCancelPolicy = true }
+    }
+
     /** Opens a session to a paired target whose identity must match [pin]. */
     fun connect(
         host: String,

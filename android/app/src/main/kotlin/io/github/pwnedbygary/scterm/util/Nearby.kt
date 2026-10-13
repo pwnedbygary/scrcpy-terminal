@@ -20,15 +20,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 object Nearby {
     private const val SERVICE_TYPE = "_scterm._tcp"
+    const val PRESENCE_TYPE = "_scterm-presence._tcp"
     private const val RESOLVE_TIMEOUT_MS = 8_000L
 
     /** What this device advertises as, so it can leave itself out of its own list. */
     @Volatile
     private var ownName: String? = null
 
-    class Service internal constructor(val name: String, internal val info: NsdServiceInfo)
+    class Service internal constructor(val name: String, internal val info: NsdServiceInfo) {
+        val identityHint: String? get() = info.attributes["id"]?.toString(Charsets.UTF_8)
+    }
 
-    class Advertiser(context: Context) {
+    class Advertiser(private val context: Context, private val presence: Boolean = false) {
         private val nsd = context.applicationContext.getSystemService(NsdManager::class.java)
         private val multicast = multicastLock(context, "scterm-nearby-advertise")
         private var listener: NsdManager.RegistrationListener? = null
@@ -41,12 +44,13 @@ object Nearby {
             multicast?.acquire()
             val info = NsdServiceInfo().apply {
                 serviceName = wanted.first
-                serviceType = SERVICE_TYPE
+                serviceType = if (presence) PRESENCE_TYPE else SERVICE_TYPE
+                if (presence) setAttribute("id", ScTermApp.of(context).identity.fingerprint.hex)
                 setPort(port)
             }
             val l = object : NsdManager.RegistrationListener {
                 override fun onServiceRegistered(info: NsdServiceInfo) {
-                    ownName = info.serviceName // may differ: DNS-SD renames on conflicts
+                    if (!presence) ownName = info.serviceName // may differ: DNS-SD renames on conflicts
                 }
 
                 override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) {
@@ -66,7 +70,7 @@ object Nearby {
             val l = listener ?: return
             listener = null
             advertised = null
-            ownName = null
+            if (!presence) ownName = null
             multicast?.takeIf { it.isHeld }?.release()
             try {
                 nsd.unregisterService(l)
@@ -84,7 +88,7 @@ object Nearby {
     }
 
     /** Lists advertising devices while started; [onChanged] runs on the main thread. */
-    class Browser(context: Context, private val onChanged: (List<Service>) -> Unit) {
+    class Browser(context: Context, private val presence: Boolean = false, private val onChanged: (List<Service>) -> Unit) {
         private val nsd = context.applicationContext.getSystemService(NsdManager::class.java)
         private val multicast = multicastLock(context, "scterm-nearby-browse")
         private val main = Handler(Looper.getMainLooper())
@@ -124,7 +128,7 @@ object Nearby {
                 override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
             }
             listener = l
-            nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, l)
+            nsd.discoverServices(if (presence) PRESENCE_TYPE else SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, l)
         }
 
         fun stop() {

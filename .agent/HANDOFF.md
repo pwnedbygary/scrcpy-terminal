@@ -7,6 +7,31 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-13: paired-device readiness, part 1)
+
+- Base: main `4669ee9`, fast-forwarded from `072f084`; worktree was clean.
+- Added optional pinned mutual-TLS `probe` / `probe_result` v1 handshake,
+  side-effect-free backend status, and separate serving-presence DNS-SD.
+  Probes never call obtainBackend or create streaming sessions/leases.
+- Shared fixtures and TLS tests cover readiness, empty grants, revoked/unknown
+  peers, occupied control, mismatched identities, malformed/older replies and
+  Go cancellation. peerctl exposes readiness for the interop test.
+- Verification: `go vet ./...`, `go test ./...`, `go test -race ./peer` passed;
+  `ANDROID_HOME=/opt/android-sdk android/gradlew --no-daemon -p android
+  :protocol:test :peer:test :app:lintDebug :app:assembleDebug :peerctl:assemble`
+  passed with Java 17 and pinned Gradle 9.7.1. An initial test compile warning
+  (unnecessary non-null assertion under -Werror) was corrected before rerun.
+- Physical checks: not run; `adb devices` lists none. Live Go/Kotlin interop
+  is next, before UI monitoring. No release or APK installation performed.
+- Live `TestInteropWithKotlinTarget` passed against peerctl (paired/probed,
+  h264 stream and injected touch); a host JVM target, not physical evidence.
+- Independent review of /tmp/scterm-review-1 returned NEEDS CHANGES: synchronous
+  DNS could escape Kotlin timeout. Added bounded DNS worker/caller waiting
+  with blocked-lookup and cancellation regressions; delta review follows.
+- Review snapshot: generated under /tmp/scterm-review-1; independent review
+  required before commit/push. Review outcome recorded in commit body.
+- Next: Android monitor/badges/notification, then CLI checks and viewer retry.
+
 ## Update (2026-09-30, session 7: landscape viewer)
 
 - Viewer: in landscape the video fills the screen and `ControlsPanel` floats

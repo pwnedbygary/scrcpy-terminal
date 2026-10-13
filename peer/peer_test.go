@@ -3,6 +3,7 @@ package peer
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -458,6 +459,10 @@ func TestInteropWithKotlinTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("paired with %q (%s), grants %v", paired.Device.Name, paired.Fingerprint.Short(), paired.Grants)
+	probe, err := c.Probe(context.Background(), inv.Host, inv.Port, paired.Fingerprint)
+	if err != nil || probe.Ready == nil || !*probe.Ready {
+		t.Fatalf("probe: %+v, %v", probe, err)
+	}
 	s, err := c.Connect(inv.Host, inv.Port, paired.Fingerprint, StreamRequest{Video: true, Audio: true, Control: true, VideoCodecs: []string{"h264"}})
 	if err != nil {
 		t.Fatal(err)

@@ -63,7 +63,12 @@ class TargetServer(
 
         /** Why [create] returned null, sent to the refused controller. */
         fun notReadyReason(): String = "serving has not finished starting"
+
+        /** Must not create/start capture. null means readiness is unknown. */
+        fun status(): BackendStatus? = null
     }
+
+    data class BackendStatus(val ready: Boolean, val caps: Capabilities?, val reason: String = "")
 
     data class Config(
         val port: Int = Invitation.DEFAULT_PORT,
@@ -302,6 +307,7 @@ class TargetServer(
         val input = DataInputStream(BufferedInputStream(ssl.inputStream, 16 * 1024))
         val output = ssl.outputStream
         when (val first = PeerFrames.read(input)) {
+            is PeerMessage.Probe -> handleProbe(output, peer, first)
             is PeerMessage.Pair -> handlePair(raw, output, peer, first)
             is PeerMessage.PairNearby -> handlePairNearby(raw, ssl, input, output, peer, first)
             is PeerMessage.Hello -> {
@@ -313,6 +319,21 @@ class TargetServer(
             }
             else -> reject(output, RejectCodes.BAD_REQUEST, "expected hello or pair")
         }
+    }
+
+    private fun handleProbe(output: OutputStream, peer: Fingerprint, probe: PeerMessage.Probe) {
+        val record = store.find(peer) ?: return reject(output, RejectCodes.NOT_PAIRED, "pairing no longer accepted")
+        if (probe.minV > PEER_PROTOCOL_VERSION || probe.v < PEER_PROTOCOL_VERSION) {
+            return reject(output, RejectCodes.VERSION, "peer protocol $PEER_PROTOCOL_VERSION required")
+        }
+        val status = backends.status() ?: BackendStatus(false, null, "readiness unavailable on this server")
+        val occupied = synchronized(inputLock) { leaseHolder != null }
+        val full = synchronized(lock) { sessions.size >= config.maxSessions }
+        PeerFrames.write(output, PeerMessage.ProbeResult(
+            v = PEER_PROTOCOL_VERSION, device = device, ready = status.ready && !full,
+            grants = Grant.toWire(record.inboundGrants), caps = status.caps,
+            controlOccupied = occupied, reason = if (full) "too many sessions" else status.reason,
+        ))
     }
 
     private fun negotiate(hello: PeerMessage.Hello): Int? =
