@@ -38,8 +38,20 @@ class AudioPlayer(private val input: InputStream, private val onStatus: (String)
     private var track: AudioTrack? = null
     private var framesWritten = 0L
 
+    @Volatile private var stopping = false
+    private var playerThread: Thread? = null
+
     fun start() {
-        thread(name = "audio-player", isDaemon = true) { run() }
+        playerThread = thread(name = "audio-player", isDaemon = true) { run() }
+    }
+
+    /** Called off main after the owning session closes its media sockets. */
+    fun stopAndWait(timeoutMs: Long = 2_000): Boolean {
+        stopping = true
+        runCatching { input.close() }
+        track?.let { runCatching { it.pause(); it.flush() } }
+        playerThread?.join(timeoutMs)
+        return playerThread?.isAlive != true
     }
 
     private fun run() {
@@ -50,12 +62,13 @@ class AudioPlayer(private val input: InputStream, private val onStatus: (String)
                 StreamStart.Disabled -> return onStatus("No audio: capture is unavailable on the target")
                 StreamStart.Failed -> return onStatus("No audio: the target reported an audio error")
             }
+            if (stopping) return
             val out = createTrack()
             track = out
             out.setVolume(gain)
             out.play()
             when (codec) {
-                Codec.RAW -> while (true) {
+                Codec.RAW -> while (!stopping) {
                     val item = reader.readItem()
                     if (item is StreamItem.Packet && !item.config) write(out, item.data, item.data.size)
                 }
@@ -119,7 +132,7 @@ class AudioPlayer(private val input: InputStream, private val onStatus: (String)
         val info = MediaCodec.BufferInfo()
         var pcm = ByteArray(8192)
         try {
-            while (true) {
+            while (!stopping) {
                 val item = reader.readItem() as? StreamItem.Packet ?: continue
                 if (item.config) continue
                 val inIndex = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)

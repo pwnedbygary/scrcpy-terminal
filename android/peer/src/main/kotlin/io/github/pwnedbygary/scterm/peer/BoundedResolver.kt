@@ -13,6 +13,8 @@ internal class BoundedResolver(private val lookup: (String) -> InetAddress = Ine
         Thread(task, "peer-probe-dns").apply { isDaemon = true }
     }
     fun resolve(host: String, timeoutMs: Int): InetAddress {
+        // Numeric endpoints need no resolver worker, even if platform DNS is stuck.
+        if (host.matches(Regex("[0-9]{1,3}(\\.[0-9]{1,3}){3}")) || ':' in host) return InetAddress.getByName(host)
         val task = workers.submit<InetAddress> { lookup(host) }
         try {
             return task.get(timeoutMs.toLong(), TimeUnit.MILLISECONDS)

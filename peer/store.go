@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -17,6 +18,7 @@ type Record struct {
 	Host        string   `json:"host"`
 	Port        int      `json:"port"`
 	Grants      []string `json:"grants"`
+	LastSeenMs  int64    `json:"lastSeenMs,omitempty"`
 	PairedAtMs  int64    `json:"pairedAtMs"`
 }
 
@@ -53,6 +55,27 @@ func (s *Store) Put(r Record) error {
 		}
 	}
 	return s.save(append(recs, r))
+}
+
+// UpdateExisting changes an existing record only; a concurrent forget stays forgotten.
+func (s *Store) UpdateExisting(fingerprint string, update func(Record) Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	recs, err := s.load()
+	if err != nil {
+		return err
+	}
+	for i := range recs {
+		if recs[i].Fingerprint == fingerprint {
+			updated := update(recs[i])
+			if reflect.DeepEqual(updated, recs[i]) {
+				return nil
+			}
+			recs[i] = updated
+			return s.save(recs)
+		}
+	}
+	return nil
 }
 
 // Remove forgets a target; it reports whether one was removed.

@@ -27,6 +27,7 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLHandshakeException
 import kotlin.test.AfterTest
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
@@ -70,6 +71,60 @@ class PeerSessionTest {
 
     private fun ControllerClient.open(request: StreamRequest = StreamRequest()) =
         connect("127.0.0.1", port, TestIdentities.target.fingerprint, request)
+
+    @Test
+    fun connectionCleanupCannotCloseBeforeAdministrativeByeIsSent() {
+        val localStore = InMemoryPeerStore()
+        val localBackend = FixtureBackend()
+        val releaseEntered = java.util.concurrent.CountDownLatch(1)
+        val allowRelease = java.util.concurrent.CountDownLatch(1)
+        localBackend.refuse = { message ->
+            if (message is ControlMessage.InjectTouch && message.action == AndroidInput.MOTION_ACTION_UP) {
+                releaseEntered.countDown()
+                allowRelease.await(3, TimeUnit.SECONDS)
+            }
+            false
+        }
+        val localServer = TargetServer(TestIdentities.target, localStore, DeviceInfo("Target"), { localBackend },
+            TargetServer.Config(port = 0, bindAddress = InetAddress.getLoopbackAddress(), idleTimeoutMs = 200))
+        val localPort = localServer.start()
+        var active: ControllerSession? = null
+        try {
+            val controller = client()
+            controller.pair(localServer.invite("127.0.0.1", Grant.FULL))
+            val connected = controller.connect("127.0.0.1", localPort, TestIdentities.target.fingerprint,
+                StreamRequest(video = false, audio = false))
+            active = connected
+            val observer = Probe()
+            connected.start(observer)
+            connected.send(touch(AndroidInput.MOTION_ACTION_DOWN, 2, 1))
+            localBackend.nextControl()
+            localStore.remove(TestIdentities.controller.fingerprint)
+            assertTrue(releaseEntered.await(1, TimeUnit.SECONDS))
+            // The target control reader times out while administrative input
+            // cleanup is deliberately blocked. Its finally must not close TLS.
+            Thread.sleep(400)
+            assertFalse(connected.isClosed, "connection handler closed before the administrative bye")
+            allowRelease.countDown()
+            assertEquals("access revoked", observer.closed.poll(1, TimeUnit.SECONDS))
+        } finally { allowRelease.countDown(); active?.closeNow(); localServer.stop() }
+    }
+
+    @Test
+    fun immediateCloseReleasesSocketsAndLeaseBeforeRetry() {
+        val controller = pair(Grant.FULL)
+        val old = controller.open()
+        old.start(Probe())
+        old.send(touch(AndroidInput.MOTION_ACTION_DOWN, 0, 100))
+        assertEquals(AndroidInput.MOTION_ACTION_DOWN, (backend.nextControl() as ControlMessage.InjectTouch).action)
+        old.closeNow()
+        assertTrue(old.isClosed)
+        eventually(message = "old session removed") { server.sessions().isEmpty() }
+        assertEquals(AndroidInput.MOTION_ACTION_UP, (backend.nextControl() as ControlMessage.InjectTouch).action)
+        val retry = controller.open()
+        assertEquals(LeaseState.HELD, retry.lease)
+        retry.closeNow()
+    }
 
     /** Collects what the target tells a controller. */
     private class Probe : ControllerSession.Listener {

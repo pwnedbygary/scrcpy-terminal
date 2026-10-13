@@ -330,6 +330,10 @@ class ControllerSession internal constructor(
         }
     }
 
+    /** Immediate local teardown, used before retrying; no takeover or network write. */
+    fun closeNow() = shutdown("closed")
+
+
     override fun close() = disconnect()
 
     val isClosed: Boolean get() = closed.get()

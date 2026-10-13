@@ -101,6 +101,8 @@ class ViewerActivity : ComponentActivity() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var keyboardShown = false
     private var leaving = false
+    private val attempts = ViewerAttempts()
+    private var cleanupReady = true
     private var videoWidth = 0
     private var videoHeight = 0
     private var lastKeyFrameRequest = 0L
@@ -162,6 +164,12 @@ class ViewerActivity : ComponentActivity() {
         // System Back is the remote Back; leaving uses the Disconnect button.
         onBackPressedDispatcher.addCallback(this) {
             if (keyboardShown) hideKeyboard() else input.press(DeviceAction.BACK)
+        }
+        findViewById<Button>(R.id.overlay_retry).setOnClickListener {
+            if (cleanupReady) {
+                leaving = false
+                connect()
+            }
         }
         connect()
     }
@@ -245,14 +253,10 @@ class ViewerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         leaving = true
+        attempts.invalidate()
         if (::panel.isInitialized) panel.hide()
         main.removeCallbacksAndMessages(null)
-        input.releaseAll()
-        session?.disconnect()
-        session = null
-        decoder?.release()
-        decoder = null
-        wifiLock?.release()
+        releaseSession()
         super.onDestroy()
     }
 
@@ -260,42 +264,49 @@ class ViewerActivity : ComponentActivity() {
 
     private fun connect() {
         val fingerprint = intent.getStringExtra(EXTRA_FINGERPRINT)?.let(Fingerprint::parse)
-        val host = intent.getStringExtra(EXTRA_HOST)
-        val port = intent.getIntExtra(EXTRA_PORT, 0)
+        val remembered = fingerprint?.let { ScTermApp.of(this).peers.find(it) }
+        val host = remembered?.target?.host ?: intent.getStringExtra(EXTRA_HOST)
+        val port = remembered?.target?.port ?: intent.getIntExtra(EXTRA_PORT, 0)
         val name = intent.getStringExtra(EXTRA_NAME) ?: host
         if (fingerprint == null || host == null || port == 0) return fail("This device has no address to connect to.")
+        val attempt = attempts.begin()
         showOverlay("Connecting to $name…", busy = true)
         thread(name = "viewer-connect", isDaemon = true) {
+            var pending: ControllerSession? = null
             try {
                 val app = ScTermApp.of(this)
                 val connected = ControllerClient(app.identity, app.clientInfo).connect(host, port, fingerprint)
+                pending = connected
+                if (!attempts.isCurrent(attempt)) { connected.closeNow(); return@thread }
                 app.peers.update(fingerprint) { it?.copy(grantedByPeer = Grant.toWire(connected.grants), lastSeenMs = System.currentTimeMillis()) }
-                main.post { onConnected(connected) }
+                main.post { onConnected(connected, attempt) }
             } catch (e: Exception) {
-                main.post { fail(describe(e, "$host:$port", name ?: "The target")) }
+                pending?.closeNow()
+                main.post { if (attempts.isCurrent(attempt) && !leaving) fail(describe(e, "$host:$port", name ?: "The target")) }
             }
         }
     }
 
-    private fun onConnected(s: ControllerSession) {
-        if (leaving) {
-            s.disconnect()
+    private fun onConnected(s: ControllerSession, attempt: Long) {
+        if (leaving || !attempts.isCurrent(attempt)) {
+            s.closeNow()
             return
         }
         session = s
-        s.start(sessionListener)
-        val d = VideoDecoder(decoderListener)
+        intent.getStringExtra(EXTRA_FINGERPRINT)?.let { ScTermApp.of(this).peerMonitor.noteViewer(it, s) }
+        s.start(sessionListener(attempt))
+        val d = VideoDecoder(decoderListener(attempt))
         decoder = d
         surface?.let(d::setSurface)
         val video = s.video
         if (video != null) {
-            thread(name = "video-net", isDaemon = true) { readVideo(video) }
+            thread(name = "video-net", isDaemon = true) { readVideo(video, d, attempt) }
             hideOverlay()
         } else {
             showOverlay("This device may control ${s.welcome.device?.name ?: "the target"} but not see it.", busy = false)
         }
         s.audio?.let { stream ->
-            audio = AudioPlayer(stream) { message -> main.post { toast(message) } }.also { it.start() }
+            audio = AudioPlayer(stream) { message -> main.post { if (attempts.isCurrent(attempt)) toast(message) } }.also { it.start() }
         }
         wifiLock = Net.wifiLock(this, "scterm-viewer", foreground = true)?.also { it.acquire() }
         s.capabilities?.notes?.firstOrNull()?.let(::toast)
@@ -303,7 +314,7 @@ class ViewerActivity : ComponentActivity() {
         main.post(statsTicker)
     }
 
-    private fun readVideo(stream: InputStream) {
+    private fun readVideo(stream: InputStream, owner: VideoDecoder, attempt: Long) {
         try {
             val reader = MediaStreamReader(stream, MediaWire.MAX_VIDEO_PACKET)
             val problem = when (val start = reader.readStart()) {
@@ -313,47 +324,58 @@ class ViewerActivity : ComponentActivity() {
                 StreamStart.Failed -> "The target could not start its video."
             }
             if (problem != null) {
-                main.post { fail(problem) }
+                main.post { if (attempts.isCurrent(attempt)) fail(problem) }
                 return
             }
-            while (true) {
+            while (attempts.isCurrent(attempt)) {
                 val item = reader.readItem()
-                (decoder ?: break).offer(item)
+                if (attempts.isCurrent(attempt)) owner.offer(item)
             }
         } catch (_: IOException) {
             // The session ended; its listener reports why.
         }
     }
 
-    private val sessionListener = object : ControllerSession.Listener {
+    private fun sessionListener(attempt: Long) = object : ControllerSession.Listener {
         override fun onLease(state: LeaseState, holder: String?) {
             main.post {
+                if (!attempts.isCurrent(attempt)) return@post
                 updateLease()
+                intent.getStringExtra(EXTRA_FINGERPRINT)?.let { ScTermApp.of(this@ViewerActivity).peerMonitor.noteViewer(it, session) }
                 if (state == LeaseState.VIEWER && holder != null) toast("$holder took control")
             }
         }
 
+        override fun onStatus(status: PeerMessage.Status) {
+            main.post {
+                if (!attempts.isCurrent(attempt)) return@post
+                intent.getStringExtra(EXTRA_FINGERPRINT)?.let { ScTermApp.of(this@ViewerActivity).peerMonitor.noteViewer(it, session) }
+            }
+        }
+
         override fun onError(error: PeerMessage.Error) {
-            main.post { toast(describe(error)) }
+            main.post { if (attempts.isCurrent(attempt)) toast(describe(error)) }
         }
 
         override fun onDeviceMessage(message: DeviceMessage) {
             // Device clipboard changes, forwarded only when the clipboard is granted.
             if (message is DeviceMessage.Clipboard) {
                 main.post {
+                    if (!attempts.isCurrent(attempt)) return@post
                     getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("scterm", message.text))
                 }
             }
         }
 
         override fun onClosed(reason: String) {
-            main.post { if (!leaving) fail("Disconnected: $reason") }
+            main.post { if (attempts.isCurrent(attempt) && !leaving) fail("Disconnected: $reason") }
         }
     }
 
-    private val decoderListener = object : VideoDecoder.Listener {
+    private fun decoderListener(attempt: Long) = object : VideoDecoder.Listener {
         override fun onVideoSize(width: Int, height: Int) {
             main.post {
+                if (!attempts.isCurrent(attempt)) return@post
                 videoWidth = width
                 videoHeight = height
                 videoFrame.setAspectRatio(width, height)
@@ -362,11 +384,11 @@ class ViewerActivity : ComponentActivity() {
         }
 
         override fun onKeyFrameNeeded() {
-            main.post { requestKeyFrame() }
+            main.post { if (attempts.isCurrent(attempt)) requestKeyFrame() }
         }
 
         override fun onError(message: String) {
-            main.post { toast(message) }
+            main.post { if (attempts.isCurrent(attempt)) toast(message) }
         }
     }
 
@@ -533,6 +555,10 @@ class ViewerActivity : ComponentActivity() {
         overlayText.text = message
         findViewById<ProgressBar>(R.id.progress).visibility = if (busy) View.VISIBLE else View.GONE
         findViewById<Button>(R.id.overlay_close).visibility = if (busy) View.GONE else View.VISIBLE
+        findViewById<Button>(R.id.overlay_retry).apply {
+            visibility = if (busy || !leaving) View.GONE else View.VISIBLE
+            isEnabled = cleanupReady
+        }
     }
 
     private fun hideOverlay() {
@@ -541,8 +567,44 @@ class ViewerActivity : ComponentActivity() {
 
     private fun fail(message: String) {
         leaving = true
-        session?.disconnect()
+        attempts.invalidate()
+        releaseSession()
         showOverlay(message, busy = false)
+    }
+
+    /** Detach on main, then wait for owned media resources before permitting Retry. */
+    private fun releaseSession() {
+        input.releaseAll()
+        main.removeCallbacks(statsTicker)
+        val previous = session
+        if (previous != null) intent.getStringExtra(EXTRA_FINGERPRINT)?.let { ScTermApp.of(this).peerMonitor.noteViewer(it, null) }
+        val previousAudio = audio
+        val previousDecoder = decoder
+        previousDecoder?.release()
+        session = null
+        audio = null
+        decoder = null
+        videoWidth = 0
+        videoHeight = 0
+        lastKeyFrameRequest = 0
+        frameSamples.clear()
+        wifiLock?.release()
+        wifiLock = null
+        if (previous == null && previousAudio == null && previousDecoder == null) return
+        cleanupReady = false
+        thread(name = "viewer-cleanup", isDaemon = true) {
+            val resourcesClosed = ViewerCleanup.release(
+                { previous?.closeNow() },
+                { previousAudio?.stopAndWait() ?: true },
+                { previousDecoder?.releaseAndWait() ?: true },
+            )
+            main.post {
+                if (isDestroyed || isFinishing) return@post
+                cleanupReady = resourcesClosed
+                findViewById<Button>(R.id.overlay_retry).isEnabled = cleanupReady
+                if (!cleanupReady) overlayText.append("\nThe previous media session is still closing. Close and reopen the viewer.")
+            }
+        }
     }
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()

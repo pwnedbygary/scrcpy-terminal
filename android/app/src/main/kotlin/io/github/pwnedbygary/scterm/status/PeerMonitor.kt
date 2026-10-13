@@ -7,6 +7,11 @@ import android.os.Looper
 import android.os.SystemClock
 import io.github.pwnedbygary.scterm.ScTermApp
 import io.github.pwnedbygary.scterm.peer.ControllerClient
+import io.github.pwnedbygary.scterm.peer.ControllerSession
+import io.github.pwnedbygary.scterm.protocol.PeerMessage
+import io.github.pwnedbygary.scterm.protocol.DeviceInfo
+import io.github.pwnedbygary.scterm.protocol.Grant
+import io.github.pwnedbygary.scterm.protocol.LeaseState
 import io.github.pwnedbygary.scterm.peer.PeerException
 import io.github.pwnedbygary.scterm.peer.PeerRecord
 import io.github.pwnedbygary.scterm.peer.Readiness
@@ -29,6 +34,7 @@ class PeerMonitor(private val app: ScTermApp) {
     private val workers = ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue()) { task ->
         Thread(task, "peer-status").apply { isDaemon = true }
     }
+    private val viewers = mutableMapOf<String, ControllerSession>()
     private val ledger = ReadinessLedger()
     private val mutable = MutableStateFlow<Map<String, Readiness>>(emptyMap())
     val statuses: StateFlow<Map<String, Readiness>> = mutable
@@ -84,6 +90,22 @@ class PeerMonitor(private val app: ScTermApp) {
         }
     }
 
+    /** Only outgoing authenticated viewing sessions establish this direction. */
+    fun noteViewer(id: String, session: ControllerSession?) {
+        if (session == null) {
+            viewers.remove(id)
+            if (app.peers.all().any { it.fingerprint == id }) {
+                val ticket = ledger.begin(id)
+                ledger.complete(id, ticket, Readiness(Readiness.Tone.YELLOW, "Session ended—refresh"))
+            }
+        } else {
+            viewers[id] = session
+            jobs.remove(id)?.cancel()
+        }
+        emit()
+        if (running) scheduleRefresh()
+    }
+
     fun setVisible(value: Boolean) { visible = value; reconcile() }
     fun setServing(value: Boolean) { serving = value; reconcile() }
     private fun interval() = if (visible) 15_000L else 60_000L
@@ -130,6 +152,7 @@ class PeerMonitor(private val app: ScTermApp) {
     private fun peersChanged() {
         val ids = app.peers.all().map { it.fingerprint }.toSet()
         ledger.retain(ids)
+        viewers.keys.retainAll(ids)
         jobs.keys.filter { it !in ids }.forEach { jobs.remove(it)?.cancel() }
         candidates.keys.retainAll(ids)
         emit()
@@ -137,7 +160,18 @@ class PeerMonitor(private val app: ScTermApp) {
     }
     private fun emit() {
         val now = SystemClock.elapsedRealtime()
-        mutable.value = ledger.snapshot().mapValues { (_, value) -> value.fresh(now, interval()) }
+        val values = ledger.snapshot().mapValues { (_, value) -> value.fresh(now, interval()) }.toMutableMap()
+        for ((id, session) in viewers) {
+            if (session.isClosed || app.peers.all().none { it.fingerprint == id }) continue
+            val record = app.peers.all().first { it.fingerprint == id }
+            val result = PeerMessage.ProbeResult(1, session.welcome.device ?: DeviceInfo(record.name), true,
+                Grant.toWire(session.grants), session.capabilities, session.lease == LeaseState.VIEWER)
+            val ready = Readiness.classify(result)
+            values[id] = ready.copy(label = if (ready.tone != Readiness.Tone.GREEN) ready.label else
+                if (session.lease == LeaseState.VIEWER && Grant.CONTROL in session.grants) "Watching—another device has control" else "Connected",
+                checkedAtMs = System.currentTimeMillis(), elapsedAtMs = now, address = record.target)
+        }
+        mutable.value = values
     }
 
     /** Main-thread refresh supersedes all old results and closes their sockets. */
@@ -148,7 +182,7 @@ class PeerMonitor(private val app: ScTermApp) {
         ledger.retain(peers.map { it.fingerprint }.toSet())
         val permissionMissing = Permissions.missingForNetworking(app, false).isNotEmpty()
         if (!permissionMissing) { try { browser.start() } catch (_: SecurityException) { } }
-        val scheduled = ledger.schedule(peers.map { it.fingerprint }).toMap()
+        val scheduled = ledger.schedule(peers.filter { viewers[it.fingerprint]?.isClosed != false }.map { it.fingerprint }).toMap()
         for (peer in peers) {
             val ticket = scheduled[peer.fingerprint] ?: continue
             if (permissionMissing) {
@@ -179,9 +213,8 @@ class PeerMonitor(private val app: ScTermApp) {
                         break
                     } catch (e: Exception) {
                         if (pending.cancelled) return@submit
-                        val failed = Readiness.failure(e)
-                        // Keep an identity mismatch if all other candidates fail.
-                        if (lastFailure?.label != "Identity mismatch") lastFailure = failed
+                        // Authenticated rejections override failed discovery hints.
+                        lastFailure = Readiness.preferFailure(lastFailure, e)
                         value = lastFailure
                         if (e is PeerException) break // authenticated rejection, not an address problem
                     } finally { pending.socket.set(null) }

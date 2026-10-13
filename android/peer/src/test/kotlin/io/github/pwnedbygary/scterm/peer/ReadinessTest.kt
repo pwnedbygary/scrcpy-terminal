@@ -27,6 +27,19 @@ class ReadinessTest {
         val mismatch = SSLHandshakeException("TLS").apply { initCause(CertificateException("wrong identity")) }
         assertEquals("Identity mismatch", Readiness.failure(mismatch).label)
     }
+    @Test fun authenticatedSavedPeerRejectionOverridesMismatchedDiscoveryCandidate() {
+        val mismatch = Readiness.failure(SSLHandshakeException("TLS").apply { initCause(CertificateException("candidate identity")) })
+        assertEquals("Identity mismatch", mismatch.label)
+        val revoked = Readiness.preferFailure(mismatch, PeerException("not_paired", "unknown"))
+        assertEquals("Pairing no longer accepted", revoked.label)
+        val older = Readiness.preferFailure(mismatch, PeerException("bad_request", "expected hello"))
+        assertEquals(Readiness.Tone.YELLOW, older.tone)
+        assertEquals("Status unavailable—update the peer", older.label)
+        val forbidden = Readiness.preferFailure(mismatch, PeerException("forbidden", "denied"))
+        assertEquals("Viewing permission missing", forbidden.label)
+        assertEquals("Identity mismatch", Readiness.preferFailure(mismatch, SocketTimeoutException()).label)
+    }
+
     @Test fun freshnessUsesControlledMonotonicTime() {
         val status = Readiness.classify(ready).copy(checkedAtMs = 100, elapsedAtMs = 1_000)
         assertEquals(Readiness.Tone.GREEN, status.fresh(30_999, 15_000).tone)
@@ -34,6 +47,16 @@ class ReadinessTest {
         assertEquals(Readiness.Tone.GREEN, status.fresh(120_999, 60_000).tone)
         assertEquals(Readiness.Tone.YELLOW, status.fresh(121_000, 60_000).tone)
     }
+    @Test fun failedCheckKeepsLatestSuccessfulContactInMemory() {
+        val ledger = ReadinessLedger()
+        val first = ledger.begin("RP6")
+        ledger.complete("RP6", first, Readiness.classify(ready).copy(checkedAtMs = 1_000))
+        val second = ledger.begin("RP6")
+        ledger.complete("RP6", second, Readiness.failure(SocketTimeoutException()).copy(checkedAtMs = 2_000))
+        assertEquals(1_000L, ledger.snapshot().getValue("RP6").lastContactMs)
+        assertEquals(2_000L, ledger.snapshot().getValue("RP6").checkedAtMs)
+    }
+
     @Test fun periodicPollingPreservesEightSlowPeersWithTwoWorkers() {
         val ledger = ReadinessLedger()
         val ids = (1..8).map { "peer$it" }

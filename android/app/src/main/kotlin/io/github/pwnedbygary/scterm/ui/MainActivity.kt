@@ -92,6 +92,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var helperCommand: TextView
     private lateinit var shizukuButton: Button
     private var helperShellCommand: String? = null
+    private lateinit var pageScroll: ScrollView
     private lateinit var peersList: LinearLayout
 
     private data class PeerRowViews(val root: LinearLayout, val title: TextView, val detail: TextView, val status: TextView, val connect: Button)
@@ -182,6 +183,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra("show_peers", false) == true) {
+            pageScroll.post { pageScroll.smoothScrollTo(0, (peersList.parent as? View)?.top ?: 0) }
+        }
         val data = intent?.data ?: return
         if (data.scheme == "scterm") showPairDialog(data.toString())
     }
@@ -250,6 +254,7 @@ class MainActivity : ComponentActivity() {
         column.addView(card(getString(R.string.section_viewer), *viewerSettings()))
 
         return ScrollView(this).apply {
+            pageScroll = this
             addView(column)
             ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
                 val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
@@ -459,7 +464,7 @@ class MainActivity : ComponentActivity() {
             append("You → ").append(peer.name).append(": ").append(value.label)
             append("\nAddress: ").append((value.address ?: peer.target)?.let { "${it.host}:${it.port}" } ?: "unknown")
             append("\nChecked: ").append(value.checkedAtMs?.let { DateFormat.getDateFormat(this@MainActivity).format(Date(it)) + " " + DateFormat.getTimeFormat(this@MainActivity).format(Date(it)) } ?: "never")
-            append("\nLast successful contact: ").append(peer.lastSeenMs?.let { DateFormat.getDateFormat(this@MainActivity).format(Date(it)) + " " + DateFormat.getTimeFormat(this@MainActivity).format(Date(it)) } ?: "unknown")
+            append("\nLast successful contact: ").append((value.lastContactMs ?: peer.lastSeenMs)?.let { DateFormat.getDateFormat(this@MainActivity).format(Date(it)) + " " + DateFormat.getTimeFormat(this@MainActivity).format(Date(it)) } ?: "unknown")
             append("\nView: ").append(if (Grant.VIEW in granted && result?.caps?.video == true) "available" else "not confirmed")
             append("\nControl: ").append(when { Grant.CONTROL !in granted -> "not granted"; result?.controlOccupied == true -> "another device has control"; result?.caps?.control?.isNotEmpty() == true -> "available"; else -> "not confirmed" })
             append("\nAudio: ").append(if (Grant.AUDIO in granted && result?.caps?.audio == true) "available" else "not available or not confirmed")
@@ -474,7 +479,7 @@ class MainActivity : ComponentActivity() {
         val actions = mutableListOf<View>(text(detail, 14f))
         actions += button("Network settings") { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
         if (local == null) actions += button("Start serving this device") { startServing() }
-        if (local?.kind == BackendKind.HELPER && !local.ready && helperShellCommand != null) actions += button("Start this device's helper with Shizuku") { startHelperWithShizuku() }
+        if (local?.kind == BackendKind.HELPER && !local.ready && helperShellCommand != null && ShizukuActivation.installed(this)) actions += button("Start this device's helper with Shizuku") { startHelperWithShizuku() }
         if (local?.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) actions += button("Enable input on this device") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         AlertDialog.Builder(this).setTitle(peer.name).setView(ScrollView(this).apply { addView(padded(column(*actions.toTypedArray()))) })
             .setPositiveButton("Refresh") { _, _ -> refreshPeerStatus() }
@@ -542,6 +547,7 @@ class MainActivity : ComponentActivity() {
             .setView(padded(input))
             .setPositiveButton(R.string.done) { _, _ ->
                 app.deviceName = input.text.toString()
+                Serving.server?.updateDeviceInfo(app.deviceInfo)
                 renderIdentity()
             }
             .setNegativeButton(R.string.cancel, null)

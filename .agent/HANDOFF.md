@@ -7,6 +7,58 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-13: paired-device readiness, part 3)
+
+- Base `34cfc2b`: part 2 independently reviewed PASS, committed and pushed
+  origin/main. Scope: CLI opt-in checks, viewer retry and owned media cleanup,
+  active outgoing-session readiness, verified metadata/contact polish.
+- `scterm peers --check`: separate presence hints, pinned five-second checks
+  with two workers, deterministic output, verified metadata only, offline
+  listing unchanged. No stream or takeover. Store updates do not recreate a
+  forgotten record or rewrite unchanged metadata.
+- Viewer Retry uses latest saved address and existing viewer settings, waits
+  for old sockets/audio/decoder release, guards all old attempt callbacks and
+  frames, and never requests takeover. Immediate-close TLS regression proves
+  target session/input/lease cleanup before a new connection.
+- Active outgoing viewers supply Connected/Watching status; incoming sessions
+  remain separate. Notification taps scroll to paired devices. Last successful
+  contact remains accurate in memory even after a failed check; persistence
+  stays coalesced. Probes report live renames. Numeric endpoints bypass the
+  bounded DNS worker pool.
+- Verification: `go vet ./...`, `go test ./...`, `go test -race ./peer`,
+  `go test -race . -run TestPeers`, and `go build -trimpath -o
+  /tmp/scterm-paired-status .` passed. Regression fixed a caller-slice race
+  exposed by CLI race tests, and authenticated rejection now wins over a
+  failed spoofed discovery candidate.
+- Pinned Java 17/Gradle 9.7.1 protocol/peer/app tests, lintDebug, assembleDebug,
+  peerctl assemble and assembleRelease passed (25s, /tmp/scterm-final-gradle.log).
+  Local release APK is unsigned because no signing key is configured. An
+  initial duplicate isClosed property compile failure was corrected.
+- Live CLI smoke: /tmp/scterm-paired-status paired with Kotlin peerctl target
+  at loopback, plain peers listed offline, peers --check printed Ready and
+  stored verified metadata. Earlier Go/Kotlin interop passed stream/input too.
+- Physical checks not run: no phone/RP6 in adb devices. MediaCodec/AudioTrack,
+  rendered UI, NSD/Wi-Fi transitions and notifications still need both-device
+  testing. Pairings on user devices were not changed; no APK installed.
+- A full rerun exposed an existing revocation-reason race: the connection
+  handler closed raw TLS while administrative teardown was still sending Bye.
+  Before correction, the unchanged revocation test failed 7/100 current runs
+  and 1/100 baseline `34cfc2b` runs. Deferred socket ownership now preserves
+  Bye/linger cleanup; an exception fallback still closes the socket. A gated
+  production regression fails with baseline TargetServer classes and passes
+  with final classes. After correction, revocation passed 100/100 iterations.
+  Evidence: /tmp/scterm-current-revocation-repeat.log,
+  /tmp/scterm-baseline-revocation-repeat.log, /tmp/scterm-fixed-repeat.log,
+  /tmp/scterm-fixed-gate.log and /tmp/scterm-baseline-gate.log. These are JVM
+  loopback results, not hardware evidence. Assertions remain unchanged.
+- Independent final review /tmp/scterm-review-3 returned NEEDS CHANGES:
+  Android retained a discovery identity mismatch over a later authenticated
+  peer rejection. Production fallback policy now prefers authenticated
+  revocation/forbidden/older-peer replies, with regression coverage. Added a
+  production cleanup-barrier test with delayed audio/decoder and failed-audio
+  paths, following the reviewer's nonblocking suggestion; delta
+  review before commit. Final verdict recorded in commit body before push. No release tag or publication has been requested.
+
 ## Update (2026-10-13: paired-device readiness, part 2)
 
 - Base `5f7c4f9` (part 1 independently reviewed PASS, committed and pushed

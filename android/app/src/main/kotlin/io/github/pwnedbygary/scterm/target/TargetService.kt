@@ -43,7 +43,7 @@ class TargetService : Service() {
     private var lastNotification: String? = null
     private val main = Handler(Looper.getMainLooper())
     private var server: TargetServer? = null
-    private var backend: ServingBackend? = null
+    @Volatile private var backend: ServingBackend? = null
     private var kind = BackendKind.PROJECTION
     private var port = 0
     private var wifiLock: WifiManager.WifiLock? = null
@@ -246,6 +246,9 @@ class TargetService : Service() {
 
     private fun publish() {
         val srv = server ?: return
+        val app = ScTermApp.of(this)
+        srv.updateDeviceInfo(app.deviceInfo)
+        presenceAdvertiser.start(app.deviceName, port)
         val b = backend
         val sessions = srv.sessions()
         updateWifiLock(sessions.isNotEmpty())
@@ -327,7 +330,7 @@ class TargetService : Service() {
             )
         }
         val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), flags)
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java).putExtra("show_peers", true), flags)
         val stop = PendingIntent.getService(this, 1, Intent(this, TargetService::class.java).setAction(ACTION_STOP), flags)
         val kick = PendingIntent.getService(this, 2, Intent(this, TargetService::class.java).setAction(ACTION_KICK), flags)
         return Notification.Builder(this, CHANNEL)

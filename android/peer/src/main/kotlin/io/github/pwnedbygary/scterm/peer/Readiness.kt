@@ -13,6 +13,7 @@ data class Readiness(
     val result: PeerMessage.ProbeResult? = null,
     val address: TargetAddress? = null,
     val detail: String = "",
+    val lastContactMs: Long? = null,
 ) {
     enum class Tone { GREEN, YELLOW, RED }
 
@@ -24,7 +25,7 @@ data class Readiness(
     companion object {
         fun checking(previous: Readiness? = null) = Readiness(
             Tone.YELLOW, "Checking…", previous?.checkedAtMs, previous?.elapsedAtMs,
-            previous?.result, previous?.address,
+            previous?.result, previous?.address, lastContactMs = previous?.lastContactMs,
         )
 
         fun classify(result: PeerMessage.ProbeResult): Readiness {
@@ -37,6 +38,12 @@ data class Readiness(
             }
             val ready = result.ready && Grant.VIEW in Grant.parse(result.grants) && result.caps?.video == true
             return Readiness(if (ready) Tone.GREEN else Tone.YELLOW, label, result = result)
+        }
+
+        /** A pinned peer's rejection is more authoritative than a failed discovery hint. */
+        fun preferFailure(previous: Readiness?, error: Exception): Readiness {
+            val current = failure(error)
+            return if (error is PeerException || previous?.label != "Identity mismatch") current else previous
         }
 
         fun failure(error: Exception): Readiness {
@@ -73,7 +80,7 @@ class ReadinessLedger {
     }
     fun complete(id: String, ticket: Long, value: Readiness): Boolean {
         if (tickets[id] != ticket) return false
-        values[id] = value
+        values[id] = value.copy(lastContactMs = if (value.result != null) value.checkedAtMs else values[id]?.lastContactMs)
         pending -= id
         return true
     }

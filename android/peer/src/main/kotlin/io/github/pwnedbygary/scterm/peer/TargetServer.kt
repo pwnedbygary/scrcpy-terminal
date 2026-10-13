@@ -52,11 +52,13 @@ import kotlin.concurrent.thread
 class TargetServer(
     private val identity: PeerIdentity,
     private val store: PeerStore,
-    private val device: DeviceInfo,
+    @Volatile private var device: DeviceInfo,
     private val backends: BackendProvider,
     private val config: Config = Config(),
     private val events: Events = object : Events {},
 ) {
+    fun updateDeviceInfo(value: DeviceInfo) { device = value }
+
     /** Creates the backend on first use; null means serving is not ready yet. */
     fun interface BackendProvider {
         fun create(): TargetBackend?
@@ -167,6 +169,7 @@ class TargetServer(
     private var serverSocket: ServerSocket? = null
     private var storeListener: AutoCloseable? = null
     private val connections: MutableSet<Socket> = ConcurrentHashMap.newKeySet()
+    private val deferredCloses = ConcurrentHashMap.newKeySet<Socket>()
 
     @Volatile
     private var running = false
@@ -295,7 +298,8 @@ class TargetServer(
                     PeerLog.d("connection from ${raw.inetAddress.hostAddress} ended: ${e.message}")
                 } finally {
                     connections -= raw
-                    raw.closeQuietly()
+                    // Administrative teardown owns the socket until its bye has drained.
+                    if (raw !in deferredCloses) raw.closeQuietly()
                 }
             }
         }
@@ -901,38 +905,47 @@ class TargetServer(
         fun end(reason: String, notifyPeer: Boolean) {
             synchronized(this) {
                 if (ended) return
+                if (notifyPeer) deferredCloses += raw
                 ended = true
             }
-            val freedLease = synchronized(inputLock) {
-                releaseInputLocked()
-                if (leaseHolder === this) {
-                    leaseHolder = null
-                    true
-                } else {
-                    false
+            try {
+                val freedLease = synchronized(inputLock) {
+                    releaseInputLocked()
+                    if (leaseHolder === this) {
+                        leaseHolder = null
+                        true
+                    } else {
+                        false
+                    }
                 }
-            }
-            val others = synchronized(lock) {
-                sessions.remove(id)
-                updateDemandLocked()
-                sessions.values.toList()
-            }
-            subscriptions.forEach { it.close() }
-            mediaSockets.forEach { it.closeQuietly() }
-            if (notifyPeer) {
-                sendEnvelope(PeerMessage.Bye(reason))
-                // Closing with unread bytes (a ping in flight) sends a TCP reset
-                // that can destroy the bye; half-close and linger instead.
-                thread(name = "peer-linger", isDaemon = true) { lingerClose(raw) }
-            } else {
+                val others = synchronized(lock) {
+                    sessions.remove(id)
+                    updateDemandLocked()
+                    sessions.values.toList()
+                }
+                subscriptions.forEach { it.close() }
+                mediaSockets.forEach { it.closeQuietly() }
+                if (notifyPeer) {
+                    sendEnvelope(PeerMessage.Bye(reason))
+                    // Closing with unread bytes (a ping in flight) sends a TCP reset
+                    // that can destroy the bye; half-close and linger instead.
+                    thread(name = "peer-linger", isDaemon = true) {
+                        try { lingerClose(raw) } finally { deferredCloses -= raw }
+                    }
+                } else {
+                    raw.closeQuietly()
+                }
+                if (freedLease) {
+                    others.filter { Grant.CONTROL in it.grants }.forEach { it.sendEnvelope(PeerMessage.Lease(LeaseState.VIEWER)) }
+                    events.onLeaseChanged(null)
+                }
+                events.onSessionEnded(info(), reason)
+                PeerLog.i("session ${id.take(6)} ended: $reason")
+            } catch (e: Exception) {
+                deferredCloses -= raw
                 raw.closeQuietly()
+                throw e
             }
-            if (freedLease) {
-                others.filter { Grant.CONTROL in it.grants }.forEach { it.sendEnvelope(PeerMessage.Lease(LeaseState.VIEWER)) }
-                events.onLeaseChanged(null)
-            }
-            events.onSessionEnded(info(), reason)
-            PeerLog.i("session ${id.take(6)} ended: $reason")
         }
 
         private fun error(code: String, message: String, msg: ControlMessage) {

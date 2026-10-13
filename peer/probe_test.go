@@ -103,3 +103,22 @@ func TestProbeTLSValidationAndCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestUpdateExistingNeverRecreatesForgottenPeer(t *testing.T) {
+	store := OpenStore(t.TempDir())
+	rec := Record{Fingerprint: FingerprintOf([]byte("test")).Hex(), Name: "RP6"}
+	if err := store.Put(rec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Remove(rec.Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := store.UpdateExisting(rec.Fingerprint, func(current Record) Record { called = true; return current }); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.All()
+	if err != nil || called || len(saved) != 0 {
+		t.Fatalf("recreated forgotten peer: %v %v", saved, err)
+	}
+}

@@ -94,26 +94,43 @@ class VideoDecoder(private val listener: Listener) {
 
     /** Called on the network thread for every item after the codec header. */
     fun offer(item: StreamItem) {
-        handler.post { handle(item) }
+        if (releasing.get()) return
+        handler.post { if (!releasing.get()) handle(item) }
     }
 
     /** The surface appeared (non-null) or is being destroyed (null). */
     fun setSurface(value: Surface?) {
+        if (releasing.get()) return
         val done = CountDownLatch(1)
-        handler.post {
-            surface = value
-            if (value == null) releaseCodec() else if (width > 0) configure()
-            done.countDown()
-        }
+        if (!handler.post {
+            try {
+                if (!releasing.get()) {
+                    surface = value
+                    if (value == null) releaseCodec() else if (width > 0) configure()
+                }
+            } finally { done.countDown() }
+        }) return
         // surfaceDestroyed must not return while the codec still renders into it.
         done.await()
     }
 
+    private val releasing = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val released = java.util.concurrent.CountDownLatch(1)
+
     fun release() {
+        if (!releasing.compareAndSet(false, true)) return
         handler.post {
-            releaseCodec()
-            thread.quitSafely()
+            try { surface = null; releaseCodec() } finally {
+                thread.quitSafely()
+                released.countDown()
+            }
         }
+    }
+
+    /** Off-main barrier: Retry cannot start until the previous codec is released. */
+    fun releaseAndWait(timeoutMs: Long = 2_000): Boolean {
+        release()
+        return released.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
     }
 
     private fun handle(item: StreamItem) {

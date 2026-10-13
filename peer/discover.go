@@ -16,9 +16,10 @@ import (
 // NearbyDevice is a device inviting on the local network: the Android app
 // advertises DNS-SD service _scterm._tcp while an invitation is open.
 type NearbyDevice struct {
-	Name string
-	Host string
-	Port int
+	Name            string
+	Host            string
+	Port            int
+	FingerprintHint string
 }
 
 const nearbyService = "_scterm._tcp.local."
@@ -174,6 +175,7 @@ func serviceQuery(service string, unresolved []string) ([]byte, error) {
 
 type nearbyEntry struct {
 	target string
+	hint   string
 	port   int
 	from   net.IP
 }
@@ -237,6 +239,14 @@ func (c *nearbyCollector) add(packet []byte, from net.IP) {
 				e := c.instance(name)
 				e.target, e.port, e.from = strings.ToLower(body.Target.String()), int(body.Port), from.To4()
 			}
+		case *dnsmessage.TXTResource:
+			if isServiceInstance(name, c.service) {
+				for _, txt := range body.TXT {
+					if strings.HasPrefix(txt, "id=") {
+						c.instance(name).hint = strings.TrimPrefix(txt, "id=")
+					}
+				}
+			}
 		case *dnsmessage.AResource:
 			c.addrs[strings.ToLower(name)] = net.IP(body.A[:])
 		}
@@ -281,7 +291,7 @@ func (c *nearbyCollector) devices() []NearbyDevice {
 		if isServiceInstance(name, c.service) {
 			name = name[:len(name)-len(c.service)-1]
 		}
-		out = append(out, NearbyDevice{Name: name, Host: host.String(), Port: e.port})
+		out = append(out, NearbyDevice{Name: name, Host: host.String(), Port: e.port, FingerprintHint: e.hint})
 	}
 	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
 	return out

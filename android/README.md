@@ -114,3 +114,10 @@ without discovery; presence-discovered replacements must pass pinned TLS.
 Authenticated metadata updates immediately; routine successful-contact timestamps
 are saved at most once per five minutes to reduce storage writes. Transient
 connectivity is not restored as fresh after a process restart.
+
+The disconnect screen keeps the paired device and viewer settings and offers
+Retry after the previous session's sockets and media resources have closed.
+Retry uses the latest verified address and never asks to take control from
+another viewer. Old connection, decoder and session callbacks cannot affect the
+new attempt. Live outgoing sessions show Connected or Watching and replace
+extra probes for that direction. Incoming connections remain separate.

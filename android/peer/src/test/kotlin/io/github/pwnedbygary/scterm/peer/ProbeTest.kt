@@ -24,6 +24,8 @@ class ProbeTest {
             assertFalse(probe().ready)
             assertEquals("Helper needed", probe().reason)
             ready = true
+            server.updateDeviceInfo(DeviceInfo("Renamed RP6"))
+            assertEquals("Renamed RP6", probe().device.name)
             assertTrue(probe().ready)
             assertEquals(0, creates.get())
             assertTrue(server.sessions().isEmpty())

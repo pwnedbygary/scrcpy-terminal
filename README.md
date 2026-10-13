@@ -495,7 +495,8 @@ connection (decoding, rendering, input, audio) is the same code as above.
 # on the phone: "Start serving", then "Invite a device…"
 ./scterm pair                   # finds it on this network; compare the six-digit code
 ./scterm pair "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093"   # or type the invitation
-./scterm peers                  # paired devices and what each allows
+./scterm peers                  # paired devices and what each allows (offline)
+./scterm peers --check          # authenticated readiness checks; no stream started
 ./scterm --peer pixel           # the start of its name, or of a word in it, is enough
 ./scterm --peer=                # the only paired device; asks which when there are several
 ./scterm --peer pixel --window --takeover
@@ -531,3 +532,17 @@ connection (decoding, rendering, input, audio) is the same code as above.
 - Touch positions carry the *current video frame size* as screen_size; events
   with mismatched sizes are dropped by the server.
 - Control message layouts mirror `sc_control_msg_serialize()` exactly.
+
+### Check paired-device readiness
+
+`scterm peers --check` authenticates each paired target without starting capture,
+opening a viewing session, or taking control. It prints Ready, an actionable
+limitation, or a failed-check reason beside each device. Ready means viewing is
+available; another controller may still hold control. Plain `scterm peers`
+remains an offline list.
+
+Checks use two workers and a five-second budget per peer. Serving-presence
+DNS-SD helps recover changed LAN addresses, but every candidate must match the
+paired identity before metadata is saved. The stored address is tried even if
+multicast discovery fails. Older targets may report status unavailable while
+normal viewing still works. Updates and forgetting pairings behave as before.

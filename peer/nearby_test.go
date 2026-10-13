@@ -327,3 +327,25 @@ func TestNearbyLive(t *testing.T) {
 	}
 	t.Logf("paired with %q (%s), grants %v", r.Pair.Device.Name, r.Pair.Fingerprint.Short(), r.Pair.Grants)
 }
+
+func TestPresenceDiscoveryIsSeparateAndIdentityHintIsOnlyMetadata(t *testing.T) {
+	presence := "_scterm-presence._tcp.local."
+	instance := dnsmessage.MustNewName("RP6." + presence)
+	packet := mdnsAnswer(t, func(b *dnsmessage.Builder) {
+		b.StartAnswers()
+		b.SRVResource(dnsmessage.ResourceHeader{Name: instance, Class: dnsmessage.ClassINET, TTL: 120}, dnsmessage.SRVResource{Port: 27300, Target: dnsmessage.MustNewName("phone.local.")})
+		b.TXTResource(dnsmessage.ResourceHeader{Name: instance, Class: dnsmessage.ClassINET, TTL: 120}, dnsmessage.TXTResource{TXT: []string{"id=untrusted-hint"}})
+	})
+	inviting := newNearbyCollector()
+	inviting.add(packet, net.IPv4(10, 0, 0, 1))
+	if len(inviting.devices()) != 0 {
+		t.Fatal("presence leaked into invitation discovery")
+	}
+	serving := newNearbyCollector()
+	serving.service = presence
+	serving.add(packet, net.IPv4(10, 0, 0, 1))
+	devices := serving.devices()
+	if len(devices) != 1 || devices[0].Name != "RP6" || devices[0].FingerprintHint != "untrusted-hint" {
+		t.Fatal(devices)
+	}
+}

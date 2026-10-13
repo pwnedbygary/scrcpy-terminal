@@ -7,6 +7,7 @@ package main
 // would, minus the 64-byte device name, which the handshake carries instead.
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -56,7 +57,7 @@ func runPeerCommand(args []string) bool {
 	case "pair":
 		err = pairCommand(args[1:])
 	case "peers":
-		err = peersCommand()
+		err = peersCommand(args[1:]...)
 	case "forget":
 		err = forgetCommand(args[1:])
 	default:
@@ -101,7 +102,14 @@ func reportPaired(client *peer.Client, name string, fp peer.Fingerprint, grants 
 	fmt.Printf("This computer is %s. Connect with: scterm --peer %q\n", client.Identity.Fingerprint.Short(), name)
 }
 
-func peersCommand() error {
+func peersCommand(args ...string) error {
+	check := false
+	if len(args) != 0 {
+		if len(args) != 1 || args[0] != "--check" {
+			return fmt.Errorf("usage: scterm peers [--check]")
+		}
+		check = true
+	}
 	client, store, err := openPeerClient()
 	if err != nil {
 		return err
@@ -110,19 +118,7 @@ func peersCommand() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("This computer: %s\n", client.Identity.Fingerprint.Short())
-	if len(recs) == 0 {
-		fmt.Println(`No paired devices. On the device choose "Invite a device…", then run: scterm pair "HOST:PORT CODE"`)
-		return nil
-	}
-	for _, r := range recs {
-		fp, err := r.ID()
-		if err != nil {
-			continue
-		}
-		fmt.Printf("  %-24s %s  %-21s may %s\n", r.Name, fp.Short(), net.JoinHostPort(r.Host, strconv.Itoa(r.Port)), describeGrants(r.Grants))
-	}
-	return nil
+	return printPeers(context.Background(), os.Stdout, client, store, recs, check, peer.DiscoverPresence, client.Probe)
 }
 
 func forgetCommand(args []string) error {

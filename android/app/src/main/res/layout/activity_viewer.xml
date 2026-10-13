@@ -67,6 +67,14 @@
                 android:textColor="#FFFFFFFF" />
 
             <Button
+                android:id="@+id/overlay_retry"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/viewer_retry"
+                android:visibility="gone" />
+
+            <Button
                 android:id="@+id/overlay_close"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

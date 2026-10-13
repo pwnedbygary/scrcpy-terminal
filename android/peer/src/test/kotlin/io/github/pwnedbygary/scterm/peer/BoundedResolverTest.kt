@@ -8,6 +8,12 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
 class BoundedResolverTest {
+    @Test fun numericAddressesBypassDnsWorkers() {
+        val resolver = BoundedResolver { error("numeric endpoint must not use lookup worker") }
+        assertEquals("127.0.0.1", resolver.resolve("127.0.0.1", 100).hostAddress)
+        assertTrue(resolver.resolve("::1", 100).isLoopbackAddress)
+    }
+
     @Test fun blockedLookupIsBoundedEvenIfDnsIgnoresInterrupts() {
         val release = CountDownLatch(1)
         val resolver = BoundedResolver {
