@@ -89,3 +89,28 @@ keep the bar or the statistics up, and set the delay.
 Both devices need Android 17's local network permission (asked on first use)
 and the same network. Forget a device or reduce what it may do at any time;
 its live session ends immediately.
+
+## Paired-device readiness
+
+Each paired device has a colored badge and a text reason. Green means this
+installation has authenticated the peer and can view its screen; control may
+still belong to someone else. Yellow means checking/stale or a reachable
+limitation (helper, permissions, older app). Red means the check failed; "Not
+reachable" does not establish whether the device is powered off.
+
+Tap a badge for address, last checked/contact, viewing/control/audio readiness,
+and local serving/permission actions. Reverse readiness is checked on the other
+device: an incoming session does not prove this device can view that peer.
+Refresh status also offers local-network permission when needed.
+
+Checks run every 15 seconds on the main screen, or every 60 seconds while
+serving in the background, with two concurrent checks and a five-second budget
+per peer. Results expire after two polling intervals. No checks run when the
+main screen is closed and serving is stopped. The existing serving notification
+summarizes readiness and names active incoming sessions, silently. Notifications
+must be allowed in Android settings to see it. Saved direct addresses work
+without discovery; presence-discovered replacements must pass pinned TLS.
+
+Authenticated metadata updates immediately; routine successful-contact timestamps
+are saved at most once per five minutes to reduce storage writes. Transient
+connectivity is not restored as fresh after a process restart.

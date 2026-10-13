@@ -153,18 +153,26 @@ object Nearby {
      * Looks up where [service] is now; [done] gets host and port, or null if
      * it cannot be found, on the main thread.
      */
+    data class Endpoint(val host: String, val port: Int, val identityHint: String?)
+
     fun resolve(context: Context, service: Service, done: (Pair<String, Int>?) -> Unit) {
+        resolvePresence(context, service) { done(it?.let { e -> e.host to e.port }) }
+    }
+
+    /** TXT hints only become usable after resolution; callers must still pin TLS. */
+    fun resolvePresence(context: Context, service: Service, done: (Endpoint?) -> Unit) {
         val nsd = context.applicationContext.getSystemService(NsdManager::class.java)
         val main = Handler(Looper.getMainLooper())
         val finished = AtomicBoolean(false)
-        fun finish(address: Pair<String, Int>?) {
-            if (finished.compareAndSet(false, true)) main.post { done(address) }
+        fun finish(address: Pair<String, Int>?, info: NsdServiceInfo? = null) {
+            val endpoint = address?.let { Endpoint(it.first, it.second, info?.attributes?.get("id")?.toString(Charsets.UTF_8)) }
+            if (finished.compareAndSet(false, true)) main.post { done(endpoint) }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val callback = object : NsdManager.ServiceInfoCallback {
                 override fun onServiceUpdated(info: NsdServiceInfo) {
                     val host = info.hostAddresses.sortedBy { if (it is Inet4Address) 0 else 1 }.firstOrNull()?.hostAddress ?: return
-                    finish(host to info.port)
+                    finish(host to info.port, info)
                     main.post { unregister(nsd, this) }
                 }
 
@@ -184,7 +192,7 @@ object Nearby {
             nsd.resolveService(service.info, object : NsdManager.ResolveListener {
                 override fun onServiceResolved(info: NsdServiceInfo) {
                     @Suppress("DEPRECATION")
-                    finish(info.host?.hostAddress?.let { it to info.port })
+                    finish(info.host?.hostAddress?.let { it to info.port }, info)
                 }
 
                 override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) = finish(null)

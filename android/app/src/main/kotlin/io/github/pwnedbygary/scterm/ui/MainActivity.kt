@@ -7,6 +7,7 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Typeface
+import android.graphics.Color
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -47,6 +48,7 @@ import io.github.pwnedbygary.scterm.peer.ControllerClient
 import io.github.pwnedbygary.scterm.peer.NearbyPairing
 import io.github.pwnedbygary.scterm.peer.PeerException
 import io.github.pwnedbygary.scterm.peer.PeerRecord
+import io.github.pwnedbygary.scterm.peer.Readiness
 import io.github.pwnedbygary.scterm.peer.TargetAddress
 import io.github.pwnedbygary.scterm.peer.TargetServer
 import io.github.pwnedbygary.scterm.protocol.Grant
@@ -92,6 +94,9 @@ class MainActivity : ComponentActivity() {
     private var helperShellCommand: String? = null
     private lateinit var peersList: LinearLayout
 
+    private data class PeerRowViews(val root: LinearLayout, val title: TextView, val detail: TextView, val status: TextView, val connect: Button)
+    private val peerRows = mutableMapOf<String, PeerRowViews>()
+
     private var pendingAfterPermissions: (() -> Unit)? = null
     private var storeListener: AutoCloseable? = null
 
@@ -132,7 +137,8 @@ class MainActivity : ComponentActivity() {
         setContentView(buildUi())
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                launch { Serving.state.collect(::renderServing) }
+                launch { Serving.state.collect { renderServing(it); renderPeerStatuses() } }
+                launch { app.peerMonitor.statuses.collect { renderPeerStatuses() } }
                 launch { Serving.invitationExpiresAtMs.collect(::renderInvitation) }
                 launch { Serving.pairingRequest.collect(::renderPairingRequest) }
             }
@@ -156,6 +162,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         Serving.uiVisible = true
+        app.peerMonitor.setVisible(true)
         storeListener = app.peers.addListener { runOnUiThread { renderPeers() } }
         renderIdentity()
         renderPeers()
@@ -168,6 +175,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         Serving.uiVisible = false
+        app.peerMonitor.setVisible(false)
         storeListener?.close()
         storeListener = null
         super.onStop()
@@ -238,7 +246,7 @@ class MainActivity : ComponentActivity() {
         ))
 
         peersList = column()
-        column.addView(card(getString(R.string.section_peers), peersList, button(getString(R.string.pair_with)) { showPairDialog(null) }))
+        column.addView(card(getString(R.string.section_peers), peersList, row(button(getString(R.string.pair_with)) { showPairDialog(null) }, button("Refresh status") { refreshPeerStatus() })))
         column.addView(card(getString(R.string.section_viewer), *viewerSettings()))
 
         return ScrollView(this).apply {
@@ -384,39 +392,94 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
+    private fun refreshPeerStatus() = withNetworkPermissions(serving = false) { app.peerMonitor.refresh() }
+
     private fun renderPeers() {
-        peersList.removeAllViews()
         val peers = app.peers.all().sortedBy { it.name.lowercase() }
-        if (peers.isEmpty()) peersList.addView(text("No paired devices yet.", 14f, color = R.color.muted))
-        for (peer in peers) peersList.addView(peerRow(peer))
+        val ids = peers.map { it.fingerprint }.toSet()
+        peerRows.keys.filter { it !in ids }.forEach { id -> peersList.removeView(peerRows.remove(id)?.root) }
+        // The empty label is the only child not owned by a peer row.
+        if (peers.isEmpty()) {
+            if (peersList.childCount == 0) peersList.addView(text("No paired devices yet.", 14f, color = R.color.muted))
+            return
+        }
+        if (peerRows.isEmpty()) peersList.removeAllViews()
+        for ((index, peer) in peers.withIndex()) {
+            val views = peerRows.getOrPut(peer.fingerprint) {
+                val title = text("", 16f, Typeface.BOLD)
+                val detail = text("", 13f, color = R.color.muted)
+                val status = text("", 14f).apply {
+                    minHeight = dp(48)
+                    gravity = Gravity.CENTER_VERTICAL
+                    setOnClickListener { app.peers.find(peer.id)?.let(::showPeerStatus) }
+                    isFocusable = true
+                }
+                val connect = button(getString(R.string.connect)) { app.peers.find(peer.id)?.let(::connect) }
+                PeerRowViews(column(title, status, detail, row(connect, button("Manage…") { app.peers.find(peer.id)?.let(::showManageDialog) })).apply {
+                    setPadding(0, dp(8), 0, dp(8))
+                }, title, detail, status, connect)
+            }
+            views.title.text = peer.name
+            views.detail.text = buildString {
+                append("Identity ").append(peer.id.short)
+                peer.target?.let { append("\nAddress ").append(it.host).append(':').append(it.port) }
+                val granted = Grant.parse(peer.grantedByPeer)
+                append("\n").append(if (granted.isEmpty()) "It gives you no access." else "You can ${describeAccess(granted, theirs = true)}.")
+                append("\n").append(if (peer.inboundGrants.isEmpty()) "It can't connect to your device." else "It can ${describeAccess(peer.inboundGrants, theirs = false)}.")
+            }
+            views.connect.visibility = if (peer.target != null) View.VISIBLE else View.GONE
+            if (peersList.getChildAt(index) !== views.root) {
+                (views.root.parent as? ViewGroup)?.removeView(views.root)
+                peersList.addView(views.root, index)
+            }
+        }
+        renderPeerStatuses()
     }
 
-    private fun peerRow(peer: PeerRecord): View {
-        val lines = mutableListOf<View>(
-            text(peer.name, 16f, Typeface.BOLD),
-            text("Identity ${peer.id.short}", 12f, color = R.color.muted),
-        )
-        // Name who acts on whom in every line: under a peer's name, a bare "this device" reads both ways.
-        peer.target?.let { t ->
-            val granted = Grant.parse(peer.grantedByPeer)
-            lines += text("Address ${t.host}:${t.port}", 13f, color = R.color.muted)
-            lines += text(
-                if (granted.isEmpty()) "It gives you no access." else "You can ${describeAccess(granted, theirs = true)}.",
-                13f,
-                color = R.color.muted,
-            )
+    private fun renderPeerStatuses() {
+        for ((id, views) in peerRows) {
+            val value = app.peerMonitor.statuses.value[id] ?: Readiness(Readiness.Tone.YELLOW, "Not checked")
+            val checked = value.checkedAtMs?.let { DateFormat.getTimeFormat(this).format(Date(it)) } ?: "never"
+            views.status.text = "● ${value.label}\nChecked: $checked"
+            views.status.contentDescription = "${views.title.text}: ${value.label}. Last checked $checked. Open connection details."
+            views.status.setTextColor(when (value.tone) {
+                Readiness.Tone.GREEN -> Color.rgb(89, 199, 107)
+                Readiness.Tone.YELLOW -> Color.rgb(255, 204, 80)
+                Readiness.Tone.RED -> Color.rgb(255, 112, 112)
+            })
         }
-        val inbound = peer.inboundGrants
-        lines += text(
-            if (inbound.isEmpty()) "It can't connect to your device." else "It can ${describeAccess(inbound, theirs = false)}.",
-            13f,
-            color = R.color.muted,
-        )
-        val buttons = mutableListOf<View>()
-        if (peer.target != null) buttons += button(getString(R.string.connect)) { connect(peer) }
-        buttons += button("Manage…") { showManageDialog(peer) }
-        lines += row(*buttons.toTypedArray())
-        return column(*lines.toTypedArray()).apply { setPadding(0, dp(8), 0, dp(8)) }
+    }
+
+    private fun showPeerStatus(peer: PeerRecord) {
+        val value = app.peerMonitor.statuses.value[peer.fingerprint] ?: Readiness(Readiness.Tone.YELLOW, "Not checked")
+        val result = value.result
+        val granted = result?.grants?.let(Grant::parse) ?: Grant.parse(peer.grantedByPeer)
+        val local = Serving.state.value as? ServeState.Serving
+        val detail = buildString {
+            append("You → ").append(peer.name).append(": ").append(value.label)
+            append("\nAddress: ").append((value.address ?: peer.target)?.let { "${it.host}:${it.port}" } ?: "unknown")
+            append("\nChecked: ").append(value.checkedAtMs?.let { DateFormat.getDateFormat(this@MainActivity).format(Date(it)) + " " + DateFormat.getTimeFormat(this@MainActivity).format(Date(it)) } ?: "never")
+            append("\nLast successful contact: ").append(peer.lastSeenMs?.let { DateFormat.getDateFormat(this@MainActivity).format(Date(it)) + " " + DateFormat.getTimeFormat(this@MainActivity).format(Date(it)) } ?: "unknown")
+            append("\nView: ").append(if (Grant.VIEW in granted && result?.caps?.video == true) "available" else "not confirmed")
+            append("\nControl: ").append(when { Grant.CONTROL !in granted -> "not granted"; result?.controlOccupied == true -> "another device has control"; result?.caps?.control?.isNotEmpty() == true -> "available"; else -> "not confirmed" })
+            append("\nAudio: ").append(if (Grant.AUDIO in granted && result?.caps?.audio == true) "available" else "not available or not confirmed")
+            if (value.detail.isNotBlank()) append("\n\n").append(value.detail)
+            if (result?.ready == false) append("\nStart serving or the helper on ").append(peer.name).append(" as indicated above, then refresh.")
+            append("\n\n").append(peer.name).append(" → you: ")
+            append(if (peer.inboundGrants.isEmpty()) "no access granted here" else if (local?.ready == true) "this device is serving; peer may ${describeAccess(peer.inboundGrants, theirs = false)}" else "start serving on this device")
+            val incoming = local?.sessions?.filter { it.peer.hex == peer.fingerprint }.orEmpty()
+            if (incoming.isNotEmpty()) append("\nConnected here: ").append(incoming.joinToString { if (it.holdsLease) "controlling" else "viewing" })
+            append("\nReverse network readiness is checked by the other device.")
+        }
+        val actions = mutableListOf<View>(text(detail, 14f))
+        actions += button("Network settings") { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
+        if (local == null) actions += button("Start serving this device") { startServing() }
+        if (local?.kind == BackendKind.HELPER && !local.ready && helperShellCommand != null) actions += button("Start this device's helper with Shizuku") { startHelperWithShizuku() }
+        if (local?.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) actions += button("Enable input on this device") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        AlertDialog.Builder(this).setTitle(peer.name).setView(ScrollView(this).apply { addView(padded(column(*actions.toTypedArray()))) })
+            .setPositiveButton("Refresh") { _, _ -> refreshPeerStatus() }
+            .setNeutralButton("Manage…") { _, _ -> showManageDialog(peer) }
+            .setNegativeButton(R.string.done, null).show()
     }
 
     // --------------------------------------------------------------- actions

@@ -28,6 +28,9 @@ import io.github.pwnedbygary.scterm.protocol.ShortCode
 import io.github.pwnedbygary.scterm.ui.MainActivity
 import io.github.pwnedbygary.scterm.util.Nearby
 import io.github.pwnedbygary.scterm.util.Net
+import io.github.pwnedbygary.scterm.peer.Readiness
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collect
 
 /**
  * Owns the serving side while the user has it switched on: the peer server,
@@ -36,6 +39,8 @@ import io.github.pwnedbygary.scterm.util.Net
  * Everything a remote peer can do is bounded by what this service runs.
  */
 class TargetService : Service() {
+    private val statusScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var lastNotification: String? = null
     private val main = Handler(Looper.getMainLooper())
     private var server: TargetServer? = null
     private var backend: ServingBackend? = null
@@ -45,6 +50,11 @@ class TargetService : Service() {
     private val advertiser by lazy { Nearby.Advertiser(this) }
     private val presenceAdvertiser by lazy { Nearby.Advertiser(this, presence = true) }
     private val expireInvitation = Runnable { server?.cancelInvitation() }
+
+    override fun onCreate() {
+        super.onCreate()
+        statusScope.launch { ScTermApp.of(this@TargetService).peerMonitor.statuses.collect { publish() } }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -66,6 +76,7 @@ class TargetService : Service() {
 
     override fun onDestroy() {
         stopServing()
+        statusScope.cancel()
         Serving.publish(ServeState.Stopped)
         super.onDestroy()
     }
@@ -109,6 +120,7 @@ class TargetService : Service() {
             server = srv
             Serving.server = srv
             presenceAdvertiser.start(app.deviceName, port)
+            app.peerMonitor.setServing(true)
             if (kind == BackendKind.PROJECTION) RemoteInputService.servingActive = true
             publish()
         } catch (e: Exception) {
@@ -253,7 +265,18 @@ class TargetService : Service() {
             sessions.isEmpty() -> "Waiting on ${Net.localAddresses().firstOrNull() ?: "this device"}:$port"
             else -> sessions.joinToString { it.peerName + if (it.holdsLease) " (control)" else "" }
         }
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text))
+        val statuses = ScTermApp.of(this).peerMonitor.statuses.value
+        val peers = ScTermApp.of(this).peers.all()
+        val ready = peers.count { statuses[it.fingerprint]?.tone == Readiness.Tone.GREEN }
+        val unavailable = peers.count { statuses[it.fingerprint]?.tone == Readiness.Tone.RED }
+        val checking = peers.size - ready - unavailable
+        val summary = "$text\nPaired devices: $ready ready · $checking checking/limited · $unavailable failed"
+        val details = peers.joinToString("\n") { "${it.name}: ${statuses[it.fingerprint]?.label ?: "Not checked"}" }
+        val fullText = summary + if (details.isEmpty()) "" else "\n$details"
+        if (lastNotification != fullText) {
+            lastNotification = fullText
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(fullText))
+        }
     }
 
     private fun updateWifiLock(active: Boolean) {
@@ -271,6 +294,8 @@ class TargetService : Service() {
         server = null
         backend = null
         Serving.server = null
+        ScTermApp.of(this).peerMonitor.setServing(false)
+        lastNotification = null
         updateWifiLock(false)
         main.removeCallbacks(expireInvitation)
         advertiser.stop()
@@ -288,6 +313,7 @@ class TargetService : Service() {
 
     private fun shutdown(error: String?) {
         stopServing()
+        statusScope.cancel()
         Serving.publish(if (error != null) ServeState.Failed(error) else ServeState.Stopped)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -308,6 +334,8 @@ class TargetService : Service() {
             .setSmallIcon(R.drawable.ic_stat_serving)
             .setContentTitle(getString(R.string.notification_serving))
             .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setContentIntent(open)
             .setCategory(Notification.CATEGORY_SERVICE)

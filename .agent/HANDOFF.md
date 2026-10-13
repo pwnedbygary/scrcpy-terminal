@@ -7,6 +7,30 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-13: paired-device readiness, part 2)
+
+- Base `5f7c4f9` (part 1 independently reviewed PASS, committed and pushed
+  to origin/main). Scope: Android monitor, directional readiness badges and
+  details, resolved presence TXT hints, existing serving notification.
+- Monitor runs on main-screen/serving lifecycle only, uses two workers,
+  15/60-second cadence, closes in-flight sockets on cancellation, rejects late
+  tickets, and checks pinned candidate/saved addresses within a five-second
+  peer budget. Metadata writes are coalesced, and forgotten records never
+  recreated. Presence hints are read after resolution, not from discovery.
+- Peer rows update in place; diagnostics distinguish the two viewing directions.
+  Notification updates only when summary text changes and never alerts again.
+- Verification: pinned Gradle protocol/peer/app tests, lintDebug, assembleDebug
+  passed (17s, /tmp/scterm-status-gradle.log). Readiness tests cover classification,
+  controlled-clock freshness, and generation invalidation/forget/reordering.
+  Fixed initial Android callback return-type compile error before rerun.
+- Device checks not run: adb devices empty; host adb lacks mDNS command support.
+  Real Android NSD/network lifecycle and rendered UI remain unverified on device.
+- Independent review of /tmp/scterm-review-2 found periodic cancellation could
+  starve later devices. Periodic polls now preserve pending tickets/queue;
+  manual/network/lifecycle refresh still cancels. Added an eight-slow-peer,
+  two-worker controlled scheduling regression. Delta review before commit.
+- Next: CLI --check, viewer resource-safe one-tap retry, active-session status.
+
 ## Update (2026-10-13: paired-device readiness, part 1)
 
 - Base: main `4669ee9`, fast-forwarded from `072f084`; worktree was clean.
@@ -22,7 +46,7 @@ here is a snapshot, not proof that no other work has started.
   passed with Java 17 and pinned Gradle 9.7.1. An initial test compile warning
   (unnecessary non-null assertion under -Werror) was corrected before rerun.
 - Physical checks: not run; `adb devices` lists none. Live Go/Kotlin interop
-  is next, before UI monitoring. No release or APK installation performed.
+  subsequently passed before UI monitoring. No release or APK installation performed.
 - Live `TestInteropWithKotlinTarget` passed against peerctl (paired/probed,
   h264 stream and injected touch); a host JVM target, not physical evidence.
 - Independent review of /tmp/scterm-review-1 returned NEEDS CHANGES: synchronous

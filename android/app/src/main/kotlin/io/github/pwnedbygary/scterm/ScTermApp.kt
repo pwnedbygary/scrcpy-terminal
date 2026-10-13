@@ -23,6 +23,8 @@ class ScTermApp : Application() {
 
     val peers: FilePeerStore by lazy { FilePeerStore.open(File(filesDir, "peers.json")) }
 
+    val peerMonitor by lazy { io.github.pwnedbygary.scterm.status.PeerMonitor(this) }
+
     private val prefs: SharedPreferences by lazy { getSharedPreferences("scterm", MODE_PRIVATE) }
 
     var deviceName: String
