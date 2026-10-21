@@ -143,13 +143,16 @@ with the reason and a *Reconnect* button.
 
 > **Warning:** by default only this computer can open the page. With `--web-addr 0.0.0.0`, or
 > any address that is not a loopback address, anyone who can reach the port can see the screen
-> and control the device. There is no password and no encryption. The only check compares a
-> WebSocket connection's Origin header with the address the page was opened on. That stops an
-> ordinary page of another website, but not a site that uses DNS rebinding (pointing its own
-> name at this computer): unless the browser blocks that, such a page could see and control the
-> device while scterm runs, even at the default address. Use other addresses only on a network
-> you trust, or keep the default address and use an SSH tunnel:
-> `ssh -L 6969:127.0.0.1:6969 HOST`.
+> and control the device. There is no password and no encryption. In the page's address, scterm
+> accepts only an IP address, `localhost` or a name that ends in `.localhost`, the name given to
+> `--web-addr`, or a name in `SCTERM_WEB_HOSTS`. With an address that is not a loopback address,
+> it also accepts this computer's name, with or without `.local`. Any other name gets an error
+> that says what to do. This stops a website that points its own name at this computer (DNS
+> rebinding) from seeing and controlling the device. The WebSocket connection also refuses a page
+> opened on another address. These checks do not stop anyone who can reach the port and uses
+> this computer's address, or, with an address that is not a loopback address, someone on your
+> network who can answer for this computer's name. Use such addresses only on a network you
+> trust, or keep the default address and use an SSH tunnel: `ssh -L 6969:127.0.0.1:6969 HOST`.
 
 ### Window
 
@@ -569,6 +572,7 @@ variables also help: `SCT_DEBUG_WEB=1` logs each browser's paint and decode stat
 | `SCTERM_HOME` | Where scterm keeps its identity and pairings |
 | `SCTERM_CHROME` | The Chromium-family browser for `--window` (`CHROME_BIN`, `CHROMIUM_BIN` too) |
 | `SCTERM_FIREFOX_KIOSK=1` | When `--window` uses Firefox, open it full screen without toolbars |
+| `SCTERM_WEB_HOSTS` | More names to open the page by, comma-separated (see [Browser](#browser)) |
 | `SCT_AUDIO_DEVICE` | The PulseAudio sink to play on, instead of following the desktop's choice |
 | `SCT_DEBUG_WEB=1` | Log each browser's paint and decode statistics |
 | `SCT_DEBUG_CONTROL=1` | Log input as it is read and sent to the device |

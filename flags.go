@@ -172,6 +172,7 @@ var helpSections = []struct {
 		{"SCTERM_HOME", "where scterm keeps its identity and pairings (default: scterm in $XDG_CONFIG_HOME or ~/.config)"},
 		{"SCTERM_CHROME", "the Chromium-family browser for --window (or CHROME_BIN, CHROMIUM_BIN)"},
 		{"SCTERM_FIREFOX_KIOSK=1", "when --window falls back to Firefox, open it full screen without its toolbars"},
+		{"SCTERM_WEB_HOSTS", "more names to open the --web or --window page by, separated by commas; IP addresses and localhost always work"},
 		{"SCT_AUDIO_DEVICE", "the PulseAudio sink to play the sound on, rather than following the desktop's choice"},
 	}},
 	{heading: "Exit status", lines: [][2]string{

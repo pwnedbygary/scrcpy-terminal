@@ -29,6 +29,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -310,6 +311,13 @@ type webServer struct {
 
 	dropLog atomic.Int64 // last unix-nano of a rate-limited error log
 
+	// refused holds the names of the refused requests reported so far, and
+	// refusedMore whether a line has said that further ones go unreported
+	// (see reportRefused). Guarded by refusedMu.
+	refusedMu   sync.Mutex
+	refused     map[string]bool
+	refusedMore bool
+
 	// The DEVICE's own media volume, read back from the device (see
 	// pollVolume). The browser HUD shows this instead of the host-sink gain:
 	// that gain is applied in writePCM16, which feeds the PulseAudio sink, while
@@ -511,9 +519,10 @@ func (s *webServer) run(openWindow bool) error {
 		return fmt.Errorf("web: listen on %s:%d: %w", host, s.port, err)
 	}
 	s.ln = ln
-	// Record the real port (0 = pick any free port).
+	// Record the real port (0 = pick any free port) and address.
+	var ip net.IP
 	if ta, ok := ln.Addr().(*net.TCPAddr); ok {
-		s.port = ta.Port
+		s.port, ip = ta.Port, ta.IP
 	}
 
 	mux := http.NewServeMux()
@@ -524,8 +533,15 @@ func (s *webServer) run(openWindow bool) error {
 	mux.HandleFunc("/pcm-worklet.js", s.handleWorklet)
 	mux.HandleFunc("/ws", s.handleWS)
 
+	hostname, _ := os.Hostname()
+	names, unreadable := webHostNames(ip, hostname, host, os.Getenv(webHostsEnv))
+	for _, e := range unreadable {
+		noticef("scterm: web: ignored %q in %s: it is not a name, or a name and a port (such as mirror.lan or mirror.lan:8443)\n",
+			e, webHostsEnv)
+	}
+
 	s.http = &http.Server{
-		Handler:           mux,
+		Handler:           s.hostCheck(mux, names),
 		ReadHeaderTimeout: 5 * time.Second,
 		// No WriteTimeout: /ws hijacks the connection and owns it afterwards.
 	}
@@ -818,6 +834,151 @@ func (s *webServer) handleWorklet(w http.ResponseWriter, r *http.Request) {
 	webNoCache(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	_, _ = w.Write([]byte(webPCMWorkletJS))
+}
+
+// webHostsEnv names the environment variable that lists more names the page
+// is served by (a reverse proxy's, or another name this computer has on the
+// network), separated by commas.
+const webHostsEnv = "SCTERM_WEB_HOSTS"
+
+// webRefusedMax is how many refused names are reported, each once: a page can
+// make requests addressed to any number of names.
+const webRefusedMax = 16
+
+// webHostNames are the names, besides IP addresses and localhost, that a
+// request to the server may be addressed to when it listens on ip: addr, the
+// address it was asked to listen on, in case it is a name, since scterm prints
+// that address and --window opens it; the names in hosts, the value of
+// SCTERM_WEB_HOSTS; and, when ip is known and not a loopback address, this
+// computer's hostname, with and without .local, and for a hostname with dots
+// its first label with .local (its multicast DNS name). On a loopback address
+// no other computer reaches the server, and this one reaches it by an address
+// or localhost, so the hostname would only serve someone on the network who
+// answers for it with 127.0.0.1. 0.0.0.0 and :: are not loopback addresses:
+// they put the server on the network. It also returns the entries of hosts
+// that are not a name, or a name and a port, which no request can match.
+func webHostNames(ip net.IP, hostname, addr, hosts string) (names map[string]bool, unreadable []string) {
+	names = map[string]bool{}
+	add := func(s string) bool {
+		name, ok := webHostName(s)
+		if ok {
+			names[name] = true
+		}
+		return ok
+	}
+	if h, ok := webHostName(hostname); ok && ip != nil && !ip.IsLoopback() {
+		h = strings.TrimSuffix(h, ".local")
+		add(h)
+		add(h + ".local")
+		if first, _, dotted := strings.Cut(h, "."); dotted {
+			add(first + ".local")
+		}
+	}
+	add(addr)
+	for _, s := range strings.Split(hosts, ",") {
+		if s = strings.TrimSpace(s); s != "" && !add(s) {
+			unreadable = append(unreadable, s)
+		}
+	}
+	return names, unreadable
+}
+
+// webHostName reads a Host header: a name (ASCII letters, digits, '-', '.' and
+// '_') or an IPv4 address, or an IPv6 address in brackets, then maybe a colon
+// and a port. It returns the name or the address, in lower case and without a
+// final dot, and false for anything else, an empty header included.
+func webHostName(hostport string) (string, bool) {
+	host, port, ipv6 := hostport, "", false
+	if inner, ok := strings.CutPrefix(hostport, "["); ok {
+		addr, rest, closed := strings.Cut(inner, "]")
+		if ip, err := netip.ParseAddr(addr); !closed || err != nil || !ip.Is6() {
+			return "", false
+		}
+		host, port, ipv6 = addr, rest, true
+	} else if i := strings.IndexByte(hostport, ':'); i >= 0 {
+		host, port = hostport[:i], hostport[i:]
+	}
+	if port != "" && (port[0] != ':' || strings.Trim(port[1:], "0123456789") != "") {
+		return "", false
+	}
+	if !ipv6 && strings.Trim(host, "-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz") != "" {
+		return "", false
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	return host, host != ""
+}
+
+// webHostAllowed reports whether a request whose Host header is hostport is
+// addressed to the server by a name it is meant to be reached by, on any port:
+// an IP address, which no DNS answer stands behind; localhost or a name that
+// ends in .localhost, which browsers keep on this computer; or one of names.
+// A website that points its own name at this computer (DNS rebinding) loads
+// its page from that name, so the page's requests carry it, and are refused.
+func webHostAllowed(hostport string, names map[string]bool) bool {
+	name, ok := webHostName(hostport)
+	if !ok {
+		return false
+	}
+	if _, err := netip.ParseAddr(name); err == nil {
+		return true
+	}
+	return name == "localhost" || strings.HasSuffix(name, ".localhost") || names[name]
+}
+
+// hostCheck hands a request to next only when it is addressed to a name the
+// server is meant to be reached by (webHostAllowed): the page, its assets and
+// the WebSocket alike. Any other request gets a 403 that says what to do
+// instead, and none of the page.
+func (s *webServer) hostCheck(next http.Handler, names map[string]bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if webHostAllowed(r.Host, names) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The address the request reached works for this viewer, even when
+		// the server listens on every interface.
+		addr := net.JoinHostPort("127.0.0.1", fmt.Sprint(s.port))
+		if a, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+			addr = a.String()
+		}
+		s.reportRefused(r.Host, addr)
+		http.Error(w, fmt.Sprintf("scterm does not serve the page by this name. Open it by address, as http://%s/, or start scterm with the name in %s.",
+			addr, webHostsEnv), http.StatusForbidden)
+	})
+}
+
+// reportRefused says that a request addressed to hostport was refused, and
+// what to open instead (addr): once per name, for the first webRefusedMax
+// names, then once that further names go unreported.
+func (s *webServer) reportRefused(hostport, addr string) {
+	name, ok := webHostName(hostport)
+	if !ok {
+		name = hostport
+	}
+	if len(name) > 253 { // longer than any DNS name
+		name = name[:253] + "…"
+	}
+	s.refusedMu.Lock()
+	report, more := false, false
+	switch {
+	case s.refused[name]:
+	case len(s.refused) < webRefusedMax:
+		if s.refused == nil {
+			s.refused = map[string]bool{}
+		}
+		s.refused[name] = true
+		report = true
+	case !s.refusedMore:
+		s.refusedMore, more = true, true
+	}
+	s.refusedMu.Unlock()
+	switch {
+	case report:
+		noticef("scterm: web: refused a request addressed to %q; if you opened it, use http://%s/ or start scterm with the name in %s\n",
+			name, addr, webHostsEnv)
+	case more:
+		notice("scterm: web: refused requests addressed to more names; they are not reported\n")
+	}
 }
 
 // originOK rejects cross-origin WebSocket handshakes (a random page must not

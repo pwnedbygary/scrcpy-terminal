@@ -125,8 +125,18 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
 - Control events from the page are small JSON messages. The socket reader parses them and one
   dispatcher goroutine applies them in order, so input never waits for a frame to be encoded
   (`webinput.go`).
-- The server refuses WebSocket connections whose Origin header names a different host. It has
-  no other access control.
+- Every request, for the page, its files or the WebSocket, must name the server in its Host
+  header by an IP address, `localhost` or a name under it, the `--web-addr` name or a name in
+  `SCTERM_WEB_HOSTS`, on any port (`webHostAllowed` in `web.go`). When the server listens on an
+  address that is not a loopback address (`0.0.0.0` and `::` included), this computer's host
+  name works too, with or without `.local`, and for a host name with dots its first label with
+  `.local` (`webHostNames`). Any other name, and an empty or unreadable Host, gets a 403 and
+  none of the page, which stops DNS rebinding. Before that, Go's HTTP server answers 400 to a
+  request with two Host headers, or with one that has a byte no Host header may have, and to an
+  HTTP/1.1 request with none; none of the page is served either way. At start, scterm reports
+  each entry of `SCTERM_WEB_HOSTS` that is not a name, or a name and a port, and ignores it. The
+  server also refuses WebSocket connections whose Origin header names a different host. It has
+  no other access control: no password and no encryption.
 - Messages from the server to the page: binary video frames (`0x01`, a 16-byte header, then a
   JPEG, or raw pixels for a client that asks for them), binary sound (`0x02`), the `hello`
   reply (`0x03`), JSON status messages, and a `bye` with the reason just before the server

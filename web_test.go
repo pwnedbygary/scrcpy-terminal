@@ -1,7 +1,9 @@
 package main
 
 import (
+	"net"
 	"net/http"
+	"slices"
 	"testing"
 )
 
@@ -108,6 +110,99 @@ func TestOriginOK(t *testing.T) {
 		}
 		if got := originOK(r); got != c.ok {
 			t.Errorf("originOK(origin=%q host=%q) = %v, want %v", c.origin, c.host, got, c.ok)
+		}
+	}
+}
+
+// TestWebAddrNameIsServed: when --web-addr is a name, the page is served by
+// that name, since scterm prints its address with it and --window opens that
+// address, whether the name stands for a loopback address (as this computer's
+// name does in /etc/hosts, 127.0.1.1) or not. Names around it stay refused.
+func TestWebAddrNameIsServed(t *testing.T) {
+	for _, ip := range []string{"127.0.1.1", "192.0.2.7"} {
+		names, _ := webHostNames(net.ParseIP(ip), "", "Mirror.Box.lan", "")
+		for host, want := range map[string]bool{
+			"mirror.box.lan:6969":     true,
+			"MIRROR.BOX.LAN":          true,
+			"box.lan:6969":            false,
+			"www.mirror.box.lan:6969": false,
+			"evil.example:6969":       false,
+		} {
+			if got := webHostAllowed(host, names); got != want {
+				t.Errorf("with --web-addr Mirror.Box.lan on %s, %q allowed = %v, want %v", ip, host, got, want)
+			}
+		}
+	}
+}
+
+// TestWebServesThisComputersNamesOnlyOnTheNetwork: this computer's host name,
+// with and without .local, and for a host name with dots its first label with
+// .local, are served only when the server listens where other computers can
+// reach it: on an address that is not a loopback address, 0.0.0.0 and ::
+// included. On a loopback address, or when the address is not known, they are
+// refused like any other name, while the --web-addr name and the names in
+// SCTERM_WEB_HOSTS are served either way.
+func TestWebServesThisComputersNamesOnlyOnTheNetwork(t *testing.T) {
+	for _, c := range []struct {
+		hostname string
+		own      []string // its names
+		others   []string // never its names
+	}{
+		{"Box.Example.COM",
+			[]string{"box.example.com", "BOX.Example.com.:6969", "box.example.com.local", "box.local", "Box.Local:6969"},
+			[]string{"box", "box:6969", "example.com", "www.box.example.com", "box.example.local", "box.lan", "other.local"}},
+		{"Box.local", // with .local already
+			[]string{"box", "BOX:6969", "box.", "box.local", "Box.Local.:6969"},
+			[]string{"box.local.local", "www.box", "box.lan", "other.local", "local"}},
+	} {
+		for _, l := range []struct {
+			ip      string
+			network bool
+		}{
+			{"192.0.2.10", true}, {"2001:db8::10", true}, {"0.0.0.0", true}, {"::", true},
+			{"127.0.0.1", false}, {"127.0.1.1", false}, {"::1", false}, {"::ffff:127.0.0.1", false}, {"", false},
+		} {
+			names, _ := webHostNames(net.ParseIP(l.ip), c.hostname, "mirror.lan", "proxy.example.org")
+			for _, host := range c.own {
+				if got := webHostAllowed(host, names); got != l.network {
+					t.Errorf("host name %s, listening on %q: %q allowed = %v, want %v", c.hostname, l.ip, host, got, l.network)
+				}
+			}
+			for _, host := range c.others {
+				if webHostAllowed(host, names) {
+					t.Errorf("host name %s, listening on %q: %q allowed, want refused", c.hostname, l.ip, host)
+				}
+			}
+			for _, host := range []string{"mirror.lan", "proxy.example.org:443"} {
+				if !webHostAllowed(host, names) {
+					t.Errorf("host name %s, listening on %q: %q refused, want allowed", c.hostname, l.ip, host)
+				}
+			}
+		}
+	}
+}
+
+// TestWebHostsEntriesMustBeNames: an entry of SCTERM_WEB_HOSTS is a name, or a
+// name and a port, with spaces around it allowed and empty entries skipped.
+// Anything else, which no request could match, is handed back to be reported,
+// in order, and its parts are not served.
+func TestWebHostsEntriesMustBeNames(t *testing.T) {
+	names, unreadable := webHostNames(net.ParseIP("127.0.0.1"), "", "",
+		" Mirror.lan ,, http://phone.lan,phone.lan/,phone.lan:8443/,*.lan,a.lan b.lan,a.lan;b.lan,user@phone.lan,"+
+			":8443,::1,[::1,proxy.example.org:8443 ,my_box.lan,")
+	want := []string{"http://phone.lan", "phone.lan/", "phone.lan:8443/", "*.lan", "a.lan b.lan", "a.lan;b.lan",
+		"user@phone.lan", ":8443", "::1", "[::1"}
+	if !slices.Equal(unreadable, want) {
+		t.Errorf("unreadable entries %q, want %q", unreadable, want)
+	}
+	for _, host := range []string{"mirror.lan", "proxy.example.org", "my_box.lan:6969"} {
+		if !webHostAllowed(host, names) {
+			t.Errorf("%q refused, want allowed", host)
+		}
+	}
+	for _, host := range []string{"phone.lan", "a.lan", "b.lan", "lan", "user"} {
+		if webHostAllowed(host, names) {
+			t.Errorf("%q allowed, want refused", host)
 		}
 	}
 }

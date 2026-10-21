@@ -7,6 +7,105 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 28: the browser display refuses names it is not served by)
+
+- DNS rebinding: a website that points its own name at this computer could
+  load the page and drive the device through it, since the WebSocket
+  origin check compares the Origin with the Host header, and both then name
+  the website. Now `run()` wraps the whole mux in `hostCheck`, so every
+  request (the page, its files, `/ws`, unknown paths and any route added
+  later) must name the server in its Host header by an IP address (IPv6 in
+  brackets), `localhost` or a name ending in `.localhost`, the `--web-addr`
+  value when that is a name, or a name in the new `SCTERM_WEB_HOSTS`
+  (comma-separated), on any port; a final dot is ignored. This computer's
+  host name, with or without `.local`, in any case (and, for a host name
+  with dots, its first label with `.local`), is allowed only when the
+  server listens on an address that is not a loopback address (`0.0.0.0`
+  and `::` count as not loopback; an address that cannot be read counts as
+  loopback). At the default `127.0.0.1` those names get the 403 like any
+  other: someone on the network who can answer for the name (mDNS has no
+  authentication) could otherwise serve a page under it and then point the
+  name at `127.0.0.1`. Any other name, and an empty or unreadable Host (a
+  name may hold only ASCII letters, digits, `-`, `.` and `_`, so
+  `a*b.localhost` is refused too), gets a 403 with one line of plain text
+  and none of the page: "scterm does not serve the page by this name. Open
+  it by address, as http://ADDR/, or start scterm with the name in
+  SCTERM_WEB_HOSTS.", where ADDR is the address the request reached, so a
+  viewer of `--web-addr 0.0.0.0` on the network is told an address that
+  works. The Origin check is unchanged and still runs on `/ws`.
+- At start, each `SCTERM_WEB_HOSTS` entry that is not a name, or a name and
+  a port, is reported once on stderr and ignored: `scterm: web: ignored
+  "ENTRY" in SCTERM_WEB_HOSTS: it is not a name, or a name and a port (such
+  as mirror.lan or mirror.lan:8443)`.
+- The terminal reports each refused name once, for the first 16 names per
+  server, then one line for any more ("scterm: web: refused a request
+  addressed to "NAME"; if you opened it, use http://ADDR/ or start scterm
+  with the name in SCTERM_WEB_HOSTS"), quoted and cut at 253 bytes. Not
+  through `logOnce`, whose map never shrinks: a page can make the browser
+  try any number of names.
+- Docs: the README's Browser warning (what the check stops, and what it
+  does not: anyone who reaches the port by this computer's address, and,
+  off loopback only, someone on the network who can answer for this
+  computer's name), the README's environment table, the `scterm -h`
+  Environment line (it ends "IP addresses and localhost always work"), and
+  the access-control bullet in `docs/ARCHITECTURE.md` (net/http answers 400
+  before the check to two Host headers, a malformed Host, or an HTTP/1.1
+  request with none).
+- Review round 1 found this computer's names allowed at the default
+  loopback address (mDNS spoofing), the overflow test counting entries
+  rather than occurrences, no `.local` lookalike among the refused names,
+  this entry saying that `check.mjs` and `gesture.mjs` worked when they had
+  been run only up to the WebSocket, and eleven surviving mutants. Round 2
+  allows the names off loopback only, computed by a pure function
+  (`webHostNames`) from the listener's real address, and adds the warning,
+  the character rule, the first-label name and tests for all of it.
+- Tests: `web_host_test.go` (the rebinding name refused on `/`, an asset
+  and `/ws`; every allowed form served, with and without a port; lookalike
+  and malformed names refused; this computer's names refused at loopback;
+  one report per name in any form, exactly the first 16, and one overflow
+  line counted by occurrences; a long name cut; every method refused; the
+  suggested address following the address reached; the addresses
+  `--window` opens served; the warning; the docs) and, in `web_test.go`,
+  `TestWebAddrNameIsServed`, `TestWebServesThisComputersNamesOnlyOnTheNetwork`
+  and `TestWebHostsEntriesMustBeNames`.
+- Verification. Round 1's builder: gofmt, vet, the build, `go test ./...`
+  (the six node suites inside), `-race` on the web tests and the new tests
+  20 times, plain and under `-race`; the new tests failed on the base
+  files, and 20 mutations were each caught; `check.mjs` and `gesture.mjs`
+  were run against a test server with no device, only up to the WebSocket
+  connection (the page, its files and the upgrade; no frames or sound).
+  Round 2's builder, on `f1c25f3` with every part then uncommitted: gofmt,
+  vet, the build, `go test ./...` (351 top-level tests pass and 3 skip,
+  against 344 and 3 on its base: the 7 more are round 2's), `-race` on the
+  65 web and host tests, and the new and changed tests 20 times, plain and
+  under `-race`; the two new real-server tests fail on the base files and
+  the two new unit tests on a shim of the base rule, each for its reason;
+  30 of 31 mutations are caught, all eleven of the review's survivors and
+  the names-at-loopback one included. The survivor, `run()` passing no
+  address, behaves like loopback at `127.0.0.1` and needs a listener that
+  is not loopback to tell apart. Round 2 was taken in with `web.go`,
+  `web_test.go` and `web_host_test.go` as built and `README.md`,
+  `docs/ARCHITECTURE.md` and `flags.go` merged three ways onto the
+  worktree, cleanly. For review, this part was rebuilt alone on `e0919d4`
+  plus part 26 (which lands first) by replaying both rounds onto those
+  files; with the other uncommitted parts replayed on top, that gives the
+  worktree's files exactly. On that snapshot, with iso.env: gofmt, vet, the
+  build, `go test ./...` (342 top-level tests pass and 3 skip), `-race
+  -count=3` on the web tests (207 passes over 69 tests, no races), the host
+  tests 20 times and 5 times under `-race`, the docs tests and the docs
+  checker. Not run: a real browser or `--window` launch, real DNS
+  rebinding or mDNS spoofing (the tests send the headers such a page
+  would), a device, and a listener on an address that is not loopback (so
+  the names off loopback are shown only by the unit test).
+- Left alone: `--window --web-addr 0.0.0.0` opens the placeholder address
+  `http://<this-host>:PORT/` (older than this part); the names are read once
+  at start, so a renamed host or a changed `SCTERM_WEB_HOSTS` needs a
+  restart; behind a reverse proxy, the proxy must pass the browser's Host
+  through (or the WebSocket's Origin check refuses the page), and the
+  proxy's name must be in `SCTERM_WEB_HOSTS` (from reading the code; not
+  run); earlier entries that say the check does not stop DNS rebinding
+  describe the code before this part.
+
 ## Update (2026-10-21: QoL overhaul, part 26: loose ends)
 
 - `--audio-dup` now does what scrcpy's does (v4.1, `cli.c`): without
