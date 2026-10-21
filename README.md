@@ -406,6 +406,15 @@ prints the same line first.
 
 ## Troubleshooting
 
+Start with `scterm doctor`. It checks what scterm needs on this computer: on x86-64, a CPU with
+AVX2; adb, each device it lists, and the Android version of each ready device; what the sound of
+the terminal display needs; the browser and the display for `--window`; whether `--web` can
+listen on its default address, `127.0.0.1:6969`; the names in `SCTERM_WEB_HOSTS`; and the
+identity and pairings of peer mode. It prints one line for each check, which starts with
+`ok`, `warn` or `FAIL`, and under it a line that says what to do, when there is something to do.
+It exits with status 1 when a check fails, and 0 when there are only warnings. It does not
+connect to paired devices: `scterm peers --check` does that.
+
 ### The device is not found
 
 scterm uses a device that `adb devices` lists as `device`. When there is none, it says what to
@@ -584,6 +593,7 @@ variables also help: `SCT_DEBUG_WEB=1` logs each browser's paint and decode stat
 | `scterm pair [INVITATION]` | Pair with a device that runs the scterm app |
 | `scterm peers [--check]` | List the paired devices; `--check` tests each one |
 | `scterm forget NAME` | Forget a paired device |
+| `scterm doctor` | Check what scterm needs on this computer, and say what to do about problems |
 | `scterm update [--check] [-y]` | Update to the latest release, or pull and rebuild |
 | `scterm version` | Print the version |
 | `scterm help` | Print the help, as `scterm -h` does |

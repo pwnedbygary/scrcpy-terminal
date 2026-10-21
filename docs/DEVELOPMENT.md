@@ -64,8 +64,9 @@ peerctl --home /tmp/pattern serve --port 27411 --invite-host 127.0.0.1
 SCTERM_PEER_INVITATION="127.0.0.1:27411 XXXX-XXXX-XXXX-XXXX" go test ./peer -run Interop -v
 ```
 
-`SCTERM_TEST_MAIN_ARGS`, `SCTERM_TEST_LOST_DEVICE` and `SCTERM_TEST_SESSION_END` are set by
-tests for the child processes they start. Do not set them yourself.
+`SCTERM_TEST_MAIN_ARGS`, `SCTERM_TEST_LOST_DEVICE`, `SCTERM_TEST_SESSION_END`,
+`SCTERM_TEST_INPUT_LOOP` and `SCTERM_TEST_DOCTOR` are set by tests for the child processes they
+start. Do not set them yourself.
 
 ## Debug logging
 

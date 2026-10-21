@@ -87,13 +87,25 @@ var chromiumGlobs = []string{
 
 // findBrowser picks a launcher for the given URL and desired window size.
 func findBrowser(url string, w, h int) (browserCmd, error) {
-	if p := chromiumPath(); p != "" {
+	switch name, p := windowBrowser(); name {
+	case "chromium":
 		return chromiumCmd(p, url, w, h), nil
-	}
-	if p, err := exec.LookPath("firefox"); err == nil {
+	case "firefox":
 		return firefoxCmd(p, url, w, h)
 	}
 	return browserCmd{}, fmt.Errorf("no chromium/chrome or firefox found on PATH")
+}
+
+// windowBrowser names the browser --window starts, chromium or firefox, and
+// its path; "" when there is neither.
+func windowBrowser() (name, path string) {
+	if p := chromiumPath(); p != "" {
+		return "chromium", p
+	}
+	if p, err := exec.LookPath("firefox"); err == nil {
+		return "firefox", p
+	}
+	return "", ""
 }
 
 func chromiumPath() string {

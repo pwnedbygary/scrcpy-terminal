@@ -67,7 +67,7 @@ func defaultConfig() config {
 }
 
 func main() {
-	if runPeerCommand(os.Args[1:]) || runUpdateCommand(os.Args[1:]) {
+	if runPeerCommand(os.Args[1:]) || runUpdateCommand(os.Args[1:]) || runDoctorCommand(os.Args[1:]) {
 		return
 	}
 	cfg := defaultConfig()

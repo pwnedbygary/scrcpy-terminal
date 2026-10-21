@@ -54,7 +54,10 @@ func (a *adbRunner) run(args ...string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-var errADBNotFound = errors.New("adb not found: install Android platform-tools (often packaged as android-tools or adb), or use --peer to reach the scterm Android app without it")
+var errADBNotFound = errors.New("adb not found: " + adbMissingHint)
+
+// adbMissingHint says what to do when adb is not on PATH.
+const adbMissingHint = "install Android platform-tools (often packaged as android-tools or adb), or use --peer to reach the scterm Android app without it"
 
 // findDevice returns -s, else ANDROID_SERIAL, else the only device adb can use.
 // However the device is named, the session runs adb, so a missing adb is
@@ -79,50 +82,206 @@ func findDevice(serial string) (string, error) {
 	return pickDevice(string(out))
 }
 
-// pickDevice chooses the one device `adb devices` lists as ready, or says why
-// there is none: a device adb can see but not use needs something done on it.
-func pickDevice(list string) (string, error) {
-	var ready []string
-	var notReady [][2]string // serial, state
+// adbDevice is a device as `adb devices` lists it. What `adb devices -l` adds
+// is "" when the listing does not have it: the USB path (usb:1-1), and the
+// product, model (Pixel_8) and device names.
+type adbDevice struct {
+	serial, state                   string
+	devpath, product, model, device string
+}
+
+// listedDevices reads the devices an `adb devices` listing names, in its order.
+func listedDevices(list string) []adbDevice {
+	var devices []adbDevice
 	for _, line := range strings.Split(list, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 || strings.HasPrefix(fields[0], "*") || strings.HasPrefix(line, "List of devices") {
 			continue
 		}
-		state := fields[1]
+		d := adbDevice{serial: fields[0], state: fields[1]}
 		// "no permissions (...udev...); see [...]", or without the udev part
 		// "no permissions; see [...]" when the host has no plugdev group.
-		if state == "no" && len(fields) > 2 && strings.HasPrefix(fields[2], "permissions") {
-			state = "no permissions"
+		if d.state == "no" && len(fields) > 2 && strings.HasPrefix(fields[2], "permissions") {
+			d.state = "no permissions"
 		}
-		if state == "device" {
-			ready = append(ready, fields[0])
+		for _, f := range fields[2:] {
+			key, value, _ := strings.Cut(f, ":")
+			switch key {
+			case "usb":
+				d.devpath = f
+			case "product":
+				d.product = value
+			case "model":
+				d.model = value
+			case "device":
+				d.device = value
+			}
+		}
+		devices = append(devices, d)
+	}
+	return devices
+}
+
+// matchesTarget reports whether adb -s target, or ANDROID_SERIAL=target, names
+// d, as atransport::MatchesTarget decides it (AOSP packages/modules/adb
+// transport.cpp, lines 1289-1323 at 1cf2f017): by its serial; for a network
+// device, by its host and port as parseNetAddress reads them, where target
+// may leave out the port and may start with tcp: or udp:; by its USB path
+// (usb:1-1); or by product:, model: or device: and the name adb devices -l
+// shows. The listing does not say how a device is connected, so one listed
+// without a USB path is taken for a network device. adb's libusb backend
+// gives every USB device a USB path (client/usb_libusb_device.cpp, line 311),
+// but its native Linux backend gives one only when it can read the device's
+// sysfs link (client/usb_linux.cpp: none at line 225, set at lines 277-290);
+// a USB device listed without one answers here to its serial with tcp: or
+// udp: before it, which adb refuses.
+func (d adbDevice) matchesTarget(target string) bool {
+	if target == d.serial {
+		return true
+	}
+	if d.devpath == "" {
+		t := target
+		if strings.HasPrefix(t, "tcp:") || strings.HasPrefix(t, "udp:") {
+			t = t[len("tcp:"):]
+		}
+		if host, port, ok := parseNetAddress(d.serial, -1); ok {
+			if h, p, ok := parseNetAddress(t, port); ok && h == host && p == port {
+				return true
+			}
+		}
+	}
+	return target == d.devpath ||
+		d.product != "" && target == "product:"+d.product ||
+		d.model != "" && target == "model:"+d.model ||
+		d.device != "" && target == "device:"+d.device
+}
+
+// parseNetAddress reads a network address as android::base::ParseNetAddress
+// does (AOSP system/libbase parsenetaddress.cpp, lines 27-79 at 6d19b5c6):
+// host:port, [host]:port, a host alone, or an IPv6 address alone. The port is
+// port when the address gives none.
+func parseNetAddress(address string, port int) (string, int, bool) {
+	colons, dots := strings.Count(address, ":"), strings.Count(address, ".")
+	var host, portText string
+	sawPort := false
+	switch {
+	case strings.HasPrefix(address, "["):
+		last := strings.LastIndex(address, "]:")
+		if last < 0 {
+			return "", 0, false
+		}
+		host, portText, sawPort = address[1:strings.Index(address, "]:")], address[last+2:], true
+	case dots == 0 && colons >= 2 && colons <= 7:
+		host = address
+	case colons <= 1:
+		host, portText, sawPort = strings.Cut(address, ":")
+	}
+	if host == "" {
+		return "", 0, false
+	}
+	if sawPort {
+		p, ok := scanInt(portText)
+		if !ok || p <= 0 || p > 65535 {
+			return "", 0, false
+		}
+		port = p
+	}
+	return host, port, true
+}
+
+// scanInt reads a number as C's sscanf with %d does: after any white space,
+// a sign if there is one and at least one digit, leaving out what follows.
+func scanInt(s string) (int, bool) {
+	s = strings.TrimLeft(s, " \t\n\v\f\r")
+	n := 0
+	if n < len(s) && (s[n] == '+' || s[n] == '-') {
+		n++
+	}
+	for n < len(s) && '0' <= s[n] && s[n] <= '9' {
+		n++
+	}
+	v, err := strconv.Atoi(s[:n]) // which refuses a sign without digits
+	return v, err == nil
+}
+
+// pickTarget returns the devices adb -s target chooses among, as
+// acquire_one_transport looks for them (transport.cpp, lines 912-950 at
+// 1cf2f017): those that match target, except those adb has no permission to
+// open, which it passes over. adb refuses a target that matches more than one
+// ("more than one device with serial ..."), and then ambiguous is true. When
+// only devices adb cannot open match, adb stops with what their lines say, so
+// those are returned.
+func pickTarget(devices []adbDevice, target string) (picked []int, ambiguous bool) {
+	if target == "" {
+		return nil, false
+	}
+	var closed []int
+	for i, d := range devices {
+		switch {
+		case !d.matchesTarget(target):
+		case d.state == "no permissions":
+			closed = append(closed, i)
+		default:
+			picked = append(picked, i)
+		}
+	}
+	if len(picked) == 0 {
+		return closed, false
+	}
+	return picked, len(picked) > 1
+}
+
+// pickDevice chooses the one device `adb devices` lists as ready, or says why
+// there is none: a device adb can see but not use needs something done on it.
+func pickDevice(list string) (string, error) {
+	var ready []string
+	var notReady []adbDevice
+	for _, d := range listedDevices(list) {
+		if d.state == "device" {
+			ready = append(ready, d.serial)
 		} else {
-			notReady = append(notReady, [2]string{fields[0], state})
+			notReady = append(notReady, d)
 		}
 	}
 	switch {
 	case len(ready) == 1:
 		return ready[0], nil
 	case len(ready) > 1:
-		return "", fmt.Errorf("%d devices are connected (%s): choose one with -s SERIAL", len(ready), strings.Join(ready, ", "))
+		return "", fmt.Errorf("%s: %s", severalDevices(ready), chooseDeviceHint)
 	case len(notReady) == 0:
-		return "", errors.New("no device found: connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer for the scterm Android app")
+		return "", errors.New("no device found: " + noDeviceHint)
 	}
-	serial, state := notReady[0][0], notReady[0][1]
+	why, todo := notReadyAdvice(notReady[0].serial, notReady[0].state)
+	return "", fmt.Errorf("%s: %s", why, todo)
+}
+
+// What to do when no device, or more than one, is ready.
+const (
+	noDeviceHint     = "connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer for the scterm Android app"
+	chooseDeviceHint = "choose one with -s SERIAL"
+)
+
+// severalDevices says that more than one device is ready.
+func severalDevices(ready []string) string {
+	return fmt.Sprintf("%d devices are connected (%s)", len(ready), strings.Join(ready, ", "))
+}
+
+// notReadyAdvice says why a device adb lists in state is not ready for
+// scterm, and what to do about it.
+func notReadyAdvice(serial, state string) (why, todo string) {
 	switch state {
 	case "unauthorized":
-		return "", fmt.Errorf("%s has not allowed USB debugging from this computer: unlock it, accept the \"Allow USB debugging?\" prompt, and run scterm again", serial)
+		return serial + " has not allowed USB debugging from this computer", `unlock it, accept the "Allow USB debugging?" prompt, and run scterm again`
 	case "no permissions":
-		return "", fmt.Errorf("adb has no permission to open %s: add a udev rule for it (or join the plugdev group), then unplug and replug it", serial)
+		return "adb has no permission to open " + serial, "add a udev rule for it (or join the plugdev group), then unplug and replug it"
 	case "offline":
-		return "", fmt.Errorf("%s is offline: unplug and replug it, or restart adb with 'adb kill-server'", serial)
+		return serial + " is offline", "unplug and replug it, or restart adb with 'adb kill-server'"
 	case "authorizing", "connecting":
-		return "", fmt.Errorf("%s is still %s: try again in a moment", serial, state)
+		return serial + " is still " + state, "try again in a moment"
 	case "detached":
-		return "", fmt.Errorf("%s is detached from adb: attach it again with 'adb -s %s attach'", serial, serial)
+		return serial + " is detached from adb", "attach it again with 'adb -s " + serial + " attach'"
 	default:
-		return "", fmt.Errorf("%s is in %s mode, not ready for scterm: start Android on it normally", serial, state)
+		return serial + " is in " + state + " mode, not ready for scterm", "start Android on it normally"
 	}
 }
 

@@ -7,6 +7,229 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 30: scterm doctor)
+
+- New command `scterm doctor` (`doctor.go`): one line for each check, `ok`,
+  `warn` or `FAIL`, the check and what it found, and under it what to do
+  when there is something to do. Each check's lines are printed as that
+  check ends (the pairings, read first, print last). It exits 1 when a
+  check fails and 0 with warnings only; `doctor -h` (or `-help`, `--help`,
+  `help`) prints its usage, and any other argument is a usage error
+  (exit 1). It prints no summary line and nothing on stderr.
+- Checks: the build (on amd64, AVX2 from /proc/cpuinfo); adb (on PATH,
+  `adb version`); each device `adb devices -l` lists, explained in
+  scterm's own words, with each ready device's release and SDK read by
+  getprop against what the README says (5.0 for the server, 11 for sound,
+  13 for playback capture); sound for the terminal display (`pactl`,
+  `pactl info`, `XDG_RUNTIME_DIR` when no server answered,
+  `SCT_AUDIO_DEVICE` against `pactl list sinks short`); `--window`'s
+  browser and display; the web port (listen and close on 127.0.0.1:6969)
+  and the `SCTERM_WEB_HOSTS` entries; peer mode's identity and pairings,
+  read-only (no identity is created) and without the network. Programs
+  run in the C locale with a 10 s limit each, so a wedged adb or sound
+  server cannot hang it; one that exits 0 but leaves its output open
+  (`exec.ErrWaitDelay`) counts as a success.
+- `ANDROID_SERIAL` is taken in every form adb takes for `-s`: the serial;
+  a network device's host, with or without its port and a `tcp:` or
+  `udp:` prefix; the USB path (`usb:1-1`); and `product:`, `model:` or
+  `device:` with a name. These are ports of adb's
+  `atransport::MatchesTarget` and libbase's `ParseNetAddress` (AOSP adb
+  `transport.cpp` 1289-1323 at `1cf2f017`, libbase `parsenetaddress.cpp`
+  27-79 at `6d19b5c6`; in `adb.go`, `matchesTarget`, `parseNetAddress`
+  and `pickTarget`), applied to the `adb devices -l` listing doctor reads
+  anyway, so there is no extra adb call. As in adb's
+  `acquire_one_transport`, devices adb cannot open are passed over. The
+  named device's line ends with `ANDROID_SERIAL names it` (or
+  `ANDROID_SERIAL=VALUE names it`); a value that names no device (the
+  advice lists the forms) or more than one (adb refuses then) fails.
+- Severity: FAIL only for what stops a session from starting on this
+  computer: no AVX2; adb missing or broken; the device scterm would use
+  not ready, too old or absent; with no device chosen, no ready device
+  that can be mirrored (then every device that cannot be used fails, a
+  device that is not ready included); no device at all; a damaged
+  identity or `peers.json`, or pairings whose identity is gone. Sound,
+  window and web problems are warnings, since another display works
+  without each. With a paired device, a missing or broken adb, a failing
+  `adb devices -l` and "no device" are warnings too (their advice offers
+  `--peer`). The display is ok when `--window` would find a Wayland or X
+  socket itself, and warns only when it would find none.
+- Messages: an adb error shows the first line after adb's `* ...`
+  progress lines, so a server that does not start gives `adb: failed to
+  check server version: cannot connect to daemon`, and the unauthorized
+  error keeps its first line. Without `pactl`, doctor says scterm plays on
+  the server's default output and that `pactl` makes the sound follow the
+  output you pick, as the README says. When `pactl info` fails and
+  `PULSE_SERVER` is set, doctor names it and tries the `XDG_RUNTIME_DIR`
+  socket, as the stream does (`pulseSocketPath`). An identity or
+  `peers.json` that cannot be read for its permissions gets chmod advice
+  that keeps the pairings (a damaged file keeps the move-aside advice),
+  and an identity that group or others can read warns.
+- `SCTERM_WEB_HOSTS` is read through the browser display's own
+  `webHostNames` (part 31): the names it adds, each once, in the order
+  given, and a warning for each entry the display ignores, quoted with
+  `%+q` and given the display's advice (`webHostsAdvice`), so doctor and
+  the server agree on names with an empty label (`.example.lan`,
+  `box..lan`) and on letters that only look like ASCII ones. This needs
+  part 31, so this part lands after it.
+- Shared code, with byte-identical messages (a probe on the old and new
+  files in round 1; round 2 reads the serial and state as before):
+  `adb.go` gained `listedDevices` (which also keeps the
+  `-l` fields), `notReadyAdvice`, `noDeviceHint`, `chooseDeviceHint` and
+  `severalDevices` out of `pickDevice`, and `adbMissingHint` out of
+  `errADBNotFound`'s message; `window.go` gained `windowBrowser`, which
+  `findBrowser` uses; `doctor.go` uses `pulseSocketPath` from `audio.go`.
+- Help: `doctor` under Commands and in `commands`, saying it checks
+  whether `--web` can listen on its default address, 127.0.0.1:6969, and
+  the names in `SCTERM_WEB_HOSTS`; README: a Commands row, and a first
+  Troubleshooting paragraph that names every check, the web ones too;
+  `docs/DEVELOPMENT.md`: every `SCTERM_TEST_` variable, a list
+  `TestDevelopmentNamesTheTestVariables` keeps complete.
+- Tests: `doctor_test.go` (fake adb and pactl scripts with `PATH` set to
+  their directory only, a fake cpuinfo, a scratch `SCTERM_HOME`, sockets
+  and ports; `TestDoctorCommandLine` runs `scterm doctor` through
+  `main()` in a child process with only `PATH`, `XDG_RUNTIME_DIR` and the
+  test variable); `adb_target_test.go` (tables read from adb's C++);
+  `doctor_adb_test.go`; `TestDoctorIsDocumented`; doctor cases in the
+  help, leftover-word, subcommand-help and exit-status tests.
+  `TestSubcommandHelp` gives `PATH`, `XDG_RUNTIME_DIR`, `HOME` and
+  `SCTERM_HOME` their own temporary directories, so a broken argument
+  check cannot run the developer's adb or pactl.
+- Review round 1 (NEEDS CHANGES), resolved in round 2. M1: doctor wanted
+  `ANDROID_SERIAL` to match a listed serial exactly, though adb also takes
+  the other forms above, so it failed, and advised unsetting, a value adb
+  accepts. L1: it showed adb's first stderr line, `* daemon not running;
+  starting now at tcp:5037`, instead of the cause. L2: its missing-pactl
+  advice implied the terminal display has no sound without `pactl`. L3:
+  `TestSubcommandHelp` ran doctor in-process with the developer's `PATH`,
+  so a broken argument check would run the real adb and pactl (a spy
+  mutant did, and the real pactl reached a decoy sound server). L4: this
+  entry claimed the builder ran with `iso.env` (corrected below). Nits:
+  several ready devices all too old gave warnings only; a repeated
+  `SCTERM_WEB_HOSTS` name was listed twice; the `XDG_RUNTIME_DIR` warning
+  came even when `pactl` reached a server; a permission problem was
+  advised to move the identity aside; the help and README said neither
+  that the port checked is 127.0.0.1:6969 nor that `SCTERM_WEB_HOSTS` is
+  checked. All are fixed, with the review's suggestions (the
+  `PULSE_SERVER` try, `ErrWaitDelay`, lines as each check ends, the
+  identity's mode, the full list of test variables); the display note
+  doctor inherits from `browserEnv` (N6) is left alone.
+- Correction (L4): round 1's builder did not use `iso.env`. Its logs
+  record GOCACHE, GOTMPDIR and GOPROXY=off, with its own refusing fake adb
+  and pactl first on PATH, and nothing about HOME, XDG_RUNTIME_DIR,
+  PULSE_SERVER, DISPLAY or WAYLAND_DISPLAY. Its binary runs used `env -i`
+  with only fake tools on PATH and no sandbox, so the unhealthy run's
+  build, browser and display lines came from this host's /proc/cpuinfo,
+  browser install and /run/user/1000 sockets, read only.
+- Verification, round 1, in the builder's tree (`f35136c`: `f1c25f3` plus
+  parts 25, 26, 27 and 28 as they were then): gofmt, vet, the build, `go
+  test ./...` (360 top-level tests pass and 3 skip; 344 and 3 on the
+  base), `-race`, the new tests 20 times and 5 times under `-race`,
+  fail-before through the base binary and files, 47 of 47 mutations
+  caught, and the built binary with only fake tools on PATH.
+- Verification, round 2, in the builder's tree (`3e1f9a6`: `fd9e086` plus
+  parts 27, 29 and 30 as they were then), with `iso.env`: gofmt, vet, the
+  build and `git diff --check`; `go test ./...` (400 top-level tests pass
+  and 3 skip; 394 and 3 on the base, the 6 new tests); `-race -count=3` on
+  31 doctor, command-line, help and README tests; round 2's 23 new and
+  changed tests 20 times and 5 times under `-race`; each new case fails on the
+  base `adb.go` and `doctor.go` (through a shim over the base functions)
+  or on the base docs; 69 of 69 mutations caught; the whole root package
+  in a bwrap sandbox set up like a desktop session (decoys for the sound
+  server, Wayland, D-Bus, X and adb's port 5037), with no connection,
+  while a positive control logged 5; the built binary in bwrap on 17 fake
+  setups, none of which changed HOME, SCTERM_HOME or XDG_RUNTIME_DIR.
+- Taken into the worktree: the builder's files as built, and the README
+  merged three ways (the merge changed exactly round 2's lines). Then
+  `doctorWebHosts` was changed to read `SCTERM_WEB_HOSTS` through part
+  31's functions, as above: `TestDoctorReadsWebHosts` gained empty-label
+  and lookalike cases, and it and the whole-run test the display's
+  wording; with the builder's `doctor.go`, both fail.
+- Verification, snapshot (`/tmp/opencode/review-30b`, on `141cd3e` with
+  parts 29, 32 and 31 as reviewed), with `iso.env`: gofmt, vet, the build,
+  `git diff --check` and the hashes; `go test ./...` (402 top-level tests
+  pass and 3 skip); `-race -count=3` on 31 doctor, command-line, help and
+  README tests; round 2's 23 new and changed tests 20 times and 5 times under
+  `-race`; with the builder's `doctor.go` through `-overlay`,
+  `TestDoctorReadsWebHosts` and `TestDoctorOnAHealthyAndAnUnhealthyComputer`
+  fail; the builder's mutations (all but one that targets the code the
+  intake replaced) and five of the intake's change, 73 of 73 caught (one of
+  the intake's ran again after a fix, since it did not compile); the docs
+  checker (2 files, 41 links, no problems) and the docs tests; the whole
+  root package in a bwrap sandbox with decoys for the sound server, D-Bus,
+  Wayland and X, no connection.
+- Review round 2 (PASS), notes taken up in round 3. LOW-1: no test
+  reached "with a pairing, no device is only a warning" through
+  `runDoctor`, only through `adbAndDevices`, the tests' copy of its adb
+  wiring, so mutants that dropped the pairing there survived. Nits: no
+  case had `ANDROID_SERIAL` name a ready and an offline device, which adb
+  finds ambiguous, since it passes over only devices it may not open; no
+  case had SDK 20, the newest SDK too old for the server; the identity's
+  mode was pinned on its read bits only, so a warning on any group or
+  other bit survived; and the `matchesTarget` comment said adb on Linux
+  lists a USB path for every USB device, true of its libusb backend but
+  not of its native one. Suggestions: a broken adb or a failing `adb
+  devices -l` failed even with a pairing, while a missing adb only warned;
+  and `doctorPeers` checks that `identity.pem` exists, then loads it with
+  `peer.LoadOrCreateIdentity`, which would make one if the file went
+  away in between. Its nits on this entry's wording (what the README
+  says, round 2's test count against round 1, the help words `doctor`
+  takes) are fixed in place.
+- Round 3: with a paired device, an adb that does not run and a failing
+  `adb devices -l` are warnings whose advice also offers `--peer`;
+  without one they fail as before, with the same advice. A device that is
+  not ready, too old, or not the one `ANDROID_SERIAL` names still fails
+  with a pairing. `TestDoctorOnAPeerOnlyComputer` runs `runDoctor` without
+  adb and with an adb that lists no device; `TestDoctorWhenADBFails` runs
+  each case with and without a pairing; new cases cover a ready and an
+  offline device of one model, SDK 20, and an identity with mode 0620,
+  which gets no warning (0640 still does). The `matchesTarget` comment now
+  says which backend lists a USB path, and that a USB device listed
+  without one answers to its serial after `tcp:` or `udp:`, which adb
+  refuses. Left alone: the gap in `doctorPeers` (`peer/` has no load-only
+  reader).
+- Verification, round 3, in the builder's tree (`4fdfdc4`: `141cd3e` plus
+  parts 29, 30, 31 and 32 as they were then), with `iso.env`: gofmt, vet,
+  the build and `git diff --check`; `go test ./...` (403 top-level tests
+  pass and 3 skip, as on the base); `-race -count=3` on 31 doctor,
+  command-line, help and README tests; the 6 changed tests 20 times and 5
+  times under `-race`; with the base `doctor.go`, only the 4 paired cases
+  of `TestDoctorWhenADBFails` fail; the review's R07, R21, R21b, R25 and
+  R39 and round 2's adb rule survive round 2's tests and are caught now,
+  22 of 22 mutations in all; the `adb.go` change is comment-only; and the
+  built binary in bwrap on 6 fake setups exits 0 with a pairing and 1
+  without one.
+- Taken into the worktree: round 3's four files. The worktree's
+  `doctor.go` also holds part 34's shared port wording, so round 3 was
+  merged into it three ways, which added exactly round 3's lines; this
+  part's snapshot takes the builder's `doctor.go`.
+- Verification, snapshot (`/tmp/opencode/review-30c`, on `6b908b5`, the
+  tip of `overhaul` with parts 29, 32 and 31 committed), with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (403
+  top-level tests pass and 3 skip); `-race -count=3` on 31 doctor,
+  adb-target, command-line, help and docs tests; 9 doctor and adb-target
+  tests, among them the 6 round 3 changed, 20 times and 5 times under
+  `-race`; with round 2's `doctor.go` laid over, `TestDoctorWhenADBFails`
+  fails and the other 8 of the 9 pass; the docs checker finds 41 links and
+  no problem in README.md and docs/DEVELOPMENT.md, and the docs tests
+  pass; and the whole module, run in a bwrap sandbox set up like a desktop
+  session (decoy sockets for the sound server, Wayland, D-Bus and X, adb's
+  port 5037, and the real `pactl` on PATH), connects to none of them.
+- Not run: a real adb, phone or sound server (adb's rules come from its
+  source at the revisions above, not from running released
+  platform-tools), a CPU without AVX2, the tests as root (the permission
+  cases skip there), and a real `scterm --web` holding the port.
+- Left alone: terminal capabilities (no reliable probe); doctor repeats
+  `browserEnv`'s note, wrong when `DISPLAY` is set but its socket is
+  missing (N6); `adb devices -l` may start the adb server, as scterm
+  itself does; a pairing with an invalid fingerprint is counted, though
+  `scterm peers` skips it; a device adb lists as `(no serial number)`
+  cannot be named by its USB path or names (that parse is `pickDevice`'s);
+  a `PULSE_SERVER` that lists several servers is named as it is, and a
+  stale `default-server` in `client.conf` gets no fallback try; with a
+  `PULSE_SERVER` that answers, doctor checks that server, as the stream
+  does, while scterm's own `pactl` calls go to the `XDG_RUNTIME_DIR`
+  socket (part 29's left-alone item).
+
 ## Update (2026-10-21: QoL overhaul, part 31: follow-ups to part 28's reviews)
 
 - Framing: the page (`/`) is now sent with `X-Frame-Options: DENY`, and

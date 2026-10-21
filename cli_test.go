@@ -69,6 +69,8 @@ func TestLeftoverWordsAreRefused(t *testing.T) {
 		"peer":       "did you mean peers, or --peer NAME?",
 		"versoin":    "did you mean version?",
 		"upd":        "did you mean update?",
+		"doctor":     "run it on its own, as scterm doctor",
+		"docter":     "did you mean doctor?",
 		// A flag written without its dashes.
 		"takeover":    "did you mean --takeover?",
 		"no-audio":    "did you mean --no-audio?",
@@ -114,13 +116,18 @@ func TestLeftoverWordsAreRefused(t *testing.T) {
 }
 
 // TestSubcommandHelp: every command answers -h or --help with its usage on
-// stdout instead of a usage error.
+// stdout instead of a usage error. A command that ran anyway would find no
+// program to run, and only directories of the test's own.
 func TestSubcommandHelp(t *testing.T) {
-	t.Setenv("SCTERM_HOME", t.TempDir()) // a command that ran anyway stays in here
-	for _, args := range [][]string{{"pair", "-h"}, {"peers", "--help"}, {"forget", "-h"}, {"version", "--help"}, {"update", "-h"}} {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCTERM_HOME", t.TempDir())
+	for _, args := range [][]string{{"pair", "-h"}, {"peers", "--help"}, {"forget", "-h"}, {"version", "--help"}, {"update", "-h"},
+		{"doctor", "--help"}} {
 		var handled bool
 		out := captureStdout(t, func() {
-			handled = runPeerCommand(args) || runUpdateCommand(args)
+			handled = runPeerCommand(args) || runUpdateCommand(args) || runDoctorCommand(args)
 		})
 		if !handled || !strings.HasPrefix(out, "usage: scterm "+args[0]) {
 			t.Errorf("%q: handled=%v, output %q", args, handled, out)
@@ -386,7 +393,7 @@ func TestHelpIsGrouped(t *testing.T) {
 		"peer": "Peer", "takeover": "Peer",
 		"keys": "Debugging", "dump-frames": "Debugging", "dump-audio": "Debugging", "repaint-interval": "Debugging",
 		"SCT_DEBUG_WEB": "Debugging", "SCT_DEBUG_CONTROL": "Debugging",
-		"pair": "Commands", "peers": "Commands", "forget": "Commands", "update": "Commands", "version": "Commands", "help": "Commands",
+		"pair": "Commands", "peers": "Commands", "forget": "Commands", "doctor": "Commands", "update": "Commands", "version": "Commands", "help": "Commands",
 		"ANDROID_SERIAL": "Environment", "SCTERM_HOME": "Environment", "SCTERM_CHROME": "Environment",
 		"SCTERM_FIREFOX_KIOSK": "Environment", "SCT_AUDIO_DEVICE": "Environment",
 		"0": "Exit status", "1": "Exit status", "2": "Exit status",

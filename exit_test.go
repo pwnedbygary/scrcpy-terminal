@@ -268,6 +268,8 @@ func TestCommandLineExitStatus(t *testing.T) {
 		{[]string{"update", "--bogus"}, "", 1, "", "scterm: usage: scterm update [--check] [-y|--yes] (\"--bogus\" is not one of these)\n"},
 		{[]string{"peers", "--bogus"}, "", 1, "", "scterm: usage: scterm peers [--check]\n"},
 		{[]string{"forget"}, "", 1, "", "scterm: usage: scterm forget NAME (scterm peers lists the names)\n"},
+		{[]string{"doctor", "extra"}, "", 1, "", "scterm: usage: scterm doctor (it takes no arguments)\n"},
+		{[]string{"--web", "doctor"}, "", 1, "", "scterm: \"doctor\" is a command, not a flag value: run it on its own, as scterm doctor\n"},
 		{nil, "", 1, "", "scterm dev\nscterm: adb not found: install Android platform-tools (often packaged as android-tools or adb), " +
 			"or use --peer to reach the scterm Android app without it\n"},
 		{nil, unauthorized, 1, "", "scterm dev\nscterm: R5CT has not allowed USB debugging from this computer: unlock it, " +
@@ -275,6 +277,7 @@ func TestCommandLineExitStatus(t *testing.T) {
 		{[]string{"-h"}, "", 0, "scterm - scrcpy in your terminal", ""},
 		{[]string{"help"}, "", 0, "scterm - scrcpy in your terminal", ""},
 		{[]string{"version"}, "", 0, "scterm dev", ""},
+		{[]string{"doctor", "-h"}, "", 0, "usage: scterm doctor", ""},
 	} {
 		home := t.TempDir()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestCommandLineExitStatus$")

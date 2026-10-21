@@ -3,8 +3,11 @@ package main
 import (
 	"errors"
 	"flag"
+	"net"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -70,6 +73,79 @@ func TestReadmeListsEveryFlag(t *testing.T) {
 				t.Errorf("README.md lists %s under %q; scterm -h puts it under %q", dashed(name), r.heading, want)
 			}
 		}
+	}
+}
+
+// TestDoctorIsDocumented: scterm doctor is under Commands in scterm -h and in
+// the README's table of commands, and the README's Troubleshooting sends the
+// reader to it before its first problem. Both its help and that paragraph
+// name the checks of --web's default address and of SCTERM_WEB_HOSTS.
+func TestDoctorIsDocumented(t *testing.T) {
+	cfg := defaultConfig()
+	addr := net.JoinHostPort(cfg.webAddr, strconv.Itoa(cfg.webPort))
+	for _, word := range []string{addr, webHostsEnv} {
+		if !strings.Contains(doctorHelp, word) {
+			t.Errorf("scterm doctor -h does not name %s", word)
+		}
+	}
+	_, _, entries := readHelp(t)
+	inHelp := false
+	for _, e := range entries {
+		if e.heading == "Commands" && strings.HasPrefix(strings.TrimSpace(e.lines[0]), "doctor ") {
+			inHelp = true
+		}
+	}
+	if !inHelp {
+		t.Error("scterm -h does not list doctor under Commands")
+	}
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, table, _ := strings.Cut(string(readme), "\n### Commands\n")
+	table, _, _ = strings.Cut(table, "\n#")
+	if !strings.Contains(table, "\n| `scterm doctor` |") {
+		t.Error("README.md does not list scterm doctor under ### Commands")
+	}
+	_, trouble, _ := strings.Cut(string(readme), "\n## Troubleshooting\n")
+	first, _, _ := strings.Cut(trouble, "\n### ")
+	if !strings.Contains(first, "`scterm doctor`") {
+		t.Error("README.md's Troubleshooting does not start with scterm doctor, before its first ### problem")
+	}
+	for _, word := range []string{"`" + addr + "`", "`" + webHostsEnv + "`"} {
+		if !strings.Contains(first, word) {
+			t.Errorf("README.md's paragraph on scterm doctor does not name %s", word)
+		}
+	}
+}
+
+// TestDevelopmentNamesTheTestVariables: docs/DEVELOPMENT.md names each
+// SCTERM_TEST_ variable that a test of this package sets for the child
+// processes it starts, so that no one sets one by mistake.
+func TestDevelopmentNamesTheTestVariables(t *testing.T) {
+	doc, err := os.ReadFile("docs/DEVELOPMENT.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, name := range tests {
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range regexp.MustCompile(`SCTERM_TEST_[A-Z_]+`).FindAllString(string(src), -1) {
+			if !seen[v] && !strings.Contains(string(doc), "`"+v+"`") {
+				t.Errorf("docs/DEVELOPMENT.md does not name %s, which %s sets", v, name)
+			}
+			seen[v] = true
+		}
+	}
+	if len(seen) == 0 {
+		t.Error("no test sets an SCTERM_TEST_ variable: this test reads the wrong files")
 	}
 }
 

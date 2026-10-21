@@ -162,6 +162,7 @@ var helpSections = []struct {
 		{"pair [INVITATION]", "pair with a device running the scterm app"},
 		{"peers [--check]", "list the paired devices; --check tests each one"},
 		{"forget NAME", "forget a paired device"},
+		{"doctor", "check what scterm needs on this computer"},
 		{"update", "update to the latest release, or pull and rebuild"},
 		{"version", "print the version"},
 		{"help", "print this help"},
@@ -283,7 +284,7 @@ func parseArgs(fs *flag.FlagSet, cfg *config, args []string) error {
 }
 
 // commands are the words scterm takes instead of flags, as its first argument.
-var commands = []string{"pair", "peers", "forget", "update", "version", "help"}
+var commands = []string{"pair", "peers", "forget", "doctor", "update", "version", "help"}
 
 // spacedValueFlags take values that may contain spaces (names, paths), so a
 // word left over after one is most likely the rest of an unquoted value.
