@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"scterm/peer"
 )
@@ -38,6 +41,9 @@ func TestPickDeviceExplainsEachState(t *testing.T) {
 		{"offline", header + "R5CT\toffline\n", "", "adb kill-server"},
 		{"authorizing", header + "R5CT\tauthorizing\n", "", "try again in a moment"},
 		{"recovery", header + "R5CT\trecovery\n", "", "recovery mode"},
+		// `adb detach` lets go of a device until `adb attach`, which needs
+		// the serial when more than one device is connected.
+		{"detached", header + "R5CT\tdetached\n", "", "adb -s R5CT attach"},
 	}
 	for _, tc := range cases {
 		serial, err := pickDevice(tc.list)
@@ -61,6 +67,10 @@ func TestLeftoverWordsAreRefused(t *testing.T) {
 		"peer":       "did you mean peers, or --peer NAME?",
 		"versoin":    "did you mean version?",
 		"upd":        "did you mean update?",
+		// A flag written without its dashes.
+		"takeover":    "did you mean --takeover?",
+		"no-audio":    "did you mean --no-audio?",
+		"audio=false": "did you mean --audio=false?",
 	}
 	fs := newFlagSet(&config{}, new(float64))
 	for word, want := range cases {
@@ -80,6 +90,12 @@ func TestLeftoverWordsAreRefused(t *testing.T) {
 		{[]string{"--web", "peers"}, "run it on its own, as scterm peers"},
 		{[]string{"--web-port", "9000", "frobnicate"}, `unknown command "frobnicate"`},
 		{[]string{"--audio", "maybe"}, `unknown command "maybe"`},
+		// The scrcpy names are flags like any other.
+		{[]string{"--no-audio", "false"}, "write --no-audio=false"},
+		{[]string{"-n", "0"}, "write -n=0"},
+		// A flag word after a value is that flag, not more of the value.
+		{[]string{"--peer", "Pixel", "takeover"}, "did you mean --takeover?"},
+		{[]string{"--peer", "Pixel", "8", "takeover"}, "did you mean --takeover?"},
 	} {
 		words := tc.args[len(tc.args)-1:]
 		if tc.args[0] == "--peer" {
@@ -94,6 +110,7 @@ func TestLeftoverWordsAreRefused(t *testing.T) {
 // TestSubcommandHelp: every command answers -h or --help with its usage on
 // stdout instead of a usage error.
 func TestSubcommandHelp(t *testing.T) {
+	t.Setenv("SCTERM_HOME", t.TempDir()) // a command that ran anyway stays in here
 	for _, args := range [][]string{{"pair", "-h"}, {"peers", "--help"}, {"forget", "-h"}, {"version", "--help"}, {"update", "-h"}} {
 		var handled bool
 		out := captureStdout(t, func() {
@@ -121,11 +138,309 @@ func TestValidateConfigRefusesWhatCannotWork(t *testing.T) {
 		"all streams off": {},
 		"unknown codec":   {video: true, audio: true, control: true, audioCodec: "mp3"},
 		"unknown source":  {video: true, audio: true, control: true, audioSource: "speaker"},
+		// --no-tui shows nothing, and --web and --window are displays.
+		"web without a display":    {video: true, audio: true, control: true, web: true, noTUI: true},
+		"window without a display": {video: true, audio: true, control: true, window: true, noTUI: true},
 	}
 	for name, c := range bad {
 		if err := validateConfig(c); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// parse runs scterm's flag parsing on args, from the configuration main
+// starts with, without exiting.
+func parse(t *testing.T, args ...string) (config, error) {
+	t.Helper()
+	cfg := defaultConfig()
+	err := parseArgs(newFlagSet(&cfg, new(float64)), &cfg, args)
+	return cfg, err
+}
+
+// helpEntry is one entry of scterm -h: the heading it is under, and its
+// lines, the first starting with what to type.
+type helpEntry struct {
+	heading string
+	lines   []string
+}
+
+// readHelp renders scterm -h as -h, --help and help print it, and splits it
+// into entries.
+func readHelp(t *testing.T) (*flag.FlagSet, string, []helpEntry) {
+	t.Helper()
+	cfg := defaultConfig()
+	fs := newFlagSet(&cfg, new(float64))
+	var b strings.Builder
+	fs.SetOutput(&b)
+	fs.Usage()
+	var entries []helpEntry
+	heading := ""
+	for _, line := range strings.Split(b.String(), "\n") {
+		switch {
+		case strings.HasSuffix(line, ":") && !strings.Contains(line, " "):
+			heading = strings.TrimSuffix(line, ":")
+		case heading != "" && strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   "):
+			entries = append(entries, helpEntry{heading, []string{line}})
+		case len(entries) > 0 && strings.HasPrefix(line, "   "):
+			e := &entries[len(entries)-1]
+			e.lines = append(e.lines, line)
+		}
+	}
+	return fs, b.String(), entries
+}
+
+// flagNames lists the flags a help entry names before its description, as
+// s and serial for "-s, --serial SERIAL", and the word standing for the value.
+func flagNames(e helpEntry) (names []string, value string) {
+	col, _, _ := strings.Cut(strings.TrimSpace(e.lines[0]), "  ")
+	for _, form := range strings.Split(col, ", ") {
+		name, v, _ := strings.Cut(form, " ")
+		names = append(names, strings.TrimLeft(name, "-"))
+		value = v
+	}
+	return names, value
+}
+
+// TestHelpListsEveryFlagOnce: scterm -h is made from the flag definitions, so
+// a flag cannot be left out of it. Each flag is on exactly one line, scrcpy's
+// names on the line of the flag they stand for, and --mirror-fps on none.
+func TestHelpListsEveryFlagOnce(t *testing.T) {
+	fs, help, entries := readHelp(t)
+	aliasOf := map[string]string{"serial": "s", "n": "no-control", "no-control": "control",
+		"no-audio": "audio", "no-video": "video", "b": "video-bit-rate", "m": "max-size"}
+	mainFlag := func(name string) string {
+		for aliasOf[name] != "" {
+			name = aliasOf[name]
+		}
+		return name
+	}
+	named := map[string]int{} // flag → lines naming it
+	lines := map[string]int{} // flag → lines naming it or an alias of it
+	for _, e := range entries {
+		if !strings.HasPrefix(strings.TrimSpace(e.lines[0]), "-") {
+			continue
+		}
+		names, _ := flagNames(e)
+		onLine := map[string]bool{}
+		for _, n := range names {
+			if fs.Lookup(n) == nil {
+				t.Errorf("the help lists -%s, which is not a flag", n)
+			}
+			named[n]++
+			onLine[mainFlag(n)] = true
+		}
+		for n := range onLine {
+			lines[n]++
+		}
+	}
+	fs.VisitAll(func(f *flag.Flag) {
+		switch {
+		case f.Name == "mirror-fps":
+		case lines[mainFlag(f.Name)] != 1:
+			t.Errorf("--%s is on %d lines of the help, want 1", f.Name, lines[mainFlag(f.Name)])
+		case aliasOf[f.Name] != "" && named[f.Name] != 1:
+			t.Errorf("--%s is named on %d lines of the help, want 1", f.Name, named[f.Name])
+		}
+	})
+	if strings.Contains(help, "mirror-fps") {
+		t.Error("the help mentions --mirror-fps, which does nothing")
+	}
+}
+
+// TestHelpIsGrouped: scterm -h puts each flag under a heading, with a word
+// for its value and its default said once, then the commands (one line
+// each), the environment and a few examples, all within 80 columns.
+func TestHelpIsGrouped(t *testing.T) {
+	fs, help, entries := readHelp(t)
+	for i, line := range strings.Split(help, "\n") {
+		if n := utf8.RuneCountInString(line); n > 80 {
+			t.Errorf("help line %d is %d columns: %q", i+1, n, line)
+		}
+	}
+	var headings []string
+	for _, e := range entries {
+		if len(headings) == 0 || headings[len(headings)-1] != e.heading {
+			headings = append(headings, e.heading)
+		}
+	}
+	want := []string{"Device", "Video", "Audio", "Display", "Peer", "Debugging", "Commands", "Environment", "Examples"}
+	if strings.Join(headings, ", ") != strings.Join(want, ", ") {
+		t.Errorf("headings %q, want %q", headings, want)
+	}
+
+	under := map[string]string{} // flag, command or variable → its heading
+	text := map[string]string{}  // flag, command or variable → its entry
+	value := map[string]string{} // flag → the word for its value
+	examples := 0
+	for _, e := range entries {
+		all := strings.Join(e.lines, "\n")
+		if strings.Count(strings.ToLower(all), "default") > 1 {
+			t.Errorf("%q gives a default more than once", all)
+		}
+		first := strings.TrimSpace(e.lines[0])
+		if strings.HasPrefix(first, "-") {
+			names, v := flagNames(e)
+			if f := fs.Lookup(names[0]); f != nil && isBoolFlag(f) != (v == "") {
+				t.Errorf("%q: want a word for the value exactly when the flag takes one", first)
+			}
+			for _, n := range names {
+				under[n], text[n], value[n] = e.heading, all, v
+			}
+			continue
+		}
+		word, _, _ := strings.Cut(first, " ")
+		word, _, _ = strings.Cut(word, "=")
+		under[word], text[word] = e.heading, all
+		if e.heading == "Commands" && len(e.lines) != 1 {
+			t.Errorf("command %s takes %d lines, want 1", word, len(e.lines))
+		}
+		if e.heading == "Examples" {
+			examples++
+		}
+	}
+	for name, heading := range map[string]string{
+		"s": "Device", "serial": "Device", "n": "Device", "no-control": "Device",
+		"no-video": "Video", "m": "Video", "max-size": "Video", "max-fps": "Video", "b": "Video", "video-bit-rate": "Video",
+		"no-audio": "Audio", "audio-bit-rate": "Audio", "audio-codec": "Audio", "audio-source": "Audio", "audio-dup": "Audio",
+		"no-tui": "Display", "web": "Display", "window": "Display", "web-port": "Display", "web-addr": "Display",
+		"web-quality": "Display", "window-size": "Display",
+		"peer": "Peer", "takeover": "Peer",
+		"keys": "Debugging", "dump-frames": "Debugging", "dump-audio": "Debugging", "repaint-interval": "Debugging",
+		"SCT_DEBUG_WEB": "Debugging", "SCT_DEBUG_CONTROL": "Debugging",
+		"pair": "Commands", "peers": "Commands", "forget": "Commands", "update": "Commands", "version": "Commands", "help": "Commands",
+		"ANDROID_SERIAL": "Environment", "SCTERM_HOME": "Environment", "SCTERM_CHROME": "Environment",
+		"SCTERM_FIREFOX_KIOSK": "Environment", "SCT_AUDIO_DEVICE": "Environment",
+	} {
+		if under[name] != heading {
+			t.Errorf("%s is under %q, want %q", name, under[name], heading)
+		}
+	}
+	for _, v := range []string{"CHROME_BIN", "CHROMIUM_BIN"} {
+		if !strings.Contains(text["SCTERM_CHROME"], v) {
+			t.Errorf("the help does not mention %s beside SCTERM_CHROME", v)
+		}
+	}
+	for name, v := range map[string]string{"s": "SERIAL", "max-size": "PIXELS", "video-bit-rate": "RATE", "web-port": "PORT", "peer": "NAME"} {
+		if value[name] != v {
+			t.Errorf("-%s shows its value as %q, want %q", name, value[name], v)
+		}
+	}
+	if !strings.Contains(text["max-size"], "longer side") {
+		t.Errorf("--max-size does not say it caps the longer side: %q", text["max-size"])
+	}
+	if !strings.Contains(text["audio-codec"], "PCM") || strings.Contains(help, "PCI") {
+		t.Errorf("raw audio is PCM: %q", text["audio-codec"])
+	}
+	if examples < 3 || examples > 4 {
+		t.Errorf("%d examples, want 3 or 4", examples)
+	}
+}
+
+// TestHelpIsAskedForThreeWays: -h, --help and the help command ask for the
+// help, which parseFlags prints on stdout before exiting 0; nothing is
+// printed on the way.
+func TestHelpIsAskedForThreeWays(t *testing.T) {
+	for _, args := range [][]string{{"-h"}, {"--help"}, {"help"}, {"--web", "-h"}} {
+		var err error
+		var stderr string
+		stdout := captureStdout(t, func() {
+			stderr = captureStderr(t, func() { _, err = parse(t, args...) })
+		})
+		if !errors.Is(err, flag.ErrHelp) || stdout != "" || stderr != "" {
+			t.Errorf("%q: %v, stdout %.60q, stderr %.60q; want flag.ErrHelp and nothing printed", args, err, stdout, stderr)
+		}
+	}
+}
+
+// TestFlagMistakeIsOneLine: an unknown or malformed flag gets the flag
+// package's own message and a pointer to scterm -h, in one line, instead of
+// the whole help after it.
+func TestFlagMistakeIsOneLine(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--bogus"}, "flag provided but not defined: -bogus"},
+		{[]string{"--web-port"}, "flag needs an argument: -web-port"},
+		{[]string{"--web-port", "x"}, `invalid value "x" for flag -web-port`},
+		{[]string{"--audio=maybe"}, `invalid boolean value "maybe" for -audio`},
+	} {
+		var err error
+		stderr := captureStderr(t, func() { _, err = parse(t, tc.args...) })
+		if err == nil || !strings.HasPrefix(err.Error(), tc.want) ||
+			!strings.Contains(err.Error(), "scterm -h") || strings.Contains(err.Error(), "\n") {
+			t.Errorf("%q: %v; want one line starting %q and pointing to scterm -h", tc.args, err, tc.want)
+		}
+		if stderr != "" {
+			t.Errorf("%q printed %d bytes besides: %.80q", tc.args, len(stderr), stderr)
+		}
+	}
+}
+
+// TestScrcpyFlagNamesWork: scrcpy's names for scterm's flags do the same.
+func TestScrcpyFlagNamesWork(t *testing.T) {
+	for _, tc := range []struct{ scrcpy, scterm []string }{
+		{[]string{"--no-audio"}, []string{"--audio=false"}},
+		{[]string{"--no-video"}, []string{"--video=false"}},
+		{[]string{"--no-control"}, []string{"--control=false"}},
+		{[]string{"-n"}, []string{"--control=false"}},
+		{[]string{"--serial", "R5CT"}, []string{"-s", "R5CT"}},
+		{[]string{"-b", "16000000"}, []string{"--video-bit-rate", "16000000"}},
+		{[]string{"-m", "1920"}, []string{"--max-size", "1920"}},
+	} {
+		got, err1 := parse(t, tc.scrcpy...)
+		want, err2 := parse(t, tc.scterm...)
+		switch {
+		case err1 != nil || err2 != nil:
+			t.Errorf("%q, %q: %v, %v", tc.scrcpy, tc.scterm, err1, err2)
+		case got != want:
+			t.Errorf("%q gave %+v; %q gave %+v", tc.scrcpy, got, tc.scterm, want)
+		case got == defaultConfig():
+			t.Errorf("%q changed nothing", tc.scrcpy)
+		}
+	}
+}
+
+// TestBitRatesTakeKAndM: bit rates take scrcpy's K (x1000) and M (x1000000)
+// suffixes, in either case, as well as plain numbers; anything else is a
+// usage error naming the flag.
+func TestBitRatesTakeKAndM(t *testing.T) {
+	good := map[string]int{"8M": 8000000, "8m": 8000000, "128K": 128000, "128k": 128000,
+		"1.5M": 1500000, "2.25K": 2250, "8000000": 8000000, "96000": 96000}
+	// The server reads a bit rate into a Java int (Options.java), so 2148M
+	// is too much.
+	bad := []string{"12x", "8MB", "8 M", "M", "", "-1", "1e6", "0x10", "1.5", ".5M", "1.M", "1.2.3M", "2148M"}
+	for _, name := range []string{"--video-bit-rate", "-b", "--audio-bit-rate"} {
+		for in, want := range good {
+			cfg, err := parse(t, name, in)
+			got := cfg.videoBitRate
+			if name == "--audio-bit-rate" {
+				got = cfg.audioBitRate
+			}
+			if err != nil || got != want {
+				t.Errorf("%s %s: %d, %v; want %d", name, in, got, err, want)
+			}
+		}
+		for _, in := range bad {
+			if _, err := parse(t, name, in); err == nil || !strings.Contains(err.Error(), "-"+strings.TrimLeft(name, "-")+":") {
+				t.Errorf("%s %q: %v; want an error naming %s", name, in, err, name)
+			}
+		}
+	}
+}
+
+// TestMirrorFPSOnlyWarns: --mirror-fps never did anything. Old command lines
+// still run, with one line saying so.
+func TestMirrorFPSOnlyWarns(t *testing.T) {
+	var err error
+	stderr := captureStderr(t, func() { _, err = parse(t, "--mirror-fps", "30") })
+	if err != nil || stderr != "scterm: --mirror-fps does nothing and will be removed\n" {
+		t.Errorf("--mirror-fps 30: %v, stderr %q", err, stderr)
+	}
+	stderr = captureStderr(t, func() { _, err = parse(t, "--max-fps", "30") })
+	if err != nil || stderr != "" {
+		t.Errorf("--max-fps 30: %v, stderr %q", err, stderr)
 	}
 }
 

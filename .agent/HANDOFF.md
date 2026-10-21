@@ -7,6 +7,37 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 10: grouped help, scrcpy flag names)
+
+- `scterm -h`, `--help` and `scterm help` print the same help on stdout:
+  flags grouped as Device, Video, Audio, Display, Peer and Debugging, with
+  placeholders (`-s SERIAL`, `--max-size PIXELS`), each default once, and
+  sections for commands, environment variables and examples. It used to go to
+  stderr, sorted alphabetically, with some defaults twice and "PCI" for PCM.
+- A flag mistake is one line ending "run scterm -h for the commands and
+  flags" (exit 2) instead of the error and all 61 lines of usage.
+- scrcpy's names work: `--serial`, `-n`/`--no-control`, `--no-audio`,
+  `--no-video`, `-m` (`--max-size`) and `-b` (`--video-bit-rate`). Bit rates
+  take K and M, as in `8M`, `1.5M` and `128K`. Plain values must be decimal
+  digits: `-1`, `0x10`, `010` (octal 8) and `1_000` were accepted before, and
+  values over 2147483647 are now refused because the server reads an int. `0`
+  still means the server's default.
+- `--web` or `--window` with `--no-tui` exits 2 like other usage errors (it
+  exited 1). `--mirror-fps` is hidden from help; it still parses, and says it
+  does nothing and will be removed.
+- A leftover word that names a flag gets "did you mean --takeover?", also
+  for `NAME=value`, ahead of the quoting hint; one-letter words are skipped.
+  The cost: an unquoted name that contains a flag word, such as `--peer living
+  room window`, gets that hint.
+- adb's `detached` state says to run `adb -s SERIAL attach`, and
+  `TestSubcommandHelp` sets `SCTERM_HOME`. Both are from the part-4 review.
+- Verification: `gofmt`, `go vet ./...`, `go test ./...`, a `-race` run of the
+  command-line tests, and a build all passed. Ten of the new or extended tests
+  fail on the old code, run through a scratch shim. Real runs of `-h`,
+  `--help`, `help`, `--bogus`, `-b 12x`, `--web --no-tui`, `--peer Pixel
+  takeover` and `version` gave the expected output and exit codes; `version`
+  prints the same bytes as before. Not run: a device, or peer mode.
+
 ## Update (2026-10-20: QoL overhaul, part 7: AVX2 flag on amd64 only)
 
 - `-mavx2` was passed to the C compiler on every architecture, so an aarch64

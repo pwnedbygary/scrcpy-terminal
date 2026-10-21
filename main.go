@@ -49,11 +49,9 @@ type config struct {
 	takeover  bool   // take control on connect even if another device has it
 }
 
-func main() {
-	if runPeerCommand(os.Args[1:]) || runUpdateCommand(os.Args[1:]) {
-		return
-	}
-	cfg := config{
+// defaultConfig is the configuration flags start from.
+func defaultConfig() config {
+	return config{
 		video:           true,
 		audio:           true,
 		control:         true,
@@ -65,6 +63,13 @@ func main() {
 		webPort:         6969,
 		webQuality:      5,
 	}
+}
+
+func main() {
+	if runPeerCommand(os.Args[1:]) || runUpdateCommand(os.Args[1:]) {
+		return
+	}
+	cfg := defaultConfig()
 	var mirrorFPS float64
 	parseFlags(&cfg, &mirrorFPS)
 	if cfg.keys {
@@ -77,9 +82,6 @@ func main() {
 	// mouse grab). --no-tui still means "no display at all".
 	if cfg.window {
 		cfg.web = true
-	}
-	if cfg.web && cfg.noTUI {
-		fatal(fmt.Errorf("--web/--window and --no-tui are mutually exclusive"))
 	}
 	if err := validateConfig(cfg); err != nil {
 		usageError(err.Error())

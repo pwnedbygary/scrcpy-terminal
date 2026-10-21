@@ -108,6 +108,8 @@ func pickDevice(list string) (string, error) {
 		return "", fmt.Errorf("%s is offline: unplug and replug it, or restart adb with 'adb kill-server'", serial)
 	case "authorizing", "connecting":
 		return "", fmt.Errorf("%s is still %s: try again in a moment", serial, state)
+	case "detached":
+		return "", fmt.Errorf("%s is detached from adb: attach it again with 'adb -s %s attach'", serial, serial)
 	default:
 		return "", fmt.Errorf("%s is in %s mode, not ready for scterm: start Android on it normally", serial, state)
 	}
