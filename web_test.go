@@ -136,15 +136,3 @@ func TestAsciiKey(t *testing.T) {
 		}
 	}
 }
-
-func TestHeadlessKey(t *testing.T) {
-	want := map[string]uint32{
-		"home": 3, "menu": 82, "appswitch": 187, "power": 26,
-		"volup": 24, "voldown": 25, "mute": 164, "nope": 0,
-	}
-	for op, code := range want {
-		if got := headlessKey(op); got != code {
-			t.Errorf("headlessKey(%q) = %d, want %d", op, got, code)
-		}
-	}
-}

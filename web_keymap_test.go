@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -206,7 +209,7 @@ func TestMnemonicEntriesAreDispatchable(t *testing.T) {
 	// same letter (except the letterless Menu-key row).
 	for _, it := range menuItems {
 		switch it.Op {
-		case opKeyboard, opMenuKey, "screenshot", "quit":
+		case "keyboard", "screenshot", "quit":
 			continue
 		}
 		if !isAppOp(it.Op) {
@@ -292,21 +295,119 @@ func TestToolbarButtonsAreRealActions(t *testing.T) {
 }
 
 // TestWebOpsReachTheSameActionsAsTheTerminal checks the dispatch actually used
-// by the browsers: the ops the page can send for app keys must resolve to the
-// same Android keycode the terminal's F-keys produce.
+// by the browsers: every device action the page can name puts the same bytes
+// on the control socket as the terminal's dispatch (applyAppOp, behind the
+// F-keys, the chords, the menu and the bar), through the browser dispatcher
+// and through the one a web server without an app loop uses.
 func TestWebOpsReachTheSameActionsAsTheTerminal(t *testing.T) {
-	// F1..F7 -> keycode, via the shared table.
-	for i := 0; i < 7; i++ {
-		fKeyCode := uint32(131 + i)
-		op := appFKeyOp(fKeyCode)
-		fromFKey := appKeyOps[op]
-		fromWeb := headlessKey(op) // the path --web --no-tui uses
-		if fromWeb != fromFKey || fromWeb == 0 {
-			t.Errorf("F%d: terminal sends %d, browser headless sends %d",
-				i+1, fromFKey, fromWeb)
+	for _, act := range actionCatalog.Device {
+		term := &capConn{}
+		newTestApp(newController(term)).applyAppOp(act.ID)
+		if len(term.captured) == 0 {
+			t.Errorf("%s: the terminal sent nothing", act.ID)
+		}
+		want := bytes.Join(term.captured, nil)
+
+		browser := &capConn{}
+		withApp := &webServer{app: newTestApp(newController(browser)), volKick: make(chan struct{}, 1)}
+		withApp.applyControl(nil, &webEvent{Op: act.ID})
+		if got := bytes.Join(browser.captured, nil); !bytes.Equal(got, want) {
+			t.Errorf("%s: browser dispatcher sent % x, terminal % x", act.ID, got, want)
+		}
+
+		headless := &capConn{}
+		noApp := &webServer{ctrl: newController(headless), volKick: make(chan struct{}, 1)}
+		noApp.applyControl(nil, &webEvent{Op: act.ID})
+		if got := bytes.Join(headless.captured, nil); !bytes.Equal(got, want) {
+			t.Errorf("%s: headless dispatcher sent % x, terminal % x", act.ID, got, want)
+		}
+	}
+	for _, op := range []string{"nope", "", "HOME", "menukey", "keyboard", "screenshot", "toolbar"} {
+		browser, headless := &capConn{}, &capConn{}
+		(&webServer{app: newTestApp(newController(browser)), volKick: make(chan struct{}, 1)}).applyControl(nil, &webEvent{Op: op})
+		(&webServer{ctrl: newController(headless), volKick: make(chan struct{}, 1)}).applyControl(nil, &webEvent{Op: op})
+		if len(browser.captured)+len(headless.captured) != 0 {
+			t.Errorf("op %q reached the device", op)
 		}
 	}
 	if strings.TrimSpace(appFKeyOp(142)) != "grab" {
 		t.Errorf("F12 should be grab, got %q", appFKeyOp(142))
 	}
+}
+
+// failConn is a control socket whose writes fail after the first okWrites.
+type failConn struct {
+	capConn
+	okWrites int
+}
+
+func (f *failConn) Write(p []byte) (int, error) {
+	if len(f.captured) >= f.okWrites {
+		return 0, errors.New("broken pipe")
+	}
+	return f.capConn.Write(p)
+}
+
+// TestVolumeActionsRefreshTheDeviceVolume: after a volume key the page's
+// device volume is re-read at once, through either dispatcher, even when the
+// write fails part-way (the key-down may already have reached the device) or
+// there is no control socket. Other actions do not ask for a refresh.
+func TestVolumeActionsRefreshTheDeviceVolume(t *testing.T) {
+	controllers := map[string]func() *controller{
+		"working":            func() *controller { return newController(&capConn{}) },
+		"no controller":      func() *controller { return nil },
+		"first write fails":  func() *controller { return newController(&failConn{}) },
+		"second write fails": func() *controller { return newController(&failConn{okWrites: 1}) },
+	}
+	for name, ctrl := range controllers {
+		for _, op := range []string{"volup", "voldown", "mute", "home"} {
+			want := op != "home"
+			withApp := &webServer{app: newTestApp(ctrl()), volKick: make(chan struct{}, 1)}
+			withApp.applyControl(nil, &webEvent{Op: op})
+			if got := len(withApp.volKick) == 1; got != want {
+				t.Errorf("%s, %s, browser dispatcher: refresh asked = %v, want %v", name, op, got, want)
+			}
+			noApp := &webServer{ctrl: ctrl(), volKick: make(chan struct{}, 1)}
+			noApp.applyControl(nil, &webEvent{Op: op})
+			if got := len(noApp.volKick) == 1; got != want {
+				t.Errorf("%s, %s, headless dispatcher: refresh asked = %v, want %v", name, op, got, want)
+			}
+		}
+	}
+}
+
+// TestFailedKeyActionIsReported: a keycode action that cannot be written is
+// reported on stderr, as the terminal always has; without a control socket
+// (--control=false) there is nothing to report.
+func TestFailedKeyActionIsReported(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		ctrl   *controller
+		report bool
+	}{
+		{"failing socket", newController(&failConn{}), true},
+		{"no controller", nil, false},
+	} {
+		out := captureStderr(t, func() { newTestApp(tc.ctrl).applyAppOp("home") })
+		if got := strings.Contains(out, "scterm: inject key:"); got != tc.report {
+			t.Errorf("%s: reported = %v, want %v (stderr %q)", tc.name, got, tc.report, out)
+		}
+	}
+}
+
+// captureStderr runs fn with os.Stderr redirected to a pipe and returns what
+// it wrote. Tests are not parallel in this package, so the swap is safe.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	fn()
+	_ = w.Close()
+	os.Stderr = old
+	out, _ := io.ReadAll(r)
+	return string(out)
 }

@@ -7,6 +7,51 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 1: shared action catalog)
+
+- Branch `overhaul` from `62d6cfa`; one independently reviewed commit per
+  change, pushed as each passes, with a draft pull request to `main`. Scope:
+  quality of life and looks across the web player, terminal UI, command line,
+  Android app and docs, from read-only surveys of each area at `62d6cfa`.
+- Owner decisions: Quit from the action bar, menu or controls sheet needs a
+  second press within about 2 s, Alt+Q still quits at once, Ctrl+C keeps going
+  to the phone and the quit hint stays visible; Android polish uses framework
+  widgets only (no new libraries); when the browser has no AudioWorklet (plain
+  http from another machine) the player falls back to an older audio path and
+  says so; no license chosen yet, so none is added.
+- This commit finishes the unfinished catalog work from the main checkout's
+  `feat/qol-features` working tree (applied byte-identical; that checkout is
+  untouched): `protocol/fixtures/actions.json` v2 (kind, label, short, views)
+  drives the Go chord, keycode, F-key, menu and bar tables (`actions.go`) and
+  one dispatch path for the terminal, the browser dispatcher and the app-less
+  web server the tests build (main refuses `--web --no-tui`). The webBar view
+  records the web toolbar's order only: `web/index.html` still keeps its own
+  list and labels. Finished: the keymap test no longer names the removed
+  constants, `TestActionDispatchIsTheGoldenWire` pins every device action to
+  Android's published keycodes and the hand-derived wire fixture, and the
+  per-action app helpers left without callers are removed.
+- Review round 1 (NEEDS CHANGES) resolved: the app-less dispatcher refreshes
+  the device volume after a failed write again, as before; new dispatcher
+  tests cover that refresh, the inject-key report and a missing controller
+  (each fails when its behaviour is removed); a missing controller is refused
+  before the debug log; the loader folds chord case, requires visible ASCII
+  chords and lets only Back's down/up pair repeat a control name (the Android
+  client sends each listed message); the comments in this commit's files that
+  called the web toolbar a catalog view, placed the chord table in
+  `appkeys.go` or named a `--web --no-tui` dispatch path are corrected
+  (`menu.go`, `actions.go`, the catalog's `about`, `webinput.go`,
+  `Actions.kt`); the test-only `headlessKey` and its test are replaced by a
+  test that drives all three dispatchers and compares wire bytes.
+- Still open from that review: comments in `input.go`, `web/player.js` and
+  `web/input_test.mjs` still place the chord table in `appkeys.go` (the
+  commits that change those files correct them), and `web.go` and
+  `web_e2e_test.go` still describe a `--web --no-tui` mode that main refuses.
+- Verification: `go vet ./...`, `go test ./...` (node suites ran, not
+  skipped) and `go build -trimpath` passed; mutating the mute keycode to 91 in
+  a scratch copy makes the golden test fail. Gradle not run (the offline cache
+  lacks the pinned toolchain); the Kotlin catalog test parses the fixture
+  generically and its v1 fields are unchanged, so CI covers it.
+
 ## Update (2026-10-13: paired-device readiness, part 3)
 
 - Base `34cfc2b`: part 2 independently reviewed PASS, committed and pushed

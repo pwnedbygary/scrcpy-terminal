@@ -40,25 +40,8 @@ type barItem struct {
 	Short string
 }
 
-var barItems = []barItem{
-	{menuItem{'h', "home", "Home"}, "Home"},
-	{menuItem{'b', "back", "Back"}, "Back"},
-	{menuItem{'t', "appswitch", "Recents"}, "Rec"},
-	{menuItem{0, opMenuKey, "Menu key"}, "Menu"},
-	{menuItem{'u', "volup", "Volume up"}, "Vol+"},
-	{menuItem{'d', "voldown", "Volume down"}, "Vol-"},
-	{menuItem{0, "mute", "Mute"}, "Mute"},
-	{menuItem{'r', "rotate", "Rotate"}, "Rot"},
-	{menuItem{'n', "notif", "Notifications"}, "Notif"},
-	{menuItem{'e', "settings", "Settings shade"}, "Shade"},
-	{menuItem{'c', "collapse", "Collapse panels"}, "Collapse"},
-	{menuItem{'p', "power", "Power"}, "Power"},
-	{menuItem{'i', opKeyboard, "Keyboard"}, "Keys"},
-	{menuItem{'s', "screenshot", "Screenshot"}, "Shot"},
-	{menuItem{'k', "resetvideo", "Keyframe"}, "Refresh"},
-	{menuItem{'g', "grab", "Grab"}, "Grab"},
-	{menuItem{'q', "quit", "Quit"}, "Quit"},
-}
+// barItems is derived from the action catalog's views.tuiBar in actions.go,
+// alongside menuItems: the labels and the order live in one place.
 
 // barHit is one clickable region of the rendered bar: rune columns (0-based,
 // [from,to)) on the bar's overlay line. scroll != 0 marks the ‹ / › edges;

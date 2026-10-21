@@ -1,26 +1,31 @@
 {
-  "version": 1,
-  "about": "One definition of the app-level actions shared by the TUI, web/window player and Android controller (appkeys.go, web/player.js, android DeviceAction/LocalAction). 'mute' is KEYCODE_VOLUME_MUTE (164): KEYCODE_MUTE (91) toggles the microphone.",
+  "version": 2,
+  "about": "One definition of the app-level actions shared by the TUI, web/window player and Android controller (actions.go, web/player.js + web/index.html, android DeviceAction/LocalAction). kind: 'keycode' sends the Android keycode as a down/up pair, 'control' sends exactly the named scrcpy control messages, 'app' is frontend state every frontend shares, 'frontend' is each frontend's own effect. A control name listed twice is one full press (back_or_screen_on down then up). 'mute' is KEYCODE_VOLUME_MUTE (164): KEYCODE_MUTE (91) toggles the microphone. views list the display order of the TUI menu (tuiMenu) and the TUI action bar (tuiBar), which the Go client builds from them, and of the web toolbar (webBar), which web/index.html repeats by hand; an id may appear in one view and not another.",
   "device": [
-    {"id": "home", "mnemonic": "h", "fkey": 1, "keycode": 3},
-    {"id": "menu", "fkey": 2, "keycode": 82},
-    {"id": "appswitch", "mnemonic": "t", "fkey": 3, "keycode": 187},
-    {"id": "power", "mnemonic": "p", "fkey": 4, "keycode": 26},
-    {"id": "voldown", "mnemonic": "d", "fkey": 5, "keycode": 25},
-    {"id": "volup", "mnemonic": "u", "fkey": 6, "keycode": 24},
-    {"id": "mute", "fkey": 7, "keycode": 164},
-    {"id": "rotate", "mnemonic": "r", "fkey": 8, "control": ["rotate_device"]},
-    {"id": "notif", "mnemonic": "n", "fkey": 9, "control": ["expand_notification_panel"]},
-    {"id": "settings", "mnemonic": "e", "fkey": 10, "control": ["expand_settings_panel"]},
-    {"id": "collapse", "mnemonic": "c", "fkey": 11, "control": ["collapse_panels"]},
-    {"id": "back", "mnemonic": "b", "control": ["back_or_screen_on", "back_or_screen_on"]},
-    {"id": "resetvideo", "mnemonic": "k", "control": ["reset_video"]}
+    {"id": "home", "mnemonic": "h", "fkey": 1, "keycode": 3, "kind": "keycode", "label": "Home", "short": "Home"},
+    {"id": "menu", "fkey": 2, "keycode": 82, "kind": "keycode", "label": "Menu key", "short": "Menu"},
+    {"id": "appswitch", "mnemonic": "t", "fkey": 3, "keycode": 187, "kind": "keycode", "label": "Recents", "short": "Rec"},
+    {"id": "power", "mnemonic": "p", "fkey": 4, "keycode": 26, "kind": "keycode", "label": "Power", "short": "Power"},
+    {"id": "voldown", "mnemonic": "d", "fkey": 5, "keycode": 25, "kind": "keycode", "label": "Volume down", "short": "Vol-"},
+    {"id": "volup", "mnemonic": "u", "fkey": 6, "keycode": 24, "kind": "keycode", "label": "Volume up", "short": "Vol+"},
+    {"id": "mute", "fkey": 7, "keycode": 164, "kind": "keycode", "label": "Mute", "short": "Mute"},
+    {"id": "rotate", "mnemonic": "r", "fkey": 8, "kind": "control", "control": ["rotate_device"], "label": "Rotate", "short": "Rot"},
+    {"id": "notif", "mnemonic": "n", "fkey": 9, "kind": "control", "control": ["expand_notification_panel"], "label": "Notifications", "short": "Notif"},
+    {"id": "settings", "mnemonic": "e", "fkey": 10, "kind": "control", "control": ["expand_settings_panel"], "label": "Settings shade", "short": "Shade"},
+    {"id": "collapse", "mnemonic": "c", "fkey": 11, "kind": "control", "control": ["collapse_panels"], "label": "Collapse panels", "short": "Collapse"},
+    {"id": "back", "mnemonic": "b", "kind": "control", "control": ["back_or_screen_on", "back_or_screen_on"], "label": "Back", "short": "Back"},
+    {"id": "resetvideo", "mnemonic": "k", "kind": "control", "control": ["reset_video"], "label": "Keyframe", "short": "Refresh"}
   ],
   "local": [
-    {"id": "grab", "mnemonic": "g", "fkey": 12},
-    {"id": "keyboard", "mnemonic": "i"},
-    {"id": "screenshot", "mnemonic": "s"},
-    {"id": "quit", "mnemonic": "q"},
-    {"id": "toolbar", "mnemonic": "/"}
-  ]
+    {"id": "grab", "mnemonic": "g", "fkey": 12, "kind": "app", "label": "Grab", "short": "Grab"},
+    {"id": "keyboard", "mnemonic": "i", "kind": "frontend", "label": "Keyboard", "short": "Keys"},
+    {"id": "screenshot", "mnemonic": "s", "kind": "frontend", "label": "Screenshot", "short": "Shot"},
+    {"id": "quit", "mnemonic": "q", "kind": "app", "label": "Quit", "short": "Quit"},
+    {"id": "toolbar", "mnemonic": "/", "kind": "frontend", "label": "Controls", "short": "Controls"}
+  ],
+  "views": {
+    "tuiMenu": ["home", "back", "appswitch", "menu", "power", "volup", "voldown", "collapse", "notif", "settings", "rotate", "grab", "screenshot", "resetvideo", "keyboard", "quit"],
+    "tuiBar": ["home", "back", "appswitch", "menu", "volup", "voldown", "mute", "rotate", "notif", "settings", "collapse", "power", "keyboard", "screenshot", "resetvideo", "grab", "quit"],
+    "webBar": ["back", "home", "appswitch", "menu", "toolbar", "volup", "voldown", "mute", "rotate", "notif", "settings", "collapse", "power", "keyboard", "screenshot", "resetvideo", "grab", "quit"]
+  }
 }

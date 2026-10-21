@@ -2,8 +2,9 @@ package io.github.pwnedbygary.scterm.protocol
 
 /**
  * Device actions every frontend offers: TUI F-keys and Alt mnemonics, the web
- * action bar, the Android toolbar. Mirrors appkeys.go; both are pinned to
- * protocol/fixtures/actions.json so the tables cannot drift apart.
+ * action bar, the Android toolbar. The Go client derives its tables from
+ * protocol/fixtures/actions.json (actions.go), and these enums are pinned to the
+ * same file, so the two cannot drift apart.
  */
 enum class DeviceAction(val id: String, val mnemonic: Char?, val fKey: Int?, val keycode: Int?) {
     HOME("home", 'h', 1, AndroidInput.KEYCODE_HOME),
