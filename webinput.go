@@ -165,7 +165,7 @@ func (s *webServer) applyEventHeadless(c *webClient, ev *webEvent) {
 	case "text":
 		s.typeHeadless(ev.Text)
 	case "quit":
-		s.quit()
+		s.stopWith(webByeQuit)
 	default:
 		// The same catalog dispatch the terminal and the browser dispatcher
 		// use (actions.go). A failed write still refreshes the volume readout,
@@ -315,7 +315,7 @@ func asciiKey(c byte) (uint32, uint32, bool) {
 // quitWeb ends a --web/--window session from a client request.
 func (a *app) quitWeb() {
 	if a.web != nil {
-		a.web.stop()
+		a.web.stopWith(webByeQuit)
 	}
 	select {
 	case a.events <- inputEvent{kind: evQuit}:

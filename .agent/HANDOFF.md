@@ -71,6 +71,63 @@ here is a snapshot, not proof that no other work has started.
   takeover` and `version` gave the expected output and exit codes; `version`
   prints the same bytes as before. Not run: a device, or peer mode.
 
+## Update (2026-10-20: QoL overhaul, part 8: browser connection states)
+
+- The page says what it is waiting for whenever it is not showing live video:
+  a card over the dimmed last frame reads "Connecting…", "Waiting for video
+  from <device>…", "Connection lost. Reconnecting…", or "Session ended" with
+  the reason and a Reconnect button. Before, the state lived only in the HUD,
+  which hides after 2.5 s, so a lost connection looked like a frozen picture
+  and an ended session looked like an endless reconnect.
+- Each viewer's socket now ends with `{"op":"bye","reason":...}` as the last
+  message before the close frame (code still 1000), written under one lock
+  hold so no frame or status can come between: "Quit from the browser." for
+  the Quit button and Alt+Q, "The device stream ended." when the video stream
+  ends in `--web` or `--window`, and "scterm stopped." for signals and server
+  errors. When the last `--window` viewer leaves, nobody is left to read one.
+  Additive: `web/check.mjs` ignores unknown ops.
+- The page stops retrying on a bye. Reconnect starts again without a reload,
+  and the card reads "Reconnecting…" at once, even while the ended socket is
+  still closing, so a late frame on it cannot make the session look live. The
+  button takes the focus when it appears. From the bye on there is no device
+  to send keys to, so the page leaves every key to the browser: Enter or Space
+  presses the focused button, Tab and Shift+Tab move between the page's
+  buttons and back, F5 reloads as on any page, and a key typed between the bye
+  and the close is not sent. Esc still closes the controls sheet.
+- A later `stop()` waits, for up to 5 s, until the first has finished. The app
+  loop calls it on its way out of the process, and returning at once let the
+  process exit before a Quit from the browser had written the byes or closed
+  the `--window` browser; adb mode's 200 ms pause in `sess.stop()` usually hid
+  it, and `--peer` has no such pause. The byes go to all viewers at once, so
+  one that stopped reading delays only its own.
+- HUD: the device name stays (each status message replaced it with the
+  resolution) and names the page title (`<device> · scterm`); the fps reading
+  says "idle" after 2 s without a painted frame, also while disconnected;
+  decode errors and lost frames turn the state red for 5 s instead of until a
+  reload (lost frames used to turn it yellow, and only past 30); the
+  resolution shows the video size before the first frame instead of 0×0.
+- Known gap, not changed here: `writeJSON` marks a client closed after a
+  failed write, so the later `close()` leaves its socket open and the client
+  registered.
+- Verification: `gofmt`, `go vet ./...`, `go test ./...` and `go test -race
+  ./...` passed, and the bye tests 30 times under `-race`. Node suites: input
+  110/0, pointer 17/0, worklet 17/0, conn 61/0, page 56/0. `web/page_test.mjs`
+  runs the whole `player.js` against a stand-in DOM built from `index.html`;
+  each of 22 one-line mutations of the page wiring fails it or `conn_test`.
+  Against the old `web.go`, `webinput.go` and `app.go` the bye tests fail (no
+  bye before the close). Against this part's first reviewed round, a second
+  `stop()` returned at once, the page and card suites failed 7 and 5 checks,
+  and a status landed between the bye and the close frame (that test races
+  writers against the stop, so it catches the old code in most runs, not
+  all). Against the second round's `player.js`, the page suite fails 4 checks
+  (a key sent after the bye, Tab kept off the button, Enter on the picture,
+  Esc from the button); dropping the ended check, moving it above the sheet's
+  Esc, or keeping `ended` across Reconnect each fail it. Headless Chrome 155,
+  driving the real page against a fake socket: Tab off Reconnect and
+  Shift+Tab back, Enter presses it, keys reach the new socket, Esc closes the
+  sheet from it. Not run: layout, fades, reduced motion, a screen reader, a
+  device, `--window` or `--peer`; the stream end was simulated with a pipe.
+
 ## Update (2026-10-20: QoL overhaul, part 7: AVX2 flag on amd64 only)
 
 - `-mavx2` was passed to the C compiler on every architecture, so an aarch64

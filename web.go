@@ -48,7 +48,8 @@ import (
 //	0x02 audio : PCM s16le stereo 48 kHz
 //	0x03 hello : JSON (server capabilities, sent right after the client hello)
 //
-// Text (server -> client): JSON status/ack messages.
+// Text (server -> client): JSON status/ack messages, and a last
+// {"op":"bye","reason":...} just before the server closes the socket.
 // Text (client -> server): JSON control events, see webEvent.
 const (
 	webMsgVideo = 0x01
@@ -269,6 +270,9 @@ type webServer struct {
 	url     string
 	closing atomic.Bool
 	done    chan struct{}
+	// stopped is closed when the first stop has finished: the byes and close
+	// frames are written and the window is gone.
+	stopped chan struct{}
 
 	nClients atomic.Int64
 	// hadClient is true once any viewer has connected, ever. It is what tells
@@ -472,6 +476,7 @@ func newWebServer(cfg config, sess *session, stream *streamState, audio *audioSi
 		inbox:    make(chan webCmd, webInbox),
 		ready:    make(chan struct{}),
 		done:     make(chan struct{}),
+		stopped:  make(chan struct{}),
 		volKick:  make(chan struct{}, 1),
 	}
 	s.devVolIdx.Store(-1) // no reading yet; 0 would mean "device muted"
@@ -557,9 +562,27 @@ func (s *webServer) run(openWindow bool) error {
 
 // stop shuts the server down and disconnects every client.
 func (s *webServer) stop() {
+	s.stopWith(webByeStopped)
+}
+
+// webStopWait bounds how long a later stop waits for the first to finish: a
+// viewer that stopped reading can hold its socket for the full write timeout.
+const webStopWait = 5 * time.Second
+
+// stopWith is stop, telling every client why in a bye, the last message before
+// its close frame. Only the first call stops the server, so its reason is the
+// one shown. A later call waits for the first to finish: the app loop stops
+// the server again on its way out of the process, and must not exit while a
+// Quit from the browser is still writing the byes or closing the window.
+func (s *webServer) stopWith(reason string) {
 	if s.closing.Swap(true) {
+		select {
+		case <-s.stopped:
+		case <-time.After(webStopWait):
+		}
 		return
 	}
+	defer close(s.stopped)
 	close(s.done)
 	if s.http != nil {
 		ctx, cancel := timeoutContext(2 * time.Second)
@@ -572,9 +595,13 @@ func (s *webServer) stop() {
 	s.clientsMu.Lock()
 	clients := append([]*webClient(nil), s.clients...)
 	s.clientsMu.Unlock()
+	// All at once, so a viewer that stopped reading delays only its own bye.
+	bye := byeMessage(reason)
+	var wg sync.WaitGroup
 	for _, c := range clients {
-		c.close()
+		wg.Go(func() { c.closeWith(bye) })
 	}
+	wg.Wait()
 	// Close the window we opened: it displays nothing without the server, and
 	// an orphan would hold the private profile lock against the next run.
 	s.killWindow()
@@ -835,12 +862,16 @@ func (s *webServer) handleWS(w http.ResponseWriter, r *http.Request) {
 // client loops
 // ---------------------------------------------------------------------------
 
-func (c *webClient) close() {
+func (c *webClient) close() { c.closeWith("") }
+
+// closeWith is close, sending last (if not empty) as the final message before
+// the close frame.
+func (c *webClient) closeWith(last string) {
 	if c.closed.Swap(true) {
 		return
 	}
 	close(c.closeCh)
-	_ = c.ws.Close()
+	_ = c.ws.CloseWith(last)
 	c.frameMu.Lock()
 	if c.frame != nil {
 		c.srv.poolPut(c.frame.rgb)
@@ -1244,6 +1275,30 @@ func (c *webClient) sendStatus() {
 		HostAudio: c.srv.audio != nil && !c.srv.audio.silent.Load(),
 	}
 	c.writeJSON(st)
+}
+
+// The reasons a bye gives. The page shows them to the viewer under "Session
+// ended", so they are sentences, not codes.
+const (
+	webByeQuit        = "Quit from the browser."
+	webByeStreamEnded = "The device stream ended."
+	webByeStopped     = "scterm stopped."
+)
+
+// webBye is the last message a client gets before the server closes its
+// socket. The page stops reconnecting when it sees one.
+type webBye struct {
+	Op     string `json:"op"`
+	Reason string `json:"reason"`
+}
+
+// byeMessage is the bye for reason, encoded for closeWith.
+func byeMessage(reason string) string {
+	b, err := json.Marshal(webBye{Op: "bye", Reason: reason})
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func (c *webClient) writeJSON(v any) {

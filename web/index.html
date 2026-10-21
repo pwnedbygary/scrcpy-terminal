@@ -9,6 +9,16 @@
 <body>
 <canvas id="screen" width="480" height="1080"></canvas>
 
+<!-- Connection status card: says what the page is waiting for whenever it is
+     not showing live video (player.js picks the words). Only the Reconnect
+     button takes pointer events, so the card never blocks input to the
+     canvas. -->
+<div id="conn" role="status" aria-live="polite">
+  <p id="conn-text">Connecting…</p>
+  <p id="conn-detail"></p>
+  <button id="conn-retry" type="button" hidden>Reconnect</button>
+</div>
+
 <!-- Local pointer indication (hover ghost, drag trail, touch ripples). It
      never talks to the device; player.js paints it from the same events that
      do. Kept as DOM elements so CSS does the animation. -->

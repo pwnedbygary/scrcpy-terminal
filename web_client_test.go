@@ -22,6 +22,8 @@ func TestWebClientSuites(t *testing.T) {
 		"web/input_test.mjs",   // pointer/keyboard mapping, terminal key parity
 		"web/worklet_test.mjs", // the PCM sink itself: buffering, sizes, stats
 		"web/pointer_test.mjs", // the visible pointer: ghost, drag, touch ripples
+		"web/conn_test.mjs",    // the status card, the reconnect policy, the HUD readouts
+		"web/page_test.mjs",    // the whole page's connection wiring, end to end
 	} {
 		suite := suite
 		t.Run(filepath.Base(suite), func(t *testing.T) {

@@ -137,7 +137,11 @@ func wsUpgrade(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 
 // Close sends a close frame (best effort) and closes the TCP connection.
 // It is safe to call from any goroutine, repeatedly.
-func (c *wsConn) Close() error {
+func (c *wsConn) Close() error { return c.CloseWith("") }
+
+// CloseWith is Close with one last text message ahead of the close frame,
+// written under the same lock hold so that no other frame can come between.
+func (c *wsConn) CloseWith(last string) error {
 	if c == nil || c.conn == nil {
 		return nil
 	}
@@ -145,6 +149,9 @@ func (c *wsConn) Close() error {
 		// Take the write lock so the close frame cannot interleave with a
 		// frame that is mid-write, then take the socket down.
 		c.wmu.Lock()
+		if last != "" {
+			_ = c.writeFrame(wsOpText, []byte(last))
+		}
 		_ = c.writeFrame(wsOpClose, []byte{0x03, 0xe8}) // 1000 normal closure
 		_ = c.conn.Close()
 		c.wmu.Unlock()

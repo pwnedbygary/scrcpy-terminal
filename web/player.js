@@ -20,6 +20,10 @@ const els = {
   state: document.getElementById("state"),
   toast: document.getElementById("toast"),
   ime: document.getElementById("ime"),
+  conn: document.getElementById("conn"),
+  connText: document.getElementById("conn-text"),
+  connDetail: document.getElementById("conn-detail"),
+  connRetry: document.getElementById("conn-retry"),
 };
 
 const MSG_VIDEO = 0x01;
@@ -60,6 +64,10 @@ class Net {
     // which is why the browser never got audio (the server only feeds PCM to a
     // client that asked for it with caps:"audio").
     this.onOpen = null;
+    this.onClose = null;
+    // ended: the server said "bye", so the session is over and a closed socket
+    // stays closed until reconnect() -- retrying would only find it gone.
+    this.ended = false;
     this.queue = [];
   }
 
@@ -92,6 +100,11 @@ class Net {
     ws.onmessage = (ev) => this.dispatch(ev);
     ws.onclose = () => {
       this.connected = false;
+      if (this.onClose) this.onClose();
+      if (this.ended) {
+        setState("session ended", "warn");
+        return;
+      }
       setState("reconnecting…", "warn");
       const wait = this.backoff;
       this.backoff = Math.min(this.backoff * 2, 4000);
@@ -104,6 +117,7 @@ class Net {
     if (typeof ev.data === "string") {
       let msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.op === "bye") this.ended = true;
       const fn = this.handlers[msg.op];
       if (fn) fn(msg);
       return;
@@ -144,6 +158,14 @@ class Net {
     ws.send(JSON.stringify(obj));
     return true;
   }
+
+  // reconnect restarts the retry loop that a bye stopped. A socket that is
+  // still closing reconnects from its own onclose.
+  reconnect() {
+    this.ended = false;
+    this.backoff = 250;
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) this.connect();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +183,7 @@ class View {
     this.lastDraw = 0;
     this.fps = 0;
     this.errors = 0;   // frames that could not be decoded
+    this.errorAt = -Infinity; // when the last of them failed
     this.fitW = 0;     // element size last applied by fit()
     this.fitH = 0;
   }
@@ -250,6 +273,7 @@ class View {
       })
       .catch(() => {
         this.errors++;
+        this.errorAt = performance.now();
         done();
       });
   }
@@ -759,6 +783,10 @@ class Input {
       toolbar.hideSheet();
       return;
     }
+    // After a bye there is no device to send keys to, so the browser keeps them
+    // all: Tab moves between the page's buttons, and Enter or Space presses the
+    // focused one.
+    if (this.net.ended) return;
     // `name` is the physical key, or the nearest equivalent a phone keyboard
     // offers: soft keyboards routinely leave `code` empty, which used to make
     // every hotkey below unreachable from one.
@@ -1064,6 +1092,94 @@ class Toolbar {
 }
 
 // ---------------------------------------------------------------------------
+// connection status: the card over the canvas, the page title and the HUD
+// readouts. Pure rules with no DOM access: web/conn_test.mjs lifts this
+// section, up to "end of connection status", and runs it on its own.
+// ---------------------------------------------------------------------------
+
+const IDLE_MS = 2000;   // no frame painted for this long: the fps readout says "idle"
+const GLITCH_MS = 5000; // a decode error or lost frame keeps the state red this long
+
+class ConnState {
+  constructor() {
+    this.opened = false;    // a hello arrived on some socket: the page was connected once
+    this.connected = false; // a hello arrived on the current socket
+    this.bye = null;        // the server's reason for ending the session
+    this.frame = false;     // a video frame arrived on the current socket
+    this.device = "";       // device name from the last hello that had one
+    this.retry = false;     // Reconnect was pressed and no hello has come since
+  }
+
+  hello(device) {
+    this.opened = true;
+    this.connected = true;
+    this.retry = false;
+    if (device) this.device = device;
+  }
+
+  video() { this.frame = true; }
+
+  closed() {
+    this.connected = false;
+    this.frame = false;
+  }
+
+  ended(reason) { this.bye = reason || ""; }
+
+  // reconnect is the Reconnect button. The ended session's socket can still be
+  // open or closing, and nothing that arrives on it counts any more.
+  reconnect() {
+    this.bye = null;
+    this.connected = false;
+    this.retry = true;
+  }
+
+  // card is what the status card says, or null while live video is showing.
+  // A bye outranks the rest: frames still in flight must not hide it.
+  card() {
+    if (this.bye !== null) return { text: "Session ended", detail: this.bye, button: "Reconnect" };
+    if (!this.connected) {
+      if (this.retry) return { text: "Reconnecting…" };
+      return { text: this.opened ? "Connection lost. Reconnecting…" : "Connecting…" };
+    }
+    if (!this.frame) return { text: "Waiting for video from " + (this.device || "the device") + "…" };
+    return null;
+  }
+
+  title() {
+    return this.device ? this.device + " · scterm" : "scterm";
+  }
+}
+
+// fpsLabel is the HUD's frame rate, or "idle" once no frame has been painted
+// for IDLE_MS (msSinceFrame is Infinity before the first one).
+function fpsLabel(fps, msSinceFrame) {
+  return msSinceFrame >= IDLE_MS ? "idle" : fps.toFixed(1) + " fps";
+}
+
+// stateLabel is the HUD's state text and colour. Decode errors and lost
+// frames turn it red only while recent, so one glitch does not stay red until
+// a reload (the ms values are Infinity when it never happened).
+function stateLabel(control, msSinceError, msSinceLost) {
+  if (!control) return { text: "control disabled", cls: "warn" };
+  if (msSinceError < GLITCH_MS) return { text: "connected · decode errors", cls: "bad" };
+  if (msSinceLost < GLITCH_MS) return { text: "connected · frames lost", cls: "bad" };
+  return { text: "connected", cls: "ok" };
+}
+
+// geomLabel is the HUD's resolution: the canvas, plus the device video size
+// when the two differ, or the video size alone before the first frame.
+function geomLabel(st) {
+  if (st.canvasW) {
+    return st.canvasW + "×" + st.canvasH +
+      (st.videoW && st.canvasW !== st.videoW ? " ← " + st.videoW + "×" + st.videoH : "");
+  }
+  return st.videoW ? st.videoW + "×" + st.videoH : "—";
+}
+
+// end of connection status
+
+// ---------------------------------------------------------------------------
 // wiring
 // ---------------------------------------------------------------------------
 
@@ -1082,9 +1198,42 @@ input.attach();
 // socket, and a throw here would leave a black page with no reconnect path.
 if (typeof Pointer !== "undefined") Pointer.attach();
 
+const conn = new ConnState();
 let helloDone = false;
 let lastStatus = { videoW: 0, videoH: 0 };
-let stats = { seq: 0, lastSeq: 0, lost: 0, bytes: 0, lastBytes: 0, drawn: 0, at: performance.now() };
+let stats = { seq: 0, lastSeq: 0, lost: 0, lostAt: -Infinity, bytes: 0, lastBytes: 0, drawn: 0, at: performance.now() };
+
+// showConn puts the connection state on the page: the card, and the dimmed
+// canvas while the picture is not live. The card is a live region, so it is
+// only rewritten when its content changes.
+let connShown;
+function showConn() {
+  const card = conn.card();
+  const key = JSON.stringify(card);
+  if (key === connShown) return;
+  connShown = key;
+  els.canvas.classList.toggle("dim", card !== null);
+  els.conn.classList.toggle("off", card === null);
+  els.connText.textContent = card ? card.text : "";
+  els.connDetail.textContent = (card && card.detail) || "";
+  els.connRetry.hidden = !(card && card.button);
+  if (card && card.button) {
+    els.connRetry.textContent = card.button;
+    // Focused, so Enter or Space presses it (Input leaves keys to the browser
+    // once the session has ended).
+    els.connRetry.focus();
+  }
+}
+
+// showFps runs from the status messages, and from the telemetry tick while
+// none arrive, so a dead socket reads "idle" instead of the last rate.
+function showFps() {
+  const since = view.lastDraw ? performance.now() - view.lastDraw : Infinity;
+  els.fps.textContent = fpsLabel(view.fps || 0, since) +
+    (view.decodeMs ? " · " + view.decodeMs.toFixed(1) + "ms decode" : "") +
+    (view.errors ? " · " + view.errors + " errors" : "") +
+    (stats.lost ? " · " + stats.lost + " lost" : "");
+}
 
 function sendHello() {
   const vp = view.viewport();
@@ -1098,19 +1247,17 @@ function sendResize() {
 
 net.on("hello", (msg) => {
   helloDone = true;
-  els.device.textContent = msg.device || "device";
+  conn.hello(msg.device);
+  els.device.textContent = conn.device || "device";
+  document.title = conn.title();
   setState(msg.raw ? "connected (raw)" : "connected", "ok");
+  showConn();
 });
 
 net.on("status", (msg) => {
   lastStatus = msg;
-  els.device.textContent = (msg.videoW && msg.videoH) ? (msg.videoW + "×" + msg.videoH) : (msg.device || "device");
-  els.geom.textContent = msg.canvasW + "×" + msg.canvasH +
-    (msg.videoW && msg.canvasW !== msg.videoW ? " ← " + msg.videoW + "×" + msg.videoH : "");
-  els.fps.textContent = (view.fps || 0).toFixed(1) + " fps" +
-    (view.decodeMs ? " · " + view.decodeMs.toFixed(1) + "ms decode" : "") +
-    (view.errors ? " · " + view.errors + " errors" : "") +
-    (stats.lost ? " · " + stats.lost + " lost" : "");
+  els.geom.textContent = geomLabel(msg);
+  showFps();
   // Show the DEVICE's media volume. The old display used msg.gain, but that gain
   // is applied in writePCM16 for the PulseAudio sink while the browser is fed
   // raw PCM by pushPCM -- so it was reporting a control that could not change
@@ -1126,15 +1273,9 @@ net.on("status", (msg) => {
   }
   els.audio.textContent = "audio " + (msg.audio === "on" ? level : msg.audio) +
     (pcm.stats.underruns ? " · u" + pcm.stats.underruns : "");
-  if (!msg.control) {
-    setState("control disabled", "warn");
-  } else if (view.errors) {
-    setState("connected · decode errors", "bad");
-  } else if (stats.lost > 30) {
-    setState("connected · " + stats.lost + " dropped", "warn");
-  } else {
-    setState("connected", "ok");
-  }
+  const now = performance.now();
+  const st = stateLabel(msg.control, now - view.errorAt, now - stats.lostAt);
+  setState(st.text, st.cls);
 });
 
 net.on("video", (frame) => {
@@ -1146,11 +1287,33 @@ net.on("video", (frame) => {
       stats.lost = 0;
     } else {
       stats.lost += frame.seq - stats.lastSeq - 1;
+      stats.lostAt = performance.now();
     }
   }
   stats.lastSeq = frame.seq;
   stats.bytes += frame.body.byteLength;
   view.push(frame);
+  if (!conn.frame) {
+    conn.video();
+    showConn();
+  }
+});
+
+// The server is ending the session; Net has already stopped retrying.
+net.on("bye", (msg) => {
+  conn.ended(msg.reason);
+  showConn();
+});
+
+net.onClose = () => {
+  conn.closed();
+  showConn();
+};
+
+els.connRetry.addEventListener("click", () => {
+  conn.reconnect();
+  showConn();
+  net.reconnect();
 });
 
 net.on("audio", (buf) => {
@@ -1162,7 +1325,10 @@ net.on("audio", (buf) => {
 // The data is also published to window.sctermPlayer so an automated browser
 // check can assert on it instead of guessing from pixels.
 setInterval(() => {
-  if (!net.connected) return;
+  if (!net.connected) {
+    showFps();
+    return;
+  }
   const now = performance.now();
   const dts = now - stats.at;
   stats.at = now;
@@ -1201,6 +1367,7 @@ window.sctermPlayer = player;
 // OPEN -- and again after every reconnect, because the server builds a fresh
 // client (audio off, default viewport) for each new socket.
 net.onOpen = () => sendHello();
+showConn();
 net.connect();
 
 window.addEventListener("resize", () => {

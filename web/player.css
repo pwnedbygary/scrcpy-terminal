@@ -329,3 +329,56 @@ html, body {
   pointer-events: none;
   z-index: -1;
 }
+
+/* ---------------------------------------------------------------------------
+   connection status: the card says what the page is waiting for whenever it
+   is not showing live video, and the last frame stays up dimmed so it cannot
+   pass for the live screen. Going offline fades; going live is instant. Only
+   the Reconnect button takes pointer events, so the card never stands
+   between a finger and the canvas.
+   --------------------------------------------------------------------------- */
+#screen.dim { opacity: .35; transition: opacity .2s ease; }
+
+#conn {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(420px, 86vw);
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: rgba(23,23,28,.92);
+  border: 1px solid rgba(255,255,255,.12);
+  box-shadow: 0 12px 40px rgba(0,0,0,.7);
+  text-align: center;
+  pointer-events: none;
+  transition: opacity .2s ease;
+}
+
+#conn.off { opacity: 0; transition: none; }
+
+#conn-text { margin: 0; font-size: 14px; }
+#conn-detail { margin: 6px 0 0; color: #9aa0a6; }
+#conn-detail:empty { display: none; }
+
+#conn-retry {
+  margin-top: 12px;
+  appearance: none;
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 8px;
+  background: rgba(60,60,72,.9);
+  color: #e8e8e8;
+  font: inherit;
+  padding: 6px 14px;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+#conn-retry:hover { background: rgba(80,80,96,.95); }
+
+@media (prefers-reduced-motion: reduce) {
+  #screen.dim, #conn { transition: none; }
+}

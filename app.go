@@ -429,7 +429,7 @@ func (a *app) runWeb() error {
 			return err
 		case err := <-videoErr:
 			a.quitting.Store(true)
-			a.web.stop()
+			a.web.stopWith(webByeStreamEnded)
 			return err
 		}
 	}
