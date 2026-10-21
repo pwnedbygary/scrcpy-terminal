@@ -81,6 +81,78 @@ here is a snapshot, not proof that no other work has started.
   unit tests get absolute paths, as `:protocol`'s do, so Gradle's cache keys
   depend on where the checkout is.
 
+## Update (2026-10-20: QoL overhaul, part 13: terminal status line, notices, device loss)
+
+- The status line starts with the way out, "Alt+Q quit · Alt+/ controls",
+  then " | " and, as room allows: the input state when the mouse is not
+  grabbed ("mouse free (F12)", or under Zellij "keys go to Zellij · F12 gives
+  control"), "[KB]", "vol N%" ("audio off" when the sink failed, nothing with
+  `--audio=false`), the device name, the frame size and rate, and the
+  sparkline. The first part that does not fit ends the row; the state, the
+  name and a notice are cut with "…" instead when 6 cells remain. At 80
+  columns the hints used to be cut to "| Al". A steady 60 fps now draws "▁"
+  in every cell (it drew 20 blanks), and the row is cut and erased by display
+  cells, so a name in double-width (CJK) characters cannot wrap it; an emoji
+  that is narrow by default followed by variation selector 16 (❤️) counts as
+  one cell, and many terminals draw it as two. "UNGRAB" and "Alt+I keys" are
+  gone, and the menu title reads "scterm · Controls".
+- Runtime messages no longer scramble the picture. While the terminal UI
+  runs, a message shows in the status row after the hints for 4 s (the newest
+  wins): screenshot results with the saved path, audio sink switches, peer
+  control changes, input, inject and control-receive failures, and anything
+  through `logOnce`. After the terminal is restored, also after a panic, they
+  print on stderr once each in first-seen order, with repeats counted,
+  keeping the 50 newest and a first line counting any left out. Before and
+  after the UI, and with `--no-tui` or `--web`, they print at once as before.
+  `SCT_DEBUG_*` traces still go to stderr.
+- Losing the device ends with a reason and exit 1, as in "scterm: lost the
+  video stream from Pixel 8: stream ended: EOF" (the audio stream when there
+  is no video); it used to exit 0 with nothing shown. `main` stops the
+  session before exiting, as the deferred stop did. A device declining video,
+  and a peer ending the session (after its reason line), now also exit 1. A
+  quit (Alt+Q, two-press Quit, signals) still exits 0.
+- Before the first frame the picture area says "Waiting for video from
+  <device>…", "Video is off (--video=false)", or "No video from <device>"
+  when the session has no video (a peer pairing without view, or a peer
+  device that offers none), centred again after a resize. Control
+  characters are taken out of notices in the status row and of the device
+  name in the status row, the placeholder and the lost-device message, so an
+  escape sequence there no longer reaches the terminal; the replayed lines
+  and other stderr messages keep their text as posted, a device name
+  included.
+- Resize needed no change: the scaler rebuilds for any new size and the
+  server repeats the last frame after 100 ms. A test pins that the next frame
+  comes at the new size.
+- Corrections to part 9's entry: its `-race` run passed 61 tests, not 60;
+  and mouse buttons 8 to 10 act as left, middle and right on the video and
+  the bar, while button 11 does nothing.
+- Verification: the first round, in the builder's tree: `gofmt`, `go vet
+  ./...`, `go test ./...` (197 top-level tests pass, 3 skip), a `-race` set
+  of 78 tests, and the notice, loss and placeholder tests 20 times under
+  `-race`. The final code on the committed parts 8 to 11: `gofmt`, `go vet
+  ./...`, `go test ./...` (208 top-level tests pass, 3 skip), the notice,
+  status, placeholder, bar, menu, keyboard and quit tests under `-race`, and
+  the replay, notice and placeholder tests 20 times under `-race`. Five of
+  the six new status tests fail on the old code. The notice tests cannot
+  compile against it, so five behaviours were reverted on a copy instead,
+  and each revert was caught. Review found three that no test held, now
+  each failing its test when broken: the replay's order (stdout and stderr
+  read through one pipe), the replay's stream (stderr, not stdout), and the
+  cleaning of notices. The no-video placeholder case fails on the first
+  round's code. `scterm version` and the no-adb error are byte-identical.
+  Not run: a real terminal (layout, colours, wide characters), Zellij, or a
+  real USB or peer loss.
+- Left alone: the README still shows the old status text and "Action menu";
+  the Zellij keyboard nudge timer paints off the run loop (a data race); an
+  open keyboard overlay is not refreshed on resize; ambiguous-width
+  characters count as one cell; control-only sessions do not notice a lost
+  device, and `--no-tui` notices it (`scterm: video: …`) but still exits 0,
+  or with audio only prints `scterm: audio: …` and keeps running; "No video
+  from <device>" does not say why. Seen in review, older and from reading
+  the code: in adb forward mode (when `adb reverse` fails) each socket takes
+  the first empty slot, so with `--video=false` the audio socket would land
+  in the video slot.
+
 ## Update (2026-10-20: QoL overhaul, part 12: browser sound start and the http fallback)
 
 - Sound starts from any tap, click or key, not only a press on the picture,

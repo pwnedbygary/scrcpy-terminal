@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -180,13 +181,7 @@ func (a *app) run() error {
 	if err != nil {
 		return fmt.Errorf("raw mode: %w", err)
 	}
-	var restoreOnce sync.Once
-	a.restoreTerm = func() {
-		restoreOnce.Do(func() {
-			a.tui.shellClose()
-			restoreMode(ttyReadFD(), oldMode)
-		})
-	}
+	a.restoreTerm = a.terminalRestorer(oldMode)
 	defer a.restoreTerm()
 
 	// Print warnings before entering the alternate screen so they don't
@@ -195,10 +190,13 @@ func (a *app) run() error {
 		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
 	}
 
+	// From here until the terminal is restored, messages are notices.
+	wake := notices.start()
 	a.tui.shellInit()
 
 	a.setMouse(a.grabbed)
 	a.tui.setStatus(a.statusLine())
+	a.paintPlaceholder()
 
 	a.goTUI(a.inputLoop)
 	sigCh := make(chan os.Signal, 4)
@@ -214,17 +212,7 @@ func (a *app) run() error {
 		}
 	})
 
-	a.goTUI(func() {
-		if err := a.stream.runVideo(); err != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: video: %v\n", err)
-			a.events <- inputEvent{kind: evQuit}
-		}
-	})
-	a.goTUI(func() {
-		if err := a.stream.runAudio(a.audio); err != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
-		}
-	})
+	lost := a.watchStreams()
 
 	a.goTUI(func() {
 		for {
@@ -241,6 +229,12 @@ func (a *app) run() error {
 	})
 	a.goTUI(a.followAudioSink)
 
+	return a.loop(wake, lost)
+}
+
+// loop is the terminal UI's run loop. It ends with nil on a quit, or with the
+// error of the stream the terminal UI shows when that stream ends.
+func (a *app) loop(wake <-chan struct{}, lost <-chan error) error {
 	for {
 		select {
 		case ev := <-a.events:
@@ -271,8 +265,90 @@ func (a *app) run() error {
 			a.frameW, a.frameH = f.w, f.h
 			a.tui.draw(f.rgb)
 			a.stream.returnPooled(f.rgb)
+		case <-wake:
+			a.refreshStatus()
+		case err := <-lost:
+			return err
 		}
 	}
+}
+
+// terminalRestorer gives the terminal back (normal screen, no mouse
+// reporting, cooked mode) once, whichever of the run loop's exit and a panic
+// on another goroutine gets there first, then prints the notices the terminal
+// UI showed.
+func (a *app) terminalRestorer(oldMode *syscall.Termios) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			a.tui.shellClose()
+			restoreMode(ttyReadFD(), oldMode)
+			notices.stop(stderrWriter())
+		})
+	}
+}
+
+// watchStreams starts the demuxers. The video stream, or the audio stream when
+// there is no video, is what the terminal UI shows: when it ends, the session
+// is over, and the error naming the device comes back on the channel for the
+// run loop to return. The channel has room for both, so a demuxer never waits
+// on a run loop that has already gone.
+func (a *app) watchStreams() <-chan error {
+	lost := make(chan error, 2)
+	a.goTUI(func() {
+		if err := a.stream.runVideo(); err != nil {
+			lost <- a.lostStream("video", err)
+		}
+	})
+	a.goTUI(func() {
+		err := a.stream.runAudio(a.audio)
+		switch {
+		case err == nil:
+		case a.sess.video == nil:
+			lost <- a.lostStream("audio", err)
+		default:
+			noticef("scterm: audio: %v\n", err)
+		}
+	})
+	return lost
+}
+
+// lostStream is the error the terminal UI ends with when the stream it shows
+// ends without a quit.
+func (a *app) lostStream(stream string, err error) error {
+	return fmt.Errorf("lost the %s stream from %s: %w", stream, a.deviceName(), err)
+}
+
+// deviceName is the device's name fit for the screen. The device or the
+// pairing sets it, so control characters are taken out.
+func (a *app) deviceName() string {
+	if a.sess != nil {
+		if name := cleanText(a.sess.deviceName); name != "" {
+			return name
+		}
+	}
+	return "the device"
+}
+
+// paintPlaceholder says what the empty picture is waiting for. The first frame
+// paints over it.
+func (a *app) paintPlaceholder() {
+	a.tui.setPlaceholder(a.placeholderText())
+	a.tui.repaint()
+}
+
+// placeholderText is the line shown where the picture will be. The terminal UI
+// starts once the session is connected, so before the first frame it is
+// waiting for video, not for the connection. A peer session has no video
+// socket unless the pairing grants view and the device offers video.
+func (a *app) placeholderText() string {
+	switch {
+	case !a.cfg.video:
+		return "Video is off (--video=false)"
+	case a.sess != nil && a.sess.video == nil:
+		return "No video from " + a.deviceName()
+	}
+	return "Waiting for video from " + a.deviceName() + "…"
 }
 
 // goTUI runs fn on its own goroutine while the terminal UI owns the screen. A
@@ -548,6 +624,8 @@ func (a *app) onResize() {
 		a.refreshMenu()
 	case a.barVisible():
 		a.refreshOverlays()
+	case !a.tui.hasFrame():
+		a.tui.repaint() // the placeholder moves to the middle of the new size
 	}
 	a.tui.setStatus(a.statusLine())
 }
@@ -670,14 +748,15 @@ func (a *app) sparkline(width int) string {
 	maxMs := 100.0
 	// NOTE: blocks is a []rune. Indexing a string by byte would slice INSIDE
 	// a 3-byte UTF-8 sequence and emit garbage (the garbled-characters bug).
-	blocks := []rune("  ▁▂▃▄▅▆▇█")
+	blocks := []rune("▁▂▃▄▅▆▇")
 	out := make([]rune, 0, n)
 	for i := 0; i < n; i++ {
 		v := a.ftHist[(start+i)%len(a.ftHist)]
 		if v > maxMs {
 			v = maxMs
 		}
-		// 0..100ms -> 1..7 (lowest bar = after the leading space)
+		// 0..100ms -> bars 1..7. The lowest is a visible bar, so a steady
+		// rate draws a flat line rather than blank cells.
 		h := int(v / maxMs * 7.0)
 		if h < 1 {
 			h = 1
@@ -685,42 +764,74 @@ func (a *app) sparkline(width int) string {
 		if h > 7 {
 			h = 7
 		}
-		out = append(out, blocks[h])
+		out = append(out, blocks[h-1])
 	}
 	return string(out)
 }
+
+// The status row hints come first and stay whole whenever the pane is as wide
+// as them: Ctrl+C goes to the device (raw mode), so how to quit must always be
+// readable. They are deliberately short: the full control list is one chord
+// away in the Controls menu (and in the README), and spelling out every key
+// here ate two lines of a phone-sized terminal.
+const (
+	statusHints    = "Alt+Q quit · Alt+/ controls"
+	statusQuitHint = "Alt+Q quit" // all a pane narrower than the hints keeps
+)
+
+// statusPart is one piece of the status row after the hints.
+type statusPart struct {
+	text   string
+	join   string // what goes before it, " · " when empty
+	shrink bool   // cut short with "…" instead of dropped when it does not fit
+}
+
+// statusMinShrink is the fewest cells a part is cut to before it is dropped.
+const statusMinShrink = 6
 
 func (a *app) statusLine() string {
 	if a.tui == nil || a.audio == nil {
 		return ""
 	}
-	vol := "-"
-	if a.audio != nil && a.cfg.audio {
+	parts := a.statusParts()
+	if n := notices.current(timeNowUnixNano()); n != "" {
+		// A notice stands in for the state and the stats for a few seconds.
+		parts = []statusPart{{text: n, shrink: true}}
+	}
+	return fitStatus(a.tui.cols, parts)
+}
+
+// statusParts is what follows the hints, most important first: where input
+// goes, the software keyboard, the volume and the device, then the frame size
+// and rate and their sparkline, which are the first to go on a narrow pane.
+func (a *app) statusParts() []statusPart {
+	var mode string
+	switch {
+	case a.grabbed:
+	case a.inZellij:
+		// handleInput drops typing while ungrabbed under Zellij.
+		mode = "keys go to Zellij · F12 gives control"
+	default:
+		mode = "mouse free (F12)"
+	}
+	var kb string
+	if a.kb != nil && a.kb.open {
+		kb = "[KB]"
+	}
+	var vol string
+	if a.cfg.audio {
+		vol = "audio off"
 		if a.audio.err == nil {
-			vol = strconv.Itoa(a.audio.gainPercent()) + "%"
-		} else {
-			vol = "off"
+			vol = "vol " + strconv.Itoa(a.audio.gainPercent()) + "%"
 		}
 	}
-	g := "grab"
-	if !a.grabbed {
-		g = "UNGRAB"
+	var stats []string
+	if a.frameW > 0 && a.frameH > 0 {
+		stats = append(stats, fmt.Sprintf("%dx%d", a.frameW, a.frameH))
 	}
-	name := "device"
-	if a.sess != nil {
-		name = a.sess.deviceName
-	}
-	kb := ""
-	if a.kb != nil && a.kb.open {
-		kb = "  [KB]"
-	}
-	var ft string
 	if a.ftCnt > 0 {
 		avg := 0.0
-		n := a.ftCnt
-		if n > 32 {
-			n = 32
-		}
+		n := min(a.ftCnt, 32)
 		for i := 0; i < n; i++ {
 			idx := (a.ftIdx - 1 - i + len(a.ftHist)) % len(a.ftHist)
 			avg += a.ftHist[idx]
@@ -730,15 +841,53 @@ func (a *app) statusLine() string {
 		if avg > 0.01 {
 			fps = 1000.0 / avg
 		}
-		ft = fmt.Sprintf("  %s %4.1fms %4.1ffps ", a.sparkline(20), avg, fps)
+		stats = append(stats, fmt.Sprintf("%4.1fms %4.1ffps", avg, fps))
 	}
-	// The hint is intentionally short: the full control list lives in the
-	// action menu (Alt+/) and in the README. Spelling out every F-key here ate
-	// two lines of a phone-sized terminal and still needed the menu to explain
-	// it, so the menu is now the discoverable path and this is the pointer to
-	// it. "Alt+/ menu" is the only thing a new user has to learn.
-	return fmt.Sprintf("scterm %s %dx%d %s vol %s%s%s| Alt+/ actions · Alt+I keys · Alt+Q quit",
-		name, a.frameW, a.frameH, g, vol, kb, ft)
+	return []statusPart{
+		{text: mode, shrink: true},
+		{text: kb},
+		{text: vol},
+		{text: a.deviceName(), shrink: true},
+		{text: strings.Join(stats, " ")},
+		{text: a.sparkline(20), join: " "},
+	}
+}
+
+// fitStatus lays the status row out in width cells: the hints, then " | " and
+// the parts while they fit. The first part that does not fit ends the row, so
+// the least important ones are the first to go.
+func fitStatus(width int, parts []statusPart) string {
+	used := cellWidth(statusHints)
+	if used > width {
+		return truncateCells(statusQuitHint, width)
+	}
+	var b strings.Builder
+	b.WriteString(statusHints)
+	first := true
+	for _, p := range parts {
+		if p.text == "" {
+			continue
+		}
+		join := " · "
+		switch {
+		case first:
+			join = " | "
+		case p.join != "":
+			join = p.join
+		}
+		room := width - used - cellWidth(join)
+		w := cellWidth(p.text)
+		if w > room {
+			if p.shrink && room >= statusMinShrink {
+				b.WriteString(join + ellipsize(p.text, room))
+			}
+			break
+		}
+		b.WriteString(join + p.text)
+		used += cellWidth(join) + w
+		first = false
+	}
+	return b.String()
 }
 
 func (a *app) shutdown() {

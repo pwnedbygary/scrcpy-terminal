@@ -268,9 +268,9 @@ func newPeerSession(query string, cfg config) (*session, error) {
 		Lease: func(state, holder string) {
 			switch {
 			case state == peer.LeaseHeld:
-				fmt.Fprintf(stderrWriter(), "scterm: this computer has control of %s\n", name)
+				noticef("scterm: this computer has control of %s\n", name)
 			case holder != "":
-				fmt.Fprintf(stderrWriter(), "scterm: %s took control of %s; this computer is viewing (--takeover takes it back)\n", holder, name)
+				noticef("scterm: %s took control of %s; this computer is viewing (--takeover takes it back)\n", holder, name)
 			}
 		},
 		Error: func(code, message, controlType string) {
@@ -278,7 +278,7 @@ func newPeerSession(query string, cfg config) (*session, error) {
 				logOnce(fmt.Sprintf("scterm: input ignored: another device has control of %s (--takeover takes it)\n", name))
 				return
 			}
-			fmt.Fprintf(stderrWriter(), "scterm: %s refused %s: %s\n", name, controlType, message)
+			noticef("scterm: %s refused %s: %s\n", name, controlType, message)
 		},
 	})
 	switch {

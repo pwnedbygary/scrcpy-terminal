@@ -128,6 +128,7 @@ func main() {
 		}
 	}
 	if err != nil {
+		sess.stop() // fatal's exit skips the deferred stop
 		fatal(err)
 	}
 }

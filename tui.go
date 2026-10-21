@@ -17,6 +17,8 @@ const (
 
 const statusSGR = "\x1b[38;2;200;200;200m\x1b[48;2;30;30;30m"
 
+const placeholderSGR = "\x1b[38;2;150;150;150m"
+
 // ---------------------------------------------------------------------------
 // terminal helpers
 // ---------------------------------------------------------------------------
@@ -62,6 +64,7 @@ type tui struct {
 	repaintInterval int // forced full redraw every N frames (desync-recovery safety net)
 	status          string
 	statusDrawn     string // what the status row shows now ("" after a clear or resize)
+	placeholder     string // centred in the picture area until the first frame
 	dirty           bool   // force full repaint
 	running         bool
 
@@ -310,11 +313,13 @@ func (t *tui) appendOverlay(out []byte) []byte {
 	return out
 }
 
-// appendStatus paints the status row and records what it now shows.
+// appendStatus paints the status row and records what it now shows. It is cut
+// by display cells: a wide character past the last cell would wrap, and on
+// the bottom row that scrolls the screen.
 func (t *tui) appendStatus(out []byte) []byte {
-	line := truncateRunes(t.status, t.cols)
+	line := truncateCells(t.status, t.cols)
 	out = ap(out, "\x1b[", strconv.Itoa(t.rows+1), ";1H", statusSGR, line)
-	if utf8.RuneCountInString(line) < t.cols {
+	if cellWidth(line) < t.cols {
 		// Erase what a longer status left behind. Not after a full row: in the
 		// pending-wrap state the erase would take the row's last cell with it.
 		out = append(out, "\x1b[K"...)
@@ -385,13 +390,21 @@ func (t *tui) repaint() {
 
 // paintWithoutCanvas clears the picture and paints only the overlay and the
 // status row, so the menu, the keyboard and the bar work before the first
-// frame and with --video=false. Called with t.mu held.
+// frame and with --video=false; until the first frame, the placeholder says
+// why the picture is empty. Called with t.mu held.
 func (t *tui) paintWithoutCanvas() {
-	if !t.running || t.rows <= 0 || (!overlayHasContent(t.overlay) && t.status == "") {
+	waiting := t.placeholder != "" && len(t.lastRGB) == 0
+	if !t.running || t.rows <= 0 || (!overlayHasContent(t.overlay) && t.status == "" && !waiting) {
 		return
 	}
 	out := append(t.sgrBuf[:0], syncBegin...)
 	out = append(out, "\x1b[0m\x1b[H\x1b[2J"...)
+	if waiting {
+		line := ellipsize(t.placeholder, t.cols)
+		row := (t.rows + 1) / 2
+		col := (t.cols-cellWidth(line))/2 + 1
+		out = ap(out, "\x1b[", strconv.Itoa(row), ";", strconv.Itoa(col), "H", placeholderSGR, line, "\x1b[0m")
+	}
 	out = t.appendOverlay(out)
 	if t.status != "" {
 		out = t.appendStatus(out)
@@ -423,6 +436,21 @@ func (t *tui) setStatus(s string) {
 		return
 	}
 	os.Stdout.Write(t.appendStatus(make([]byte, 0, 256)))
+}
+
+// setPlaceholder sets the line shown in the empty picture before the first
+// frame. The caller repaints.
+func (t *tui) setPlaceholder(s string) {
+	t.mu.Lock()
+	t.placeholder = s
+	t.mu.Unlock()
+}
+
+// hasFrame reports whether a frame has been drawn yet.
+func (t *tui) hasFrame() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.lastRGB) > 0
 }
 
 // markDirty forces a full repaint on the next drawn frame.

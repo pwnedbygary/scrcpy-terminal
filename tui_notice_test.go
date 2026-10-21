@@ -1,0 +1,469 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+)
+
+// ---------------------------------------------------------------------------
+// While the terminal UI owns the screen, runtime messages are notices in the
+// status row and come back on stderr once the terminal is restored; the end of
+// the stream it shows ends the session with an error naming the device; and an
+// empty picture says what it is waiting for.
+// ---------------------------------------------------------------------------
+
+// startNotices routes messages to the terminal UI for one test, as run does
+// while it owns the screen.
+func startNotices(t *testing.T) <-chan struct{} {
+	t.Helper()
+	wake := notices.start()
+	t.Cleanup(func() { notices.stop(io.Discard) })
+	select {
+	case <-wake: // left over from an earlier test
+	default:
+	}
+	return wake
+}
+
+// forgetLogOnce lets logOnce report msgs again after the test, so that a
+// repeated run (-count) sees them as new.
+func forgetLogOnce(t *testing.T, msgs ...string) {
+	t.Cleanup(func() {
+		logOnceMu.Lock()
+		defer logOnceMu.Unlock()
+		for _, m := range msgs {
+			delete(logOnceSeen, m)
+		}
+	})
+}
+
+// ageNotice makes the notice on show d older, as if d had gone by.
+func ageNotice(d time.Duration) {
+	notices.mu.Lock()
+	notices.until -= int64(d)
+	notices.mu.Unlock()
+}
+
+// TestNoticeTakesTheStatusRowThenGoes: a message is not printed while the
+// terminal UI runs. It replaces the state and stats after the hints, the
+// newest one wins, and after about 4 s the row is back to normal.
+func TestNoticeTakesTheStatusRowThenGoes(t *testing.T) {
+	wake := startNotices(t)
+	a := statusApp(80, "Pixel 8")
+
+	if out := captureStderr(t, func() { noticef("scterm: saved scterm-1.ppm (80x46)\n") }); out != "" {
+		t.Errorf("a message reached the terminal while the UI owns it: %q", out)
+	}
+	select {
+	case <-wake:
+	default:
+		t.Error("the run loop was not asked to repaint the status row")
+	}
+	if got, want := a.statusLine(), statusHintsText+" | saved scterm-1.ppm (80x46)"; got != want {
+		t.Errorf("with a notice:\n got %q\nwant %q", got, want)
+	}
+
+	noticef("scterm: inject key: broken pipe\n")
+	if got, want := a.statusLine(), statusHintsText+" | inject key: broken pipe"; got != want {
+		t.Errorf("the newest notice does not win:\n got %q\nwant %q", got, want)
+	}
+
+	ageNotice(3500 * time.Millisecond)
+	if got := a.statusLine(); !strings.Contains(got, "inject key: broken pipe") {
+		t.Errorf("the notice went before 4 s: %q", got)
+	}
+	ageNotice(600 * time.Millisecond)
+	if got, want := a.statusLine(), statusHintsText+" | vol 100% · Pixel 8 · 1080x2400 16.0ms 62.5fps"; got != want {
+		t.Errorf("after 4.1 s:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestNoticeTextIsCleaned: a notice is shown with its control characters
+// taken out, so an escape sequence in a peer's name or in an error cannot
+// reach the terminal through the status row.
+func TestNoticeTextIsCleaned(t *testing.T) {
+	startNotices(t)
+	a := statusApp(80, "Pixel 8")
+	noticef("scterm: peer \"Evil\x1b]0;x\x07Phone\" took control\n")
+	if got, want := a.statusLine(), statusHintsText+" | peer \"Evil ]0;x Phone\" took control"; got != want {
+		t.Errorf("with control characters:\n got %q\nwant %q", got, want)
+	}
+}
+
+// waitStatusRow waits for the status row to show want.
+func waitStatusRow(t *testing.T, tr *tui, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		tr.mu.Lock()
+		got := tr.statusDrawn
+		tr.mu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("status row shows %q, want %q", got, want)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestRunLoopPaintsNotices: the run loop, not the goroutine that sent it,
+// paints a notice at once, and its 500 ms tick takes an old one down.
+func TestRunLoopPaintsNotices(t *testing.T) {
+	wake := startNotices(t)
+	a := statusApp(80, "Pixel 8")
+	a.tui.running = true
+	done := make(chan error, 1)
+	out := captureStdout(t, func() {
+		go func() { done <- a.loop(wake, make(chan error)) }()
+		go noticef("scterm: saved scterm-2.ppm (80x46)\n")
+		waitStatusRow(t, a.tui, statusHintsText+" | saved scterm-2.ppm (80x46)")
+		ageNotice(5 * time.Second)
+		a.events <- inputEvent{kind: evTick}
+		waitStatusRow(t, a.tui, statusHintsText+" | vol 100% · Pixel 8 · 1080x2400 16.0ms 62.5fps")
+		a.events <- inputEvent{kind: evQuit}
+		if err := <-done; err != nil {
+			t.Errorf("a quit ended the loop with %v", err)
+		}
+	})
+	if !strings.Contains(out, "\x1b[24;1H") {
+		t.Errorf("nothing was painted on the status row (24): %q", out)
+	}
+}
+
+// captureTerminal runs fn with stdout and stderr on one pipe, so their order
+// is kept, as on a terminal that shows both.
+func captureTerminal(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan []byte)
+	go func() { b, _ := io.ReadAll(r); got <- b }()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+	func() {
+		defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
+		fn()
+	}()
+	_ = w.Close()
+	return string(<-got)
+}
+
+// TestReplayAfterTheTerminalIsBack: restoring the terminal prints the messages
+// the UI showed, once each with a count for repeats, after the normal screen
+// is back (printed on the alternate screen, they would go with it); later
+// messages go straight to stderr. TestReplayGoesToStderr pins the stream.
+func TestReplayAfterTheTerminalIsBack(t *testing.T) {
+	startNotices(t)
+	a := newTestApp(nil)
+	a.tui = &tui{cols: 80, rows: 23, running: true}
+	restore := a.terminalRestorer(nil)
+	forgetLogOnce(t, "scterm: audio -> replay-test-sink\n")
+
+	noticef("scterm: saved scterm-3.ppm (80x46)\n")
+	for i := 0; i < 3; i++ {
+		noticef("scterm: inject key: broken pipe\n")
+	}
+	logOnce("scterm: audio -> replay-test-sink\n")
+	logOnce("scterm: audio -> replay-test-sink\n")
+
+	out := captureTerminal(t, restore)
+	want := "scterm: saved scterm-3.ppm (80x46)\n" +
+		"scterm: inject key: broken pipe (3 times)\n" +
+		"scterm: audio -> replay-test-sink\n"
+	leave := strings.Index(out, "\x1b[?1049l")
+	if leave < 0 {
+		t.Fatalf("the normal screen was not restored: %q", out)
+	}
+	if !strings.HasSuffix(out, want) || strings.Index(out, "scterm:") < leave {
+		t.Errorf("the replay is not what follows the normal screen's return (at %d):\n got %q\nwant it to end with %q",
+			leave, out, want)
+	}
+
+	stderr := captureStderr(t, func() {
+		noticef("scterm: after the end\n")
+		restore()
+	})
+	if stderr != "scterm: after the end\n" {
+		t.Errorf("after the restore: %q", stderr)
+	}
+}
+
+// TestReplayGoesToStderr: the replay is written to stderr, not stdout, so a
+// redirect such as `2>log` keeps it.
+func TestReplayGoesToStderr(t *testing.T) {
+	startNotices(t)
+	a := newTestApp(nil)
+	a.tui = &tui{cols: 80, rows: 23, running: true}
+	restore := a.terminalRestorer(nil)
+	noticef("scterm: saved scterm-4.ppm (80x46)\n")
+
+	var stderr string
+	stdout := captureStdout(t, func() { stderr = captureStderr(t, restore) })
+	if want := "scterm: saved scterm-4.ppm (80x46)\n"; stderr != want {
+		t.Errorf("stderr:\n got %q\nwant %q", stderr, want)
+	}
+	if strings.Contains(stdout, "scterm:") {
+		t.Errorf("the replay reached stdout: %q", stdout)
+	}
+}
+
+// TestReplayKeepsTheLatestLines: the replay is capped at 50 lines; the oldest
+// go first and are counted.
+func TestReplayKeepsTheLatestLines(t *testing.T) {
+	startNotices(t)
+	for i := 1; i <= 60; i++ {
+		noticef("scterm: message %d\n", i)
+	}
+	var b strings.Builder
+	notices.stop(&b)
+	lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+	if len(lines) != 51 {
+		t.Fatalf("replay has %d lines, want 51: %q", len(lines), b.String())
+	}
+	if lines[0] != "scterm: 10 earlier messages not shown" || lines[1] != "scterm: message 11" || lines[50] != "scterm: message 60" {
+		t.Errorf("replay starts %q, %q and ends %q", lines[0], lines[1], lines[50])
+	}
+}
+
+// TestLogOnceGoesWhereTheScreenIs: logOnce prints on stderr when no terminal
+// UI runs, as it always has, and is a notice (still once) while one does.
+func TestLogOnceGoesWhereTheScreenIs(t *testing.T) {
+	forgetLogOnce(t, "scterm: logonce-test before\n", "scterm: logonce-test during\n")
+	if got := captureStderr(t, func() { logOnce("scterm: logonce-test before\n") }); got != "scterm: logonce-test before\n" {
+		t.Errorf("without the terminal UI: %q", got)
+	}
+	wake := startNotices(t)
+	got := captureStderr(t, func() {
+		logOnce("scterm: logonce-test during\n")
+		logOnce("scterm: logonce-test during\n")
+	})
+	if got != "" {
+		t.Errorf("with the terminal UI, stderr got %q", got)
+	}
+	select {
+	case <-wake:
+	default:
+		t.Error("the run loop was not asked to repaint the status row")
+	}
+	if n := notices.current(timeNowUnixNano()); n != "logonce-test during" {
+		t.Errorf("notice %q", n)
+	}
+	var b strings.Builder
+	notices.stop(&b)
+	if b.String() != "scterm: logonce-test during\n" {
+		t.Errorf("replay %q", b.String())
+	}
+}
+
+// deviceStream is the device's end of a media socket: it sends head, as the
+// server does when the stream starts, then hangs up like an unplugged device.
+func deviceStream(t *testing.T, head ...[]byte) net.Conn {
+	t.Helper()
+	client, device := net.Pipe()
+	go func() {
+		for _, b := range head {
+			if _, err := device.Write(b); err != nil {
+				break
+			}
+		}
+		device.Close()
+	}()
+	t.Cleanup(func() { client.Close() })
+	return client
+}
+
+// waitLost waits for the end of the stream to reach the run loop.
+func waitLost(t *testing.T, lost <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-lost:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("the end of the stream never reached the run loop")
+		return nil
+	}
+}
+
+// streamApp is a terminal UI app on sess.
+func streamApp(sess *session) *app {
+	a := newTestApp(nil)
+	a.sess = sess
+	a.audio = &audioSink{}
+	a.stream = newStreamState(sess, a.cfg, nil)
+	return a
+}
+
+// TestLostStreamEndsTheSession: the video stream ending, or the audio stream
+// when there is no video, ends the session with an error naming the device
+// and the cause; the audio stream ending under a picture is only a notice.
+func TestLostStreamEndsTheSession(t *testing.T) {
+	// The stream opens with its codec ("h264") and a session packet (top bit
+	// set, then 1080 by 2400), and then the device goes away.
+	header := []byte{0x80, 0, 0, 0, 0, 0, 0x04, 0x38, 0, 0, 0x09, 0x60}
+
+	err := waitLost(t, streamApp(&session{deviceName: "Pixel 8", video: deviceStream(t, []byte("h264"), header)}).watchStreams())
+	if got, want := fmt.Sprint(err), "lost the video stream from Pixel 8: stream ended: EOF"; got != want {
+		t.Errorf("video: %q, want %q", got, want)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("video: the cause is not kept: %v", err)
+	}
+
+	err = waitLost(t, streamApp(&session{deviceName: "Pixel\x1b[2J 8", audio: deviceStream(t, []byte("opus"))}).watchStreams())
+	if got, want := fmt.Sprint(err), "lost the audio stream from Pixel [2J 8: audio stream ended: EOF"; got != want {
+		t.Errorf("audio only: %q, want %q", got, want)
+	}
+
+	startNotices(t)
+	video, device := net.Pipe() // the picture goes on
+	t.Cleanup(func() { device.Close() })
+	lost := streamApp(&session{deviceName: "Pixel 8", video: video, audio: deviceStream(t, []byte("opus"))}).watchStreams()
+	deadline := time.Now().Add(5 * time.Second)
+	for notices.current(timeNowUnixNano()) != "audio: audio stream ended: EOF" {
+		if time.Now().After(deadline) {
+			t.Fatalf("no notice for the audio stream ending; showing %q", notices.current(timeNowUnixNano()))
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-lost:
+		t.Errorf("the session ended with the audio stream under a picture: %v", err)
+	default:
+	}
+}
+
+// TestRunLoopEndsWithTheLostStream: the run loop returns the end of the stream
+// as its error; a quit is not one.
+func TestRunLoopEndsWithTheLostStream(t *testing.T) {
+	a := newTestApp(nil)
+	want := errors.New("lost the video stream from Pixel 8: stream ended: EOF")
+	lost := make(chan error, 1)
+	lost <- want
+	if err := a.loop(nil, lost); err != want {
+		t.Errorf("loop returned %v, want %v", err, want)
+	}
+	a.events <- inputEvent{kind: evQuit}
+	if err := a.loop(nil, make(chan error)); err != nil {
+		t.Errorf("a quit ended the loop with %v", err)
+	}
+}
+
+// TestLostDeviceIsPrintedAndExitsOne: the error main gets from run is printed
+// on stderr and the exit status is 1. Runs main's fatal in a child process.
+func TestLostDeviceIsPrintedAndExitsOne(t *testing.T) {
+	if os.Getenv("SCTERM_TEST_LOST_DEVICE") == "1" {
+		a := &app{sess: &session{deviceName: "Pixel 8"}}
+		fatal(a.lostStream("video", fmt.Errorf("stream ended: %w", io.EOF)))
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLostDeviceIsPrintedAndExitsOne$")
+	cmd.Env = append(os.Environ(), "SCTERM_TEST_LOST_DEVICE=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("exit: %v, want status 1", err)
+	}
+	if got, want := stderr.String(), "scterm: lost the video stream from Pixel 8: stream ended: EOF\n"; got != want {
+		t.Errorf("stderr %q, want %q", got, want)
+	}
+}
+
+// placeholderAt matches the placeholder painted at a cursor position, allowing
+// for colour codes in between.
+func placeholderAt(row, col int, text string) *regexp.Regexp {
+	return regexp.MustCompile(regexp.QuoteMeta(fmt.Sprintf("\x1b[%d;%dH", row, col)) + `(\x1b\[[0-9;]*m)*` + regexp.QuoteMeta(text))
+}
+
+// videoSocket stands in for a session's video connection.
+func videoSocket(t *testing.T) net.Conn {
+	c, other := net.Pipe()
+	t.Cleanup(func() { c.Close(); other.Close() })
+	return c
+}
+
+// TestPlaceholderBeforeTheFirstFrame: with no frame yet the picture area says
+// what it waits for, centred in the 40x9 picture (row 5): the device name with
+// its control characters taken out and cut to the width, that video is off,
+// or that the session has none (a peer pairing without view). The first frame
+// replaces it.
+func TestPlaceholderBeforeTheFirstFrame(t *testing.T) {
+	cases := []struct {
+		name    string
+		video   bool
+		socket  bool
+		device  string
+		col     int
+		want    string
+		mustNot string
+	}{
+		{"waiting", true, true, "Pixel 8", 5, "Waiting for video from Pixel 8…", ""},
+		{"video off", false, false, "Pixel 8", 7, "Video is off (--video=false)", ""},
+		{"no video in the session", true, false, "Pixel 8", 10, "No video from Pixel 8", ""},
+		{"control characters", true, true, "Evil\x1b]0;x\x07Phone", 1, "Waiting for video from Evil ]0;x Phone…", "\x1b]"},
+		{"wide name", true, true, strings.Repeat("界", 30), 1, "Waiting for video from " + strings.Repeat("界", 8) + "…", ""},
+	}
+	for _, tc := range cases {
+		a := newTestApp(nil)
+		a.cfg.video = tc.video
+		a.sess = &session{deviceName: tc.device}
+		if tc.socket {
+			a.sess.video = videoSocket(t)
+		}
+		a.tui = &tui{cols: 40, rows: 9, running: true}
+		out := captureStdout(t, a.paintPlaceholder)
+		if !placeholderAt(5, tc.col, tc.want).MatchString(out) {
+			t.Errorf("%s: want %q at 5;%d in %q", tc.name, tc.want, tc.col, out)
+		}
+		if strings.Contains(out, "\x07") || tc.mustNot != "" && strings.Contains(out, tc.mustNot) {
+			t.Errorf("%s: a control sequence from the name reached the screen: %q", tc.name, out)
+		}
+	}
+
+	a := newTestApp(nil)
+	a.cfg.video = true
+	a.sess = &session{deviceName: "Pixel 8", video: videoSocket(t)}
+	a.tui = newRenderTUI(40, 9) // a frame has been drawn
+	if out := captureStdout(t, a.paintPlaceholder); strings.Contains(out, "Waiting") {
+		t.Errorf("the placeholder covered a frame: %q", out)
+	}
+}
+
+// TestPlaceholderFollowsAResize: before the first frame a resize puts the
+// placeholder back in the middle; once there is a picture, a resize waits for
+// the next frame as before.
+func TestPlaceholderFollowsAResize(t *testing.T) {
+	withTermSize(t, 40, 10)
+	a := newTestApp(nil)
+	a.cfg.video = true
+	a.sess = &session{deviceName: "Pixel 8", video: videoSocket(t)}
+	a.tui = &tui{running: true}
+	a.tui.resize()
+	captureStdout(t, a.paintPlaceholder)
+
+	termSizeOverride = struct{ cols, rows int }{60, 20} // a 60x19 picture
+	out := captureStdout(t, a.onResize)
+	if !placeholderAt(10, 15, "Waiting for video from Pixel 8…").MatchString(out) {
+		t.Errorf("placeholder not re-centred after a resize: %q", out)
+	}
+
+	a.tui.lastRGB = make([]byte, 60*19*2*4)
+	a.tui.lastW, a.tui.lastH = 60, 38
+	termSizeOverride = struct{ cols, rows int }{50, 20}
+	if out := captureStdout(t, a.onResize); strings.Contains(out, "Waiting") || strings.Contains(out, "\x1b[2J") {
+		t.Errorf("a resize after the first frame cleared the picture: %q", out)
+	}
+}

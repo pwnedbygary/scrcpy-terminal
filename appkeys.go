@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"sync"
 )
 
@@ -75,7 +74,7 @@ func (a *app) applyAppOp(op string) {
 	if act, ok := deviceActionFor(op); ok {
 		err := performDeviceAction(a.ctrl, act)
 		if err != nil && a.ctrl != nil && act.Kind == kindKeycode {
-			fmt.Fprintf(stderrWriter(), "scterm: inject key: %v\n", err)
+			noticef("scterm: inject key: %v\n", err)
 		}
 		return
 	}
@@ -103,7 +102,7 @@ func (a *app) scrollAt(cellX, cellY int, delta int) {
 	}
 	err := a.ctrl.scroll(a.posAt(cellX, cellY), float32(delta), 0)
 	if err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: scroll: %v\n", err)
+		noticef("scterm: scroll: %v\n", err)
 	}
 }
 

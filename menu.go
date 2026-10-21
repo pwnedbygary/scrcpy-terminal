@@ -184,7 +184,7 @@ func (a *app) menuLines(rows int) []overlayLine {
 			width = len([]rune(s))
 		}
 	}
-	title := " scterm · actions "
+	title := " scterm · Controls "
 	if len([]rune(title)) > width {
 		width = len([]rune(title))
 	}

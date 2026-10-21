@@ -16,7 +16,7 @@ import (
 func (a *app) inputLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: input loop panic: %v\n", r)
+			noticef("scterm: input loop panic: %v\n", r)
 		}
 	}()
 	buf := make([]byte, 4096)
@@ -143,7 +143,7 @@ func escSeqLen(b []byte) int {
 func (a *app) handleInput(b []byte) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: input ignored: %v (bytes % x)\n", r, b)
+			noticef("scterm: input ignored: %v (bytes % x)\n", r, b)
 		}
 	}()
 	if len(b) == 0 {
@@ -207,7 +207,7 @@ func (a *app) handleInput(b []byte) {
 				// nothing without a control socket; say so, as the old
 				// dedicated handler did.
 				if a.ctrl == nil {
-					fmt.Fprintf(stderrWriter(), "scterm: control disabled (no -control)\n")
+					noticef("scterm: control disabled (no -control)\n")
 					return
 				}
 				a.applyAppOp(op)
@@ -309,15 +309,15 @@ func (a *app) screenshot() {
 	}
 	a.tui.mu.Unlock()
 	if rgb == nil {
-		fmt.Fprintf(stderrWriter(), "scterm: screenshot: no frame yet\n")
+		noticef("scterm: screenshot: no frame yet\n")
 		return
 	}
 	fn := fmt.Sprintf("scterm-%s.ppm", time.Now().Format("20060102-150405"))
 	if err := writePPMFile(fn, rgb, pw, ph); err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: screenshot: %v\n", err)
+		noticef("scterm: screenshot: %v\n", err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "scterm: saved %s (%dx%d)\n", fn, pw, ph)
+	noticef("scterm: saved %s (%dx%d)\n", fn, pw, ph)
 	a.refreshStatus()
 }
 
@@ -330,7 +330,7 @@ func (a *app) sendAndroidKeyMeta(code uint32, meta uint32) {
 		return
 	}
 	if err := a.ctrl.injectKey(code, meta); err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: inject key: %v\n", err)
+		noticef("scterm: inject key: %v\n", err)
 	}
 }
 
@@ -385,7 +385,7 @@ func (a *app) injectChar(c byte) {
 	}
 	// Other printable: text injection.
 	if err := a.ctrl.injectText(string(c)); err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: inject text: %v\n", err)
+		noticef("scterm: inject text: %v\n", err)
 	}
 }
 

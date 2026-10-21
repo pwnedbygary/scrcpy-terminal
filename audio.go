@@ -194,7 +194,7 @@ func (a *audioSink) open() {
 			for attempt := 0; attempt < 3; attempt++ {
 				sink := C.sct_audio_open_with_server(cstr("scterm"), cstr(server), cstr(device))
 				if sink != nil && sink.valid != 0 {
-					fmt.Fprintf(stderrWriter(), "scterm: audio sink: %s (device %q)\n",
+					noticef("scterm: audio sink: %s (device %q)\n",
 						serverOrDefault(server), deviceOrDefault(device))
 					a.sink = sink
 					a.err = nil
@@ -441,7 +441,7 @@ func cleanupStaleStreams() {
 	n := int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("scterm")))
 	n += int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("sct")))
 	if n > 0 {
-		fmt.Fprintf(stderrWriter(), "scterm: silenced %d leftover audio stream(s)\n", n)
+		noticef("scterm: silenced %d leftover audio stream(s)\n", n)
 	}
 }
 

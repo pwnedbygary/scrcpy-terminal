@@ -172,7 +172,7 @@ func deviceMsgReader(conn net.Conn) {
 			// A closed socket is the normal way this goroutine ends: on quit,
 			// the session tears the control connection down first.
 			if !isClosedConnErr(err) {
-				fmt.Fprintf(stderrWriter(), "scterm: control recv: %v\n", err)
+				noticef("scterm: control recv: %v\n", err)
 			}
 			return
 		}
@@ -228,7 +228,7 @@ func parseDeviceMessage(b []byte) (int, bool) {
 		}
 		return 5 + l, true
 	default:
-		fmt.Fprintf(stderrWriter(), "scterm: unknown device msg %d\n", b[0])
+		noticef("scterm: unknown device msg %d\n", b[0])
 		return 1, true
 	}
 }
