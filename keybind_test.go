@@ -52,6 +52,139 @@ func TestScreenshotNoFrameYet(t *testing.T) {
 	}
 }
 
+// TestScreenshotKeyRepeat: a terminal sends Alt+S held down as more presses,
+// here the first repeat half a second after the press and the rest 33 ms
+// apart. A press within 200 ms of the Alt+S key press before it is the key's
+// repeat and takes no screenshot, so the hold takes two: the press's and the
+// first repeat's. Once the key is let go, a press 199 ms after the last
+// repeat is taken for one too, and a press 200 ms after that takes a
+// screenshot. The clock is the test's: each press says when it came. With no
+// frame yet, a press that takes a screenshot says so at once.
+func TestScreenshotKeyRepeat(t *testing.T) {
+	a := &app{tui: &tui{cols: 80, rows: 39, running: true}, stream: &streamState{}}
+	start := time.Date(2026, 10, 21, 4, 55, 0, 0, time.Local)
+	var at time.Duration
+	press := func(after time.Duration, shot bool, what string) {
+		t.Helper()
+		at += after
+		want := ""
+		if shot {
+			want = "scterm: screenshot: no frame yet\n"
+		}
+		if out := stderrOf(t, func() { a.screenshotKey(start.Add(at)) }); out != want {
+			t.Errorf("%s, %v after the first press, said %q, want %q", what, at, out, want)
+		}
+	}
+	press(0, true, "the press")
+	press(500*time.Millisecond, true, "the first repeat")
+	for range 30 {
+		press(33*time.Millisecond, false, "a repeat")
+	}
+	press(199*time.Millisecond, false, "a press 199 ms after the last repeat")
+	press(200*time.Millisecond, true, "a press 200 ms after the Alt+S before it")
+}
+
+// TestScreenshotRepeatOnlyFromTheKey: Alt+S from the terminal is checked for
+// a repeat; the action bar's Shot and the menu's Screenshot row, chosen by its
+// letter or a click, are not, nor do they count as the Alt+S key press before
+// one. With every key press after the first a repeat (shotKeyRepeat an hour):
+// the bar and the menu take one screenshot each time, the first Alt+S after
+// them takes one too, a second Alt+S takes none, the bar and the menu still
+// take one each, and the next Alt+S is still a repeat, with the menu open too.
+func TestScreenshotRepeatOnlyFromTheKey(t *testing.T) {
+	withTermSize(t, 200, 30) // every button on one page
+	old := shotKeyRepeat
+	shotKeyRepeat = time.Hour
+	t.Cleanup(func() { shotKeyRepeat = old })
+	a := newTestApp(nil)
+	a.tui = &tui{cols: 200, rows: 29, running: true}
+	a.stream = &streamState{} // no frame yet: a screenshot says so at once
+	shots := func(fn func()) int {
+		t.Helper()
+		var out string
+		captureStdout(t, func() { out = stderrOf(t, fn) }) // the overlays paint
+		return strings.Count(out, "scterm: screenshot: no frame yet\n")
+	}
+	altS := func() { a.handleInput([]byte{0x1b, 's'}) }
+	barAndMenu := func() {
+		t.Helper()
+		captureStdout(t, func() { a.wakeBar(); a.refreshOverlays() })
+		x := barCell(t, a, "Shot")
+		if n := shots(func() { a.handleInput(mouseSeq(0, x, a.barBotRow, true)) }); n != 1 {
+			t.Errorf("the bar's Shot took %d screenshots, want 1", n)
+		}
+		captureStdout(t, a.toggleMenu)
+		if n := shots(func() { a.handleInput([]byte{'s'}) }); n != 1 {
+			t.Errorf("the menu's Screenshot row, by its letter, took %d screenshots, want 1", n)
+		}
+		captureStdout(t, a.toggleMenu)
+		row := 0
+		for _, h := range a.menuHits {
+			if h.item.Op == "screenshot" {
+				row = h.row
+			}
+		}
+		if row == 0 {
+			t.Fatal("the menu has no Screenshot row")
+		}
+		if n := shots(func() { a.handleInput(mouseSeq(0, 5, row, true)) }); n != 1 {
+			t.Errorf("the menu's Screenshot row, clicked, took %d screenshots, want 1", n)
+		}
+	}
+	barAndMenu()
+	if n := shots(altS); n != 1 {
+		t.Fatalf("Alt+S after the bar and the menu took %d screenshots, want 1: neither is a key press", n)
+	}
+	if n := shots(altS); n != 0 {
+		t.Errorf("Alt+S again took %d screenshots, want none: it is the key's repeat", n)
+	}
+	barAndMenu()
+	if n := shots(altS); n != 0 {
+		t.Errorf("Alt+S after the bar and the menu took %d screenshots, want none: it is still a repeat", n)
+	}
+	captureStdout(t, a.toggleMenu)
+	if !a.menuOpen {
+		t.Fatal("the menu did not open")
+	}
+	if n := shots(altS); n != 0 {
+		t.Errorf("Alt+S with the menu open took %d screenshots, want none: it is still a repeat", n)
+	}
+}
+
+// TestScreenshotKeyWithTheMenuOpen: Alt+S with the menu open is a key press
+// like any other. As the first Alt+S it takes a screenshot (the menu neither
+// drops the chord nor closes on it), and it is recorded, so the next Alt+S is
+// its repeat (shotKeyRepeat an hour).
+func TestScreenshotKeyWithTheMenuOpen(t *testing.T) {
+	withTermSize(t, 200, 30)
+	old := shotKeyRepeat
+	shotKeyRepeat = time.Hour
+	t.Cleanup(func() { shotKeyRepeat = old })
+	a := newTestApp(nil)
+	a.tui = &tui{cols: 200, rows: 29, running: true}
+	a.stream = &streamState{} // no frame yet: a screenshot says so at once
+	shots := func(fn func()) int {
+		t.Helper()
+		var out string
+		captureStdout(t, func() { out = stderrOf(t, fn) }) // the menu paints
+		return strings.Count(out, "scterm: screenshot: no frame yet\n")
+	}
+	altS := func() { a.handleInput([]byte{0x1b, 's'}) }
+	captureStdout(t, a.toggleMenu)
+	if !a.menuOpen {
+		t.Fatal("the menu did not open")
+	}
+	if n := shots(altS); n != 1 {
+		t.Errorf("the first Alt+S, with the menu open, took %d screenshots, want 1", n)
+	}
+	if !a.menuOpen {
+		t.Error("the menu closed on the first Alt+S, want it left open")
+	}
+	if n := shots(altS); n != 0 {
+		t.Errorf("Alt+S after the one with the menu open took %d screenshots, want none: its repeat", n)
+	}
+}
+
 // canvasApp is a terminal UI app on an 80x40 canvas (80 columns, 20 rows) that
 // has drawn a frame of frameW x frameH: black letterbox bars, and in the picture
 // at (x, y), w x h, a pattern of BGR0 pixels (bytes B, G, R, unused, FFmpeg's

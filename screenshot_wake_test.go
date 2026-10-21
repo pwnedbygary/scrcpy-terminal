@@ -140,6 +140,78 @@ func TestShotRegisteredBeforeItsDeadline(t *testing.T) {
 	}
 }
 
+// clearHeldConn is a video socket that holds the wake's first clear of the
+// read deadline until another request has set its deadline: that request comes
+// after the wake began, as late before the clear as it can.
+type clearHeldConn struct {
+	net.Conn
+	mu       sync.Mutex
+	cleared  bool          // the first clear has come
+	holding  bool          // and waits for a request's deadline
+	clearing chan struct{} // closed when the first clear begins to wait
+	released chan struct{} // closed once a request's deadline is set
+}
+
+func newClearHeldConn(c net.Conn) *clearHeldConn {
+	return &clearHeldConn{Conn: c, clearing: make(chan struct{}), released: make(chan struct{})}
+}
+
+func (c *clearHeldConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	switch {
+	case t.IsZero() && !c.cleared:
+		c.cleared, c.holding = true, true
+		c.mu.Unlock()
+		close(c.clearing)
+		select {
+		case <-c.released:
+		case <-time.After(5 * time.Second):
+		}
+	case !t.IsZero() && c.holding:
+		c.holding = false
+		c.mu.Unlock()
+		defer close(c.released) // once the deadline below is set
+	default:
+		c.mu.Unlock()
+	}
+	return c.Conn.SetReadDeadline(t)
+}
+
+// TestShotDeadlineClearedBeforeTheLook: the wake clears the read deadline
+// before it looks for requests. Here its clear is held until a second request
+// has set its deadline, and both requests are answered: the look comes after
+// the clear, and finds the second one too. Were the deadline cleared after the
+// look, the look would find only the first, the clear would take the second's
+// deadline with it, and the second would wait for a frame that does not come.
+// The hold makes that order happen however many CPUs the test has.
+func TestShotDeadlineClearedBeforeTheLook(t *testing.T) {
+	t.Chdir(t.TempDir())
+	withShotWait(t, time.Hour)
+	var video *clearHeldConn
+	r := newShotRigOn(t, 80, 24, 1280, 2800, func(c net.Conn) net.Conn {
+		video = newClearHeldConn(c)
+		return video
+	})
+	first := r.a.stream.requestShot() // and the device sends nothing more
+	select {
+	case <-video.clearing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request did not wake the video goroutine")
+	}
+	second := r.a.stream.requestShot()
+	for i, ch := range []chan videoShot{first, second} {
+		select {
+		case shot, ok := <-ch:
+			if !ok || shot.err != nil || shot.w != 1280 || shot.h != 2800 {
+				t.Fatalf("request %d: %dx%d, error %v, open %v; want the 1280x2800 frame",
+					i+1, shot.w, shot.h, shot.err, ok)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("request %d was not answered: the wake's clear took its deadline", i+1)
+		}
+	}
+}
+
 // tlsRecorder is the device's end of a TLS connection. Once keep is set,
 // after the handshake, what TLS writes is kept for the test to send (take).
 type tlsRecorder struct {

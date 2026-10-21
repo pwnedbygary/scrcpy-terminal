@@ -86,6 +86,9 @@ type app struct {
 	// keyboard auto-grabbed the mouse on open (Zellij); restore on close
 	kbAutoGrabbed bool
 
+	// shotKeyAt is when the last Alt+S key press came (screenshotKey).
+	shotKeyAt time.Time
+
 	// quitting is set once shutdown has begun, so teardown-time socket errors
 	// ("stream ended: use of closed network connection") are not reported as
 	// failures on the way out.

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"image"
 	"image/png"
 	"io"
@@ -90,6 +91,15 @@ func newShotRigOn(t *testing.T, cols, rows, w, h int, video func(net.Conn) net.C
 		case <-r.ended:
 		case <-time.After(5 * time.Second):
 			t.Error("runVideo did not end after the device hung up")
+		}
+		// A shot the test stopped waiting for ends before the next test runs:
+		// its notice would race that test's stderr, and its file land there.
+		if done := a.stream.shotDone; done != nil {
+			select {
+			case <-done:
+			case <-time.After(shotTestWait):
+				t.Error("the screenshot was neither saved nor dropped after the test")
+			}
 		}
 	})
 	r.session = []byte{0x80, 0, 0, 0}
@@ -187,13 +197,46 @@ func withShotWait(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { shotWait = old })
 }
 
-// waitShot waits for a screenshot to be saved or dropped.
+// shotTestWait is how long a test waits for a screenshot to be saved. Under
+// -race, encoding the PNG of a 1280x2800 frame takes 1 to 2 s, and a busy
+// machine can make that many times longer.
+const shotTestWait = 30 * time.Second
+
+// waitShot waits for a screenshot to be saved or dropped. One slower than
+// shotTestWait fails the test, which still waits for it, as long again: a
+// shot that ends after the test would post its notice on another's stderr.
 func waitShot(t *testing.T, done <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the screenshot was neither saved nor dropped within 5 s")
+		return
+	case <-time.After(shotTestWait):
+		t.Errorf("the screenshot was neither saved nor dropped within %v", shotTestWait)
+	}
+	select {
+	case <-done:
+	case <-time.After(shotTestWait):
+		t.Fatalf("the screenshot was neither saved nor dropped within %v", 2*shotTestWait)
+	}
+}
+
+// waitSaverLocked waits until a screenshot's saving goroutine has taken its
+// picture and waits for the UI lock (saveShot), which the test holds. Only the
+// goroutine's stack shows that it took the picture off its channel.
+func waitSaverLocked() error {
+	buf := make([]byte, 1<<20)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n := runtime.Stack(buf, true)
+		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(g, ".(*app).saveShot") && strings.Contains(g, "sync.(*Mutex).Lock(") {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("the saving goroutine did not come to wait for the UI lock")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -379,21 +422,39 @@ func TestShotFallsBackToTheCanvas(t *testing.T) {
 	}
 }
 
-// TestShotWithTheVideoOff: with --video=false there is no frame to save, and
-// the notice says why rather than that a frame is yet to come.
+// TestShotWithTheVideoOff: with no video socket there is no frame to save, and
+// the notice says why, as the placeholder does, rather than that a frame is
+// yet to come: the video is off (--video=false), or there is no video from
+// the device (a peer that grants no view), named with its control characters
+// taken out, or "the device" when its name is not known.
 func TestShotWithTheVideoOff(t *testing.T) {
-	t.Chdir(t.TempDir())
-	a := streamApp(&session{deviceName: "Pixel 8"})
-	a.tui = &tui{cols: 80, rows: 23, running: true}
-	if err := a.stream.runVideo(); err != nil {
-		t.Fatal(err)
-	}
-	out := stderrOf(t, func() { waitShot(t, a.takeShot(shotTime)) })
-	if want := "scterm: screenshot: the video is off\n"; out != want {
-		t.Errorf("notice %q, want %q", out, want)
-	}
-	if files := shotFiles(t); len(files) != 0 {
-		t.Errorf("wrote %v with the video off", files)
+	for _, tc := range []struct {
+		name   string
+		video  bool // --video
+		device string
+		want   string
+	}{
+		{"video off", false, "Pixel 8", "scterm: screenshot: the video is off\n"},
+		{"no video in the session", true, "Pixel 8", "scterm: screenshot: no video from Pixel 8\n"},
+		{"control characters", true, "Evil\x1b]0;x\x07Phone", "scterm: screenshot: no video from Evil ]0;x Phone\n"},
+		{"unnamed device", true, "", "scterm: screenshot: no video from the device\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			a := streamApp(&session{deviceName: tc.device})
+			a.cfg.video = tc.video
+			a.tui = &tui{cols: 80, rows: 23, running: true}
+			if err := a.stream.runVideo(); err != nil {
+				t.Fatal(err)
+			}
+			out := stderrOf(t, func() { waitShot(t, a.takeShot(shotTime)) })
+			if out != tc.want {
+				t.Errorf("notice %q, want %q", out, tc.want)
+			}
+			if files := shotFiles(t); len(files) != 0 {
+				t.Errorf("wrote %v with no video", files)
+			}
+		})
 	}
 }
 
@@ -494,14 +555,29 @@ func TestShotPressesJoinTheShotInFlight(t *testing.T) {
 			presses = append(presses, r.a.takeShot(shotTime))
 		}
 		// Two more once the frame has answered it (settle), while it waits to
-		// be saved: saving needs the UI lock, which the test holds. A press
-		// that took a shot of its own would wait for that lock too, so they
-		// are made on a goroutine of their own.
+		// be saved: saving needs the UI lock, which the test holds. They come
+		// once the saving goroutine has the picture and waits for that lock;
+		// settle makes sure only that the picture was sent. A press that took
+		// a shot of its own would wait for that lock too, so they are made on
+		// a goroutine of their own.
 		r.a.tui.mu.Lock()
 		err := r.send(r.frames[1])
 		if err == nil {
 			err = r.settle()
 		}
+		if err == nil {
+			err = waitSaverLocked()
+		}
+		notDone := func() {
+			for i, d := range presses {
+				select {
+				case <-d:
+					t.Errorf("press %d was done before the shot in flight was saved", i+1)
+				default:
+				}
+			}
+		}
+		notDone()
 		late := make(chan (<-chan struct{}), 2)
 		go func() {
 			for range 2 {
@@ -519,13 +595,7 @@ func TestShotPressesJoinTheShotInFlight(t *testing.T) {
 				break waitLate
 			}
 		}
-		for i, d := range presses {
-			select {
-			case <-d:
-				t.Errorf("press %d was done before the shot in flight was saved", i+1)
-			default:
-			}
-		}
+		notDone()
 		r.a.tui.mu.Unlock()
 		if err != nil {
 			t.Fatal(err)

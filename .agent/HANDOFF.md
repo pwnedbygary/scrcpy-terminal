@@ -7,6 +7,281 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 39: screenshot tests, held Alt+S)
+
+- Held Alt+S: a terminal sends a held key as more presses, so holding
+  Alt+S saved a file for each shot that ended while the key was down
+  (about 20 a second on a simple screen). Now an Alt+S key press within
+  200 ms of the Alt+S key press before it, taken or not, is the key's
+  repeat and takes no screenshot (`screenshotKey`, `shotKeyRepeat` in
+  input.go; `shotKeyAt` in app.go). At the usual repeat rates the first
+  repeat comes 250 to 600 ms after the press and the rest 25 to 50 ms
+  apart, so a hold saves one file or two: the press's, and the first
+  repeat's unless the press's shot is still in flight then. With repeats
+  200 ms or more apart, each one saves another, unless a shot is still in
+  flight then. 200 ms is four times the longest usual repeat gap and shorter
+  than the shortest usual first-repeat delay; two presses less than
+  200 ms apart save one. The action bar's Shot and the menu's
+  Screenshot row call `screenshot()` and are never repeats. The time is
+  a parameter (`screenshotKey(now)`), as in `quitArmed` and
+  `barHideCheck`. README.md says what a held Alt+S does.
+- A session with no video socket says what the placeholder says: with
+  `--video=false`, `scterm: screenshot: the video is off`; otherwise, as
+  with a peer that grants no view, `scterm: screenshot: no video from
+  DEVICE`, the name with control characters taken out (`deviceName`).
+- README.md: a press while a screenshot is "still being taken or saved"
+  takes no new one (it said "still being saved").
+- Tests that catch their regressions at any CPU count. Before its two
+  late presses, `TestShotPressesJoinTheShotInFlight` waits until the
+  saving goroutine holds the picture and waits for the UI lock that the
+  test holds (`waitSaverLocked`: a bounded poll of `runtime.Stack`, so no
+  seam in production code). New `TestShotDeadlineClearedBeforeTheLook`:
+  its socket (`clearHeldConn`) holds the wake's clear of the read
+  deadline until a second request has set its deadline, so a wake that
+  looks before it clears loses that request at any CPU count. `heldConn`
+  and its test are unchanged.
+- A slow PNG test fails alone: `waitShot`'s budget is `shotTestWait`
+  (30 s, was 5 s); past it the test fails and waits as long again, so a
+  late notice still lands in the test's own capture; the rig's cleanup
+  waits (at most 30 s) for its last shot. A shot that outlives all three
+  waits (90 s) can still reach the next test.
+- web/input_test.mjs: the page's `performance.now` is the suite's own
+  clock, moved by `elapse(ms)`, and the three-finger tests no longer
+  sleep, so a loaded machine no longer makes the tap look longer than
+  `SOFTKEY_TAP_MS` (700 ms). That cause was checked first: under 8 busy
+  loops on its CPU, BASE's suite failed the three tap checks in 3 of 3
+  runs, the tap timed at 2455 to 5995 ms. On this host ananicy-cpp runs
+  every node process under `SCHED_IDLE` (its rule for `node`, type
+  `BG_CPUIO`), so any load on the suite's CPU starves it. Timers stay
+  real. player.js is unchanged.
+- New tests: `TestScreenshotKeyRepeat` (the test's clock: the press, the
+  first repeat 500 ms later, 30 repeats 33 ms apart, a press 199 ms after
+  the last repeat and one 200 ms after that) and
+  `TestScreenshotRepeatOnlyFromTheKey` (Alt+S through `handleInput`, the
+  bar's Shot, the menu's row; rounds 2 to 4 add to it, below), and from
+  round 4 `TestScreenshotKeyWithTheMenuOpen` (with the menu open, the first
+  Alt+S takes a screenshot and, from round 5, leaves the menu open; the next
+  Alt+S is its repeat). `TestShotWithTheVideoOff` is a table: video off, no
+  video in the session, a name with control characters, and from round 2 a
+  device with no name.
+- Verification (builder's tree `b14cb05`: `9598a59` plus parts 33 to 36;
+  go1.27.1, `iso.env`, bwrap with no network): gofmt, vet, build and
+  `git diff --check` clean; the docs checker finds 33 links and no
+  problem. `go test -count=1 ./...`: 447 pass, 3 skip, 0 fail (root
+  419/1, internal/release 5, peer 23/2; BASE 444/3). The 32 touched
+  tests: `-race -count=3` 96/96, `-count=20` 640/640. The 5 new and
+  changed tests: `-count=20` 100/100, `-race -count=20` 100/100,
+  `-cpu=1,2,4 -count=5` 75/75. Node suites, BASE and this part: input
+  130, worklet 41, pointer 17, conn 61, page 285, audio 183, all pass;
+  `TestWebClientSuites` passes.
+- At each of `-cpu=1`, 2 and 4, 20 runs: MW2 (the flight ends when the
+  saver receives the answer) fails the coalescing test 20 of 20 (BASE's
+  test: 0, 19, 9); MA (the wake looks before it clears) fails the new
+  wake test 20 of 20 (BASE's wake tests: 0, 20, 20). Unmutated, both
+  pass 20 of 20 at each count.
+- Starved `-race` runs of the screenshot tests (the binary and 4 or 8
+  busy loops on one CPU): BASE fails the five PNG tests at 5 s, and with
+  4 loops prints 17 race reports while later tests run; this part
+  passes 21 of 21 at both loads with none; with only its budget cut to
+  6 s, the slow tests (3 with 4 loops, 5 with 8) fail once each, in
+  their own test, and no race report comes.
+- BASE's input suite and this part's, started at once on one CPU: with
+  8 busy loops there (one round), BASE's failed the three tap checks
+  (2164 s) and this part's passed 130 of 130 (2313 s); with one loop,
+  BASE's failed in 2 of 2 rounds (three other checks of the same test)
+  and this part's passed both times. Alone with one loop, BASE's passed
+  once: the failures depend on timing.
+- Fail before: on BASE's input.go and app.go (and a shim), the two key
+  tests and two of the three video-off subtests fail. Mutants, by
+  overlay: 23 of 25 Go mutants fail a test (MK by hanging until the 2
+  min timeout), among them seven of the repeat check and two of the
+  notice. Not caught: MB as built here (the deadline set under `shotMu`,
+  before the append) is equivalent, since the wake's look takes `shotMu`
+  (the review's MB, set before the lock, is caught); MC (the flight ends
+  after the write, before the notice) survives: the notice still came
+  before the tests read it. Both JS mutants (a real clock again; the
+  tap's length ignored) fail.
+- Corrections to part 35's entry: round 2 did not make both docs say
+  "being taken or saved": README.md said "still being saved", and only
+  docs/ARCHITECTURE.md said "taken or saved"; README.md says it from
+  part 39. A flight does not end only when "its file is written or it is
+  dropped": it ends when the shot's goroutine does, which is also after
+  an error notice (the shot's error, no frame at the end of the wait, a
+  failed write), the channel closing after the notice. And the test's
+  "while it waits to be saved" held only once the saver had run; from
+  part 39 the test makes sure of it.
+- Intake rehearsal: on a copy of the worktree as at 12:18 (`684f313`
+  plus 53 uncommitted paths) the seven files merge three ways with no
+  conflict (`shotKeyAt` sits below `kbAutoGrabbed`, clear of the
+  worktree's new `streamFPS`); there gofmt and vet are clean,
+  `go test ./...` gives 471 pass, 3 skip, 0 fail, `-race -count=3` on the
+  touched tests and `TestStderrCapturesAreOrderedWithNotices` 99/99, and
+  the node suites pass.
+- Intake: merged three ways into the worktree over parts 34 to 38, 40
+  and 41, on part 33 as committed: README.md, app.go, input.go and
+  screenshot_test.go merged cleanly, each changed by exactly the
+  builder's lines; the other three files are the builder's.
+- Verification, snapshot round 1 (`/tmp/opencode/review-39`, stacked on
+  part 40's second round), every Go command inside the bwrap sandbox with
+  `iso.env`: gofmt, vet, the build and `git diff --check`; `go test ./...`
+  (471 top-level tests pass, 3 skip, 0 fail); `-race -count=3` on 33
+  related tests; the 3 new and 2 changed tests 20 times and 5 times under
+  `-race`. On the base's `input.go` and `app.go`, with the builder's shim,
+  the two key tests and two of the three video-off subtests fail. At one
+  CPU, 20 runs each, MW2 fails the coalescing test 20 of 20 and MA the new
+  wake test 20 of 20. The docs checker finds 33 relative links in the
+  README and docs/ARCHITECTURE.md and no problem; the whole module, in the
+  desktop-like sandbox, connects to none of its decoy sockets, while the
+  positive control reaches two.
+- Review round 1 (PASS), with one LOW and three NITs. LOW: no test showed
+  that the action bar and the menu leave the key's window alone. With
+  `screenshot()` also recording the time (the review's mutant RB), all 28
+  screenshot and mnemonic tests passed: `TestScreenshotRepeatOnlyFromTheKey`
+  pressed Alt+S before the bar and the menu, and its hour-long window made
+  the last Alt+S a repeat either way. NITs: the README said a held Alt+S
+  saves one screenshot or two, and this entry gave the repeat times as
+  fact, though with repeats 200 ms or more apart each repeat after a saved
+  shot takes another; with `knownDeviceName()` in place of `deviceName()`
+  in the video-off notice (mutant RN), an unnamed device's notice would
+  end at "from", and no test had such a device; and the New tests bullet
+  said "presses 199 and 200 ms after the last", though the second comes
+  200 ms after the first, 399 ms after the last repeat. The first bullet
+  and the New tests bullet are corrected above.
+- Round 2: `TestScreenshotRepeatOnlyFromTheKey` clicks the bar's Shot and
+  chooses the menu's row first, and the Alt+S after them must take a
+  screenshot; then a second Alt+S takes none, the bar and the menu take
+  one each again, and the next Alt+S is still a repeat.
+  `TestShotWithTheVideoOff` gains a device with no name ("no video from
+  the device"). The README's held-Alt+S sentences say "with the usual
+  repeat rates" and what a slower repeat does, and the rest of that
+  paragraph is rewrapped; `shotKeyRepeat`'s comment says the same. The
+  part moves onto part 40's fourth round, on part 37's fifth.
+- Verification, round 2, in the worktree (parts 37 to 41, uncommitted),
+  each Go command inside the bwrap sandbox with `iso.env`: gofmt and vet;
+  the two changed tests and `TestScreenshotKeyRepeat` 20 times and 5 times
+  under `-race`; the 28 screenshot and mnemonic tests pass; the whole
+  module, 471 pass and 3 skip. The review's mutants, rebuilt from the
+  worktree's input.go: RB fails `TestScreenshotRepeatOnlyFromTheKey`, RN
+  the unnamed-device case of `TestShotWithTheVideoOff`, and RT (the repeat
+  check on the real clock) `TestScreenshotKeyRepeat`; with round 1's test
+  files, RB and RN pass, the gaps the review found.
+- Verification, snapshot round 2 (`/tmp/opencode/review-39b`, on part 40's
+  fourth round), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (471
+  top-level tests pass, 3 skip, 0 fail); `-race -count=3` on 33 related
+  tests; the 3 new and 2 changed tests 20 times and 5 times under `-race`.
+  On the base's `input.go` and `app.go`, with the builder's shim, the two
+  key tests and three of the four video-off subtests fail. At one CPU, 20
+  runs each, MW2 fails the coalescing test 20 of 20 and MA the new wake
+  test 20 of 20. RB, RN and RT each fail their test; with round 1's test
+  files, RB and RN pass. The docs checker finds 33 relative links in the
+  README and docs/ARCHITECTURE.md and no problem; the whole module, in the
+  desktop-like sandbox, connects to none of its decoy sockets, while the
+  positive control reaches two. These checks ran before this bullet was
+  written; the snapshot was then rebuilt with it, the same files.
+- Review round 2 (PASS), with one LOW and three NITs. LOW: the menu's
+  Screenshot row was checked through its letter, never through a click
+  (`mouseEvent`, `menuHitTest`, `runMenuRow`): with the click recording
+  the key's time (V3) or going through `screenshotKey` (V4), every test
+  passed. NITs: two variants no test caught (V5, a bar or menu press that
+  moves a window still open, which the hour-long window cannot see; V14,
+  Alt+S with the menu open run as the menu's row, as no test pressed Alt+S
+  with the menu open); the README's "With a slower repeat" overstated,
+  as a repeat under 0.2 s apart saves nothing more, and this entry's and
+  the comment's "each one that comes after a saved shot" was looser than
+  the code, since a repeat that comes while a shot is in flight joins it;
+  and the New tests bullet still listed three video-off rows. The README,
+  the first bullet and the New tests bullet are corrected above. It found
+  round 1's findings resolved, the code correct, and every figure
+  reproduced. Its suggestions are in
+  /tmp/opencode/review-39b/round2-findings.md; taken: the click, Alt+S
+  with the menu open, the README's words.
+- Round 3: `TestScreenshotRepeatOnlyFromTheKey` also clicks the menu's
+  Screenshot row in each pass over the bar and the menu, and ends with
+  Alt+S pressed with the menu open, which must still be a repeat. The
+  README says "With repeats 0.2 seconds or more apart, each repeat takes
+  another, unless one is still being taken or saved"; `shotKeyRepeat`'s
+  comment and the first bullet say the same. The part moves onto part
+  40's fifth round, on part 38's seventh and part 37's sixth.
+- Verification, round 3, in the worktree (parts 37 to 41, uncommitted),
+  each Go command inside the bwrap sandbox with `iso.env`: gofmt and vet;
+  the changed tests 20 times and 5 times under `-race`; the 54
+  screenshot, mnemonic, menu and bar tests pass; the whole module, 471
+  pass and 3 skip. Mutants laid on the worktree's files: RB, RN and RT
+  fail their tests as before; V3, V4 and V14 fail
+  `TestScreenshotRepeatOnlyFromTheKey`, and pass round 2's test file, the
+  gap the review found; V5 passes, as no test here can see it.
+- Review round 3 (PASS), with two NITs. The Alt+S with the menu open at the
+  end of `TestScreenshotRepeatOnlyFromTheKey` wants no screenshot, as a
+  repeat, which a menu that dropped the chord would give too: with the menu
+  open, Alt+S dropped (X1), closing the menu and taking nothing (X2), or
+  checked but not recorded (X3) passed every test, and X3 would let a held
+  Alt+S save a file for each shot that ends while the key is held, with the
+  menu open; the test did not check that the menu was open either. And the
+  Review round 2 bullet said the hour-long window cannot see V14, which
+  fails round 3's test with that window (corrected above). It found round
+  2's LOW resolved, the README, the comment and this entry true to the code,
+  and every figure reproduced. Its suggestions, taken: its probe, and part
+  38's round in the Round 3 bullet's move.
+- Round 4: new `TestScreenshotKeyWithTheMenuOpen`, the review's probe: on
+  a fresh app with the menu open, the first Alt+S takes a screenshot and
+  the next one is its repeat. `TestScreenshotRepeatOnlyFromTheKey` checks
+  that the menu is open before its last Alt+S. The part moves onto part
+  40's sixth round, on part 38's eighth and part 37's seventh.
+- Verification, round 4, in the worktree (parts 37 to 41, uncommitted),
+  each Go command inside the bwrap sandbox with `iso.env`: gofmt and vet;
+  the changed tests 20 times and 5 times under `-race`; the 55
+  screenshot, mnemonic, menu and bar tests pass; the whole module, 472
+  pass and 3 skip. Mutants laid on the worktree's files: RB, RN, RT, V3
+  and V4 fail their tests as before, and the review's X4 and X5 fail
+  `TestScreenshotRepeatOnlyFromTheKey`; X1, X2 and X3 fail the new test,
+  and pass round 3's test file, the gap the review found; V14 fails both
+  tests; V5 passes, as no test here can see it.
+- Review round 4 (PASS), with two NITs: the new test's comment said the
+  menu neither drops the chord nor closes on it, but the test did not
+  check that the menu stays open (Y1, a menu that closes on Alt+S and then
+  takes the shot, passed every test); and the New tests bullet did not
+  name the new test. It found round 3's NITs resolved and every figure
+  reproduced. Its suggestions, taken: the check script's label (three key
+  tests fail on the base files, not two), the Review round 3 bullet's
+  words on X3, and no `delta-vs-old.txt` in the next snapshot, as the
+  snapshot script wrote that file before laying on the round's test.
+- Round 5 adds to `TestScreenshotKeyWithTheMenuOpen` the check that the
+  menu is still open after the first Alt+S, and corrects the New tests and
+  Review round 3 bullets above. The part moves onto part 40's seventh
+  round, on part 38's ninth and part 37's ninth.
+- Verification, round 5, in the worktree (parts 37 to 41, uncommitted),
+  each Go command inside the bwrap sandbox with `iso.env`: gofmt and vet;
+  the changed tests 20 times and 5 times under `-race`; the 55
+  screenshot, mnemonic, menu and bar tests pass; the whole module, 472
+  pass and 3 skip. Mutants laid on the worktree's files give round 4's
+  results; the review's Y1 fails the new test and passes round 4's test
+  file, the gap the review found, and its Y2 (Alt+S with the menu open
+  recorded and shot without the repeat check) fails
+  `TestScreenshotRepeatOnlyFromTheKey` and the new test.
+- Review round 5 (PASS), with one NIT: the bullet above said Y2 fails both
+  key tests, where this entry's two key tests are `TestScreenshotKeyRepeat`
+  and `TestScreenshotRepeatOnlyFromTheKey`; Y2 passes the first (corrected
+  above). It found round 4's NITs resolved (with Y1 the new check is the
+  package's one failure, and under round 4's test file Y1 passes) and every
+  figure it re-ran reproduced. Its suggestions, taken: "round 4's results"
+  for the mutants, as V5 passes; the check script's labels for V14 and Y2,
+  which said "both key tests" too, name the two tests.
+- Round 6 corrects the Verification, round 5 bullet, and the part moves
+  onto part 40's seventh round, on part 38's ninth and part 37's eleventh. The
+  part's files are round 5's.
+- Left alone: menu.go, stream.go, player.js, docs/ARCHITECTURE.md (held
+  Alt+S is in the README only); what a screenshot saves, its name, one
+  shot at a time and the wake. The repeat window uses the time the run
+  loop handles a press, so a stall of the loop of more than 200 ms during
+  a hold can take one shot more (the review suggests stamping input when
+  it is read). A bar or menu press inside a window still open does not
+  move it, and no test shows that (the round-2 review's V5): it needs a
+  short real-clock window or a time given to `screenshot()`.
+- Not run: a real terminal's key repeat (the times are typical defaults),
+  the real phone and adb, a browser, and a peer that grants no view (the
+  test's session has no video socket).
+
 ## Update (2026-10-21: QoL overhaul, part 40: fixes from the first real-device run)
 
 - doctor runs commands only on the device scterm would use: the one

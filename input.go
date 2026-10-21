@@ -571,7 +571,7 @@ func (a *app) handleInput(b []byte) {
 			case "toolbar":
 				a.toggleMenu()
 			case "screenshot":
-				a.screenshot()
+				a.screenshotKey(time.Now())
 			case "resetvideo":
 				// Keyframe requests are the one action that silently does
 				// nothing without a control socket; say so, as the old
@@ -684,6 +684,28 @@ var shotWait = time.Second
 // on a goroutine of its own, so neither the decoder nor the run loop waits.
 func (a *app) screenshot() { a.takeShot(time.Now()) }
 
+// shotKeyRepeat is how soon after an Alt+S key press the next one is taken for
+// the key's repeat. A terminal sends a held key as more presses: at the usual
+// rates, the first repeat comes about 250 to 600 ms after the press, the rest
+// 25 to 50 ms apart. 200 ms is four times the longest of those gaps, room for
+// a slow link, and shorter than the first repeat's delay. So a held Alt+S
+// usually takes one shot or two: the press's, and the first repeat's unless
+// the press's is still in flight then. With repeats 200 ms or more apart, each
+// one takes a shot of its own, unless one is still in flight then. Of two
+// presses less than 200 ms apart, the second takes none.
+var shotKeyRepeat = 200 * time.Millisecond
+
+// screenshotKey is an Alt+S key press at now. One within shotKeyRepeat of the
+// Alt+S key press before it is the key's repeat, and takes no screenshot.
+// Presses from the action bar and the menu are never repeats (screenshot).
+func (a *app) screenshotKey(now time.Time) {
+	repeat := now.Sub(a.shotKeyAt) < shotKeyRepeat
+	a.shotKeyAt = now
+	if !repeat {
+		a.takeShot(now)
+	}
+}
+
 // takeShot is screenshot, with the time that names the file. The channel is
 // closed once the shot is saved or dropped. One shot is taken at a time: a
 // press while one is in flight, from its press until it is saved or dropped,
@@ -714,7 +736,13 @@ func (a *app) takeShot(at time.Time) <-chan struct{} {
 	a.tui.mu.Unlock()
 	switch {
 	case a.sess != nil && a.sess.video == nil:
-		noticef("scterm: screenshot: the video is off\n")
+		// As the placeholder says (placeholderText): video turned off, or a
+		// session that has none, as with a peer that grants no view.
+		if a.cfg.video {
+			noticef("scterm: screenshot: no video from %s\n", a.deviceName())
+		} else {
+			noticef("scterm: screenshot: the video is off\n")
+		}
 		close(done)
 		return done
 	case a.stream == nil || a.stream.frameCount.Load() == 0:

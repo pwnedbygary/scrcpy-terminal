@@ -25,6 +25,13 @@ if (!code.includes("class Input")) throw new Error("slice does not contain class
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// The page's clock (performance.now) is the test's own: it moves only when a
+// test says that time went by, so a slow machine cannot make a quick tap look
+// long. Timers stay real; the tests that wait for them depend only on the
+// order in which they fire.
+const clock = { ms: 0 };
+const elapse = (ms) => { clock.ms += ms; };
+
 const doc = { activeElement: null, addEventListener() {}, removeEventListener() {} };
 function fakeEl(id) {
   const listeners = {};
@@ -81,7 +88,7 @@ const ctx = {
   els, doc,
   toast: (m) => toasts.push(m),
   screenshot: () => shots.push(1),
-  performance: { now: () => Date.now() },
+  performance: { now: () => clock.ms },
   setTimeout, clearTimeout,
   requestAnimationFrame: (fn) => setTimeout(fn, 0),
   document: doc,
@@ -186,9 +193,9 @@ console.log("three-finger tap");
 {
   const h = harness();
   h.ev("down", 1, 100, 100);
-  await sleep(15);
+  elapse(15);
   h.ev("down", 2, 200, 100);
-  await sleep(15);
+  elapse(15);
   h.ev("down", 3, 300, 100);
   const mid = h.ops().slice();
   h.ev("up", 1, 100, 100);
@@ -233,7 +240,7 @@ console.log("three fingers, held");
   h.ev("down", 1, 5, 5);
   h.ev("down", 2, 6, 5);
   h.ev("down", 3, 7, 5);
-  await sleep(760);                      // longer than SOFTKEY_TAP_MS
+  elapse(760);                           // longer than SOFTKEY_TAP_MS
   h.ev("up", 1, 5, 5);
   h.ev("up", 2, 6, 5);
   h.ev("up", 3, 7, 5);

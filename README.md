@@ -315,11 +315,15 @@ Alt+S, or the Shot button, saves a screenshot: the device's picture at the strea
 browser, the page downloads it. In the terminal, scterm saves it in the current directory,
 without the bars around the picture, and the bottom line names the file. A second screenshot in
 the same second is named `scterm-YYYYMMDD-HHMMSS-2.png`, the next one `-3`, and so on. In the
-terminal, a press while a screenshot is still being saved takes no new one. When the device
-sends no new frames, as when its screen does not change or is off, scterm saves the last frame
-it received. If scterm cannot get the frame within a second, it saves what the terminal shows
-instead, at the terminal's resolution (one pixel for each half cell), and the bottom line says
-so.
+terminal, a press while a screenshot is still being taken or saved takes no new one, and scterm
+ignores an Alt+S that comes within 0.2 seconds of the one before it. With the usual repeat
+rates, holding Alt+S down there therefore saves one screenshot or two: the key's first repeat
+comes later than 0.2 seconds, the others sooner. With repeats 0.2 seconds or more apart, each
+repeat takes another, unless one is still being taken or saved. In the browser, holding it down
+saves one. When the device sends no new frames, as when its screen does not change or is off,
+scterm saves the last frame it received. If scterm cannot get the frame within a second, it
+saves what the terminal shows instead, at the terminal's resolution (one pixel for each half
+cell), and the bottom line says so.
 
 ### Sound on this computer
 
