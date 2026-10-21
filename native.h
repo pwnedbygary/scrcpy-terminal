@@ -29,8 +29,9 @@ int sct_vdec_recv(void *d);
 
 // Scale/convert the last received frame to RGBA into dst at dst_stride
 // (bytes per row). Destination region is dst_w x dst_h starting at dst (which
-// may point into a larger canvas, allowing centered letterboxing).
-// Returns 0 on success, -1 if no frame is available.
+// may point into a larger canvas, allowing centered letterboxing); no byte
+// outside it is written, right of a row or after the last.
+// Returns 0 on success, -1 if no frame is available or on error.
 // out_fw/out_fh receive the last frame's width/height.
 int sct_vdec_scale(void *d, uint8_t *dst, int dst_stride, int dst_w, int dst_h,
                    int *out_fw, int *out_fh);

@@ -7,6 +7,127 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 42: the picture's scaler stays inside the picture)
+
+- Found while making the pull request's screenshots: at 80x24 the terminal
+  showed a stripe of stray colour in the black margin right of the picture.
+  libswscale's vector code converts whole blocks of pixels. Scaled into the
+  canvas, a picture of an even width that is not a multiple of 8 spilled 2
+  to 6 pixels into the margin right of it on every row but the last two:
+  columns 50 to 53 at 80x24 with a 576x1280 stream. (The display's widths
+  are even, as `fitPicture` makes them; none of the 33 odd widths in the
+  builder's probe spilled.) At the frame's own size (screenshots,
+  `--dump-frames`, and every frame of the browser and window display, whose
+  canvas is the video) the blocks are 16 pixels on the computer tested (a
+  Ryzen 7 7800X3D, libswscale 10.1.102): a 1080- or 584-wide frame wrote 32
+  bytes past the end of a buffer of its exact size, into Go memory, and a
+  34- or 578-wide one left each row's last 2 pixels unwritten.
+- `sct_vdec_scale` (`native.c`) now scales into a frame the decoder owns
+  (`av_frame_get_buffer`, rows padded to 64 bytes, freed with the decoder,
+  allocated again when the size asked for changes) and copies exactly
+  `dst_w` pixels of each row into `dst`, whatever libswscale's block size.
+  `native.h` says nothing outside the region is written; a `stream.go`
+  comment no longer says swscale writes only the fit region.
+- `scale_test.go` (new) scales into marked buffers: the fixture's first
+  frame at every even width from 2 to 64, through resizes that keep first
+  the width, then the height, and ending exactly where a buffer ends, with
+  guard bytes after it; and two embedded frames, 1080x32 and 34x32 (183 and
+  124 bytes, the ffmpeg command beside them), at their own size. Before
+  this part all 4 tests fail (39 of 51 results); with it all 51 pass.
+- The picture's bytes are as before in 173 of 174 probed geometries
+  (SHA-256); the other is 578x1280 at its own size, where the old code left
+  2560 pixels unwritten. The real binary against the fake 576x1280 device
+  colours columns 30..49, 27..52 and 43..76 at 80x24, 80x30 and 120x40
+  (before: 30..53, 27..58, 43..82); 100x56 and 80x28 are unchanged.
+- All 8 mutants are caught: no copy; a copy 1 pixel too wide, 1 too narrow,
+  1 row short, or at the wrong source stride; an unpadded scratch stride
+  (20 runs of 20); reallocating on a height change only; on a width change
+  only (glibc aborts; under `-asan`, a heap-buffer-overflow read).
+- Cost, medians of 10, before and after: the terminal display at 80x24
+  106.3 and 104.4 us, at 120x40 128.5 and 126.7 us (noise); a 576x1280
+  screenshot 122.2 and 172.5 us; a 1080x2400 browser frame 426.4 and 616.2
+  us: at 60 frames a second, about 2.6% and 3.7% of a core, 1.1% more.
+- Checks by the builder (on `ebeb3f0`, the branch with parts 37 to 41 as
+  they were then; go1.27.1, FFmpeg 9.0.2's libraries, `iso.env`, bwrap):
+  gofmt, vet and build clean; `go test ./...` 476 passed, 3 skipped, 0
+  failed; `-race` and `-asan` on 44 screenshot, dump, display and scale
+  tests 44/0/0, no race or ASan report; the new tests `-race -count=20`
+  80/80.
+- Verification, snapshot round 1 (`/tmp/opencode/review-42`, on part 41's
+  seventh round, the top of the stack), every Go command inside the bwrap
+  sandbox with `iso.env`: the base's `decode.go`, `native.c`, `native.h`
+  and `stream.go` are the builder's starting copies, the four files its
+  final ones, and the code's delta its diff; gofmt, vet, the build and `git
+  diff --check`; `go test ./...` (476 top-level tests pass, 3 skip, 0
+  fail); the builder's 44 tests under `-race` (no race) and `-asan` (no
+  report); the new tests 20 times and 5 times under `-race`. Under the new
+  tests the base's `native.c`, `native.h` and `stream.go` fail all 4 (35 of
+  47 subtests), and each of the builder's 8 mutants fails at least one (the
+  width-only reallocation through glibc's abort). The whole module, in the
+  desktop-like sandbox, connects to none of its decoy sockets, while the
+  positive control reaches two. The checks ran again on the snapshot with
+  this bullet.
+- Review round 1 (NEEDS CHANGES), on `/tmp/opencode/review-42`. MEDIUM: the
+  tests checked the picture's colours only down the middle half of each
+  quarter's rows, so a copy from the next row of the scratch frame (the
+  review's mutant x3) passed every test: the picture moved up a row, and
+  its last row showed leftover bytes (only `-asan` caught it, at 1080x32,
+  as a read past the scratch frame). LOW: the comment of
+  `TestScaleStopsAtTheEndOfTheBuffer` suggested it showed the old code
+  writing past the end; there it failed only through the spill into the
+  next row's bar (`TestScaleAtTheFramesOwnSize` shows the overrun past the
+  end, and `TestScaleKeepsUpWithTheSize` also fails on the old code through
+  the spill, as the old code had no frame of its own to reallocate). NITs:
+  `sws_scale`'s result was ignored, though `native.h` promises -1 on error;
+  two phrases of this entry (which widths spilled, and the browser frame's
+  cost, given as the difference only); and two comments (`stream.go` said
+  "directly", and `scale_test.go` gave 16 pixels at a time as a general
+  fact). It found no defect in the code, and every figure above reproduced.
+  Its suggestion, taken: a colour tolerance of 32 instead of 24, for other
+  libswscale versions (CI builds with another FFmpeg).
+- Round 2: `checkScaled` checks the colours from the picture's first row to
+  its last, but for the rows within an eighth of its height of the middle,
+  where the quarters meet (the review's line), with a tolerance of 32;
+  `sct_vdec_scale` returns -1 when `sws_scale` fails; the two comments and
+  the two phrases are corrected, and the comment of
+  `TestScaleStopsAtTheEndOfTheBuffer` says how the old code failed it.
+- Verification, round 2, before its snapshot (`/tmp/opencode/dev-42b`:
+  `verify2.sh` and `remake3.sh`, the round-2 files laid by `-overlay` over
+  round 1's snapshot tree, whose code base is the stack's top now; iso.env,
+  bwrap): gofmt, vet and `gcc -Wall -Wextra` on `native.c` clean; the new
+  tests pass, also 20 times and 5 times under `-race`; under them the
+  base's files fail all 4 (35 subtests). The builder's 8 mutants and the
+  review's x1, x2, x3, x4, x6 and x8, each made again on round 2's
+  `native.c` (three by hand, as they touch the lines round 2 changed), each
+  fail a new test; x3 fails all 4 (38 subtests), and passes round 1's
+  tests, the review's gap. The review's x5 (no retry after a failed
+  allocation) and x7 (rows aligned to 32 bytes, the same output here)
+  pass, as does round 1's `native.c` (no guard: no input makes `sws_scale`
+  fail). With the tolerance cut to 16 the tests pass, and at 15 they fail
+  (a red of 239 at row 3): the colours are up to 16 levels off here.
+- Verification, snapshot round 2 (`/tmp/opencode/review-42b`, on part 41's
+  seventh round as rebuilt on part 37's eleventh), every Go command inside
+  the bwrap sandbox with `iso.env`: the base's `decode.go`, `native.c`,
+  `native.h` and `stream.go` are the builder's starting copies, and the four
+  files the ones checked above; gofmt, vet, the build and `git diff
+  --check`; `go test ./...` (476 top-level tests pass, 3 skip, 0 fail); the
+  builder's 44 tests under `-race` (no race) and `-asan` (no report); the
+  new tests 20 times and 5 times under `-race`. The base's files, the 17
+  mutants, x3 under round 1's tests and the colour margin give the results
+  above. The whole module, in the desktop-like sandbox, connects to none of
+  its decoy sockets, while the positive control reaches two. These checks
+  ran before this bullet was written; the snapshot was then re-packed with
+  it, which changed only the handoff.
+- Found, left alone: after a failed `sws_getContext`, a call at the old
+  size passes a NULL context to `sws_scale` (out of memory only); the
+  browser path's copy could go if its canvas carried a padded stride to the
+  JPEG encoder; `native.h` still says RGBA for BGR0; the guard on
+  `sws_scale`'s result and the retry after a failed allocation have no
+  test, as no input makes either fail.
+- Not run: the node suites (`web/` untouched), Android, any real device,
+  other CPUs or FFmpeg builds, aarch64, and `-race` or `-asan` on the whole
+  module.
+
 ## Update (2026-10-21: QoL overhaul, part 41: the MIT License)
 
 - The owner chose the MIT License. `LICENSE` holds the standard MIT text,

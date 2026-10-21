@@ -434,9 +434,10 @@ func (s *streamState) runVideo() error {
 				}
 				continue
 			}
-			// Scale directly into a pooled slot (ping-pong): no per-frame
-			// scratch copy. Letterbox pixels stay black because slots are
-			// zeroed at make() and swscale only writes the fit region.
+			// Scale into a pooled slot (ping-pong; sct_vdec_scale scales into a
+			// frame of its own and copies the picture in). Letterbox pixels
+			// stay black because slots are zeroed at make() and the scaler
+			// writes only the fit region.
 			//
 			// A zero canvas (web mode before the first session header tells us
 			// the video size) has no frame buffer to scale into: drop the frame

@@ -25,6 +25,7 @@ typedef struct {
     struct SwsContext *sws;
     int sws_src_w, sws_src_h;
     int sws_dst_w, sws_dst_h;
+    AVFrame *scaled; // the scaler's output, which sct_vdec_scale copies to dst
 } sct_vdec;
 
 static enum AVCodecID sct_to_avcodec(int codec_id) {
@@ -63,7 +64,8 @@ void *sct_vdec_open(int codec_id, int width, int height) {
     d->pkt = av_packet_alloc();
     d->frame = av_frame_alloc();
     d->last = av_frame_alloc();
-    if (!d->pkt || !d->frame || !d->last) {
+    d->scaled = av_frame_alloc();
+    if (!d->pkt || !d->frame || !d->last || !d->scaled) {
         sct_vdec_free(d);
         return NULL;
     }
@@ -117,12 +119,28 @@ int sct_vdec_scale(void *v, uint8_t *dst, int dst_stride, int dst_w, int dst_h,
         d->sws_dst_w = dst_w;
         d->sws_dst_h = dst_h;
     }
+    // libswscale's vector code converts whole blocks of pixels. When a row's
+    // width is not a multiple of the block, it writes past the end of the row,
+    // or, if the stride leaves no room for that, leaves the row's last pixels
+    // as they were. So the frame is scaled into rows padded to 64 bytes, and
+    // dst gets exactly dst_w pixels of each.
+    AVFrame *s = d->scaled;
+    if (s->width != dst_w || s->height != dst_h || !s->data[0]) {
+        av_frame_unref(s);
+        s->format = AV_PIX_FMT_BGR0;
+        s->width = dst_w;
+        s->height = dst_h;
+        if (av_frame_get_buffer(s, 64) < 0) return -1;
+    }
+
     const uint8_t *src[4] = { f->data[0], f->data[1], f->data[2], NULL };
     const int src_stride[4] = { f->linesize[0], f->linesize[1], f->linesize[2], 0 };
-
-    uint8_t *dstp[] = { dst, NULL, NULL, NULL };
-    int dst_stride_arr[] = { dst_stride, 0, 0, 0 };
-    sws_scale(d->sws, src, src_stride, 0, f->height, dstp, dst_stride_arr);
+    if (sws_scale(d->sws, src, src_stride, 0, f->height, s->data, s->linesize) <= 0)
+        return -1;
+    for (int y = 0; y < dst_h; ++y) {
+        memcpy(dst + (size_t) y * dst_stride, s->data[0] + (size_t) y * s->linesize[0],
+               (size_t) dst_w * 4);
+    }
 
     if (out_fw) *out_fw = f->width;
     if (out_fh) *out_fh = f->height;
@@ -133,6 +151,7 @@ void sct_vdec_free(void *v) {
     sct_vdec *d = v;
     if (!d) return;
     if (d->sws) sws_freeContext(d->sws);
+    if (d->scaled) av_frame_free(&d->scaled);
     if (d->last) av_frame_free(&d->last);
     if (d->frame) av_frame_free(&d->frame);
     if (d->pkt) av_packet_free(&d->pkt);
