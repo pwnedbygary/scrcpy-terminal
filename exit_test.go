@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -179,6 +180,160 @@ func TestHeadlessExitsTwoWhenTheDeviceIsLost(t *testing.T) {
 			t.Errorf("%s: runHeadless ended with %v (exit status %d) and printed %q; want %q, exit status %d and nothing printed",
 				tc.name, err, got, stderr, tc.err, tc.status)
 		}
+	}
+}
+
+// pastCodecID is a socket that says when its reader, done with the 4 bytes of
+// the codec id, reads on: a demuxer then waits for a packet, as it does for
+// most of a session.
+type pastCodecID struct {
+	net.Conn
+	read    int // only the demuxer reads
+	once    sync.Once
+	waiting chan struct{}
+}
+
+func (c *pastCodecID) Read(p []byte) (int, error) {
+	if c.read >= 4 {
+		c.once.Do(func() { close(c.waiting) })
+	}
+	n, err := c.Conn.Read(p)
+	c.read += n
+	return n, err
+}
+
+// quietAudio is an audio socket over TCP, as adb forwards it, whose device
+// sends the Opus codec id and then nothing. Closing it, as sess.stop does,
+// ends the demuxer's read with "use of closed network connection".
+func quietAudio(t *testing.T) net.Conn {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			c.Write([]byte("opus"))
+		}
+		accepted <- c
+	}()
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	if device := <-accepted; device != nil {
+		t.Cleanup(func() { device.Close() })
+	}
+	return conn
+}
+
+// TestHeadlessTeardownSocketErrorsAreQuiet: with --no-tui, as in the terminal
+// UI (TestTeardownSocketErrorsAreQuiet), once the run has ended, on a quit
+// (SIGINT, SIGTERM or SIGHUP) or on the loss of the picture, sess.stop closes
+// the sockets, and the audio demuxer's "use of closed network connection" is
+// not printed; on the second real-device run, Ctrl+C printed it. The device
+// ending the audio stream before then, and another audio error after, are
+// still printed.
+func TestHeadlessTeardownSocketErrorsAreQuiet(t *testing.T) {
+	// runHeadless takes these signals for the app and never gives them back.
+	t.Cleanup(func() { signal.Reset(syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
+	headless := func(video, audio net.Conn) *app {
+		a := streamApp(&session{deviceName: "Pixel 8", video: video, audio: audio})
+		a.cfg = config{noTUI: true, audio: true}
+		return a
+	}
+	// quiet is a session's audio socket from quietAudio, the channel that says
+	// when its demuxer waits for a packet, and sess.stop's close of it.
+	quiet := func() (audio *closeSignal, waiting <-chan struct{}, stop func()) {
+		conn := quietAudio(t)
+		past := &pastCodecID{Conn: conn, waiting: make(chan struct{})}
+		return &closeSignal{Conn: past, closed: make(chan struct{})}, past.waiting, func() { conn.Close() }
+	}
+	midStream := func(waiting <-chan struct{}) {
+		select {
+		case <-waiting:
+		case <-time.After(5 * time.Second):
+			t.Error("the audio demuxer did not get past the codec id")
+		}
+	}
+	// end runs runHeadless on a, then start, until the run returns; then
+	// after, and waits for the demuxer reading audio to end. It returns what
+	// was printed on stderr and how the run ended.
+	end := func(a *app, audio *closeSignal, start, after func()) (stderr string, err error) {
+		t.Helper()
+		// The statistics line goes to stdout, and must not run into the test's output.
+		captureStdout(t, func() {
+			stderr = captureStderr(t, func() {
+				ran := make(chan error, 1)
+				go func() { ran <- a.runHeadless() }()
+				start()
+				select {
+				case err = <-ran:
+				case <-time.After(5 * time.Second):
+					t.Error("runHeadless did not end")
+				}
+				after()
+				demuxerEnded(t, audio)
+			})
+		})
+		return stderr, err
+	}
+
+	audio, waiting, stop := quiet()
+	a := headless(videoSocket(t), audio)
+	ctrlC := func() {
+		midStream(waiting)
+		a.events <- inputEvent{kind: evQuit} // what SIGINT, SIGTERM and SIGHUP send
+	}
+	if out, err := end(a, audio, ctrlC, stop); err != nil || out != "" {
+		t.Errorf("a quit: runHeadless ended with %v and printed %q; want nil and nothing", err, out)
+	}
+
+	audio, waiting, stop = quiet()
+	video, device := net.Pipe()
+	t.Cleanup(func() { device.Close() })
+	lost := headless(video, audio)
+	unplug := func() {
+		midStream(waiting)
+		device.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		device.Write([]byte("h264"))
+		device.Write(sessionPacket)
+		device.Close()
+	}
+	if out, err := end(lost, audio, unplug, stop); fmt.Sprint(err) != "video: stream ended: EOF" || out != "" {
+		t.Errorf("the loss of the picture: runHeadless ended with %v and printed %q; want the end of the video stream and nothing", err, out)
+	}
+
+	gone := headless(videoSocket(t), deviceStream(t, []byte("opus")))
+	var out string
+	captureStdout(t, func() { out = stderrUntil(t, gone, gone.runHeadless, "audio stream ended") })
+	if want := "scterm: audio: audio stream ended: EOF\n"; out != want {
+		t.Errorf("the device ending the audio stream before a quit: printed %q, want %q", out, want)
+	}
+
+	pipe, sender := net.Pipe()
+	t.Cleanup(func() { sender.Close() })
+	broken := headless(videoSocket(t), pipe)
+	const configError = "scterm: audio: audio config error\n"
+	var err error
+	out = terminalUntil(t, configError, func() {
+		ran := make(chan error, 1)
+		go func() { ran <- broken.runHeadless() }()
+		broken.events <- inputEvent{kind: evQuit}
+		select {
+		case err = <-ran:
+		case <-time.After(5 * time.Second):
+			t.Error("runHeadless did not end")
+		}
+		sender.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		sender.Write([]byte{0, 0, 0, 1}) // codec 1, after the quit
+	})
+	if err != nil || !strings.Contains(out, configError) {
+		t.Errorf("an audio error after a quit: runHeadless ended with %v and printed %q; want nil and the error", err, out)
 	}
 }
 

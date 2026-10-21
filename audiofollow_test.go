@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,8 +40,7 @@ func countingPactl(t *testing.T, dir string) func() int {
 var movingSinks atomic.Int32
 
 // movingPactl is a pactl for a server with one scterm stream and another
-// default sink, so the follower moves the stream there and says so. The sink
-// has a new name each time: logOnce says a line once per process.
+// default sink, so the follower moves the stream there and says so.
 func movingPactl(t *testing.T, dir string) (count func() int, sink string) {
 	t.Helper()
 	sink = fmt.Sprintf("desk-%d", movingSinks.Add(1))
@@ -69,6 +69,90 @@ func startFollower(t *testing.T, a *app, stop <-chan struct{}, every time.Durati
 	ended := make(chan struct{})
 	go func() { followAudioSink(pactl, stop, every); close(ended) }()
 	return ended
+}
+
+// sinksPactl is a pactl for a server with three sinks, sink-a (index 1),
+// sink-b (index 2) and sink-c (index 3, which takes no stream until a file
+// sink-c-ready is in dir, as a Bluetooth sink that is not ready yet), and one
+// scterm stream, which plays on the sink whose index is on, and which
+// move-sink-input moves. The default sink is def, until setDefaultSink
+// changes it. Unless tells, pactl's listing of the stream does not say which
+// sink it plays on; unless lists, pactl lists no sinks. It returns pactl's
+// calls so far, a line each.
+func sinksPactl(t *testing.T, dir, def, on string, tells, lists bool) (calls func() string) {
+	t.Helper()
+	setDefaultSink(t, dir, def)
+	onFile := filepath.Join(dir, "on")
+	if err := os.WriteFile(onFile, []byte(on+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sinkLine := `printf '\tSink: %s\n' "$on"`
+	if !tells {
+		sinkLine = ":"
+	}
+	sinks := `printf '1\tsink-a\tmodule-alsa-card.c\ts16le 2ch 48000Hz\tRUNNING\n2\tsink-b\tmodule-alsa-card.c\ts16le 2ch 48000Hz\tIDLE\n3\tsink-c\tmodule-bluez5-device.c\ts16le 2ch 48000Hz\tIDLE\n'`
+	if !lists {
+		sinks = ":"
+	}
+	pactlScript(t, dir, fmt.Sprintf(`read -r on < '%[1]s'
+case "$1" in
+get-default-sink) read -r def < '%[2]s'; echo "$def" ;;
+list)
+	case "$2" in
+	sinks) %[4]s ;;
+	sink-inputs)
+		printf 'Sink Input #7\n\tDriver: protocol-native.c\n\tClient: 12\n'
+		%[3]s
+		printf '\tSample Specification: s16le 2ch 48000Hz\n\tSink Latency: 20000 usec\n\tProperties:\n\t\tapplication.name = "scterm"\n' ;;
+	esac ;;
+move-sink-input)
+	case "$3" in
+	sink-a) echo 1 > '%[1]s' ;;
+	sink-b) echo 2 > '%[1]s' ;;
+	sink-c) [ -e '%[5]s' ] || exit 1; echo 3 > '%[1]s' ;;
+	*) exit 1 ;;
+	esac ;;
+esac
+`, onFile, filepath.Join(dir, "default"), sinkLine, sinks, filepath.Join(dir, "sink-c-ready")))
+	return func() string {
+		b, _ := os.ReadFile(filepath.Join(dir, "pactl-calls"))
+		return string(b)
+	}
+}
+
+// setDefaultSink makes name the default sink of sinksPactl's server in dir. A
+// pactl that reads it meanwhile gets the old name or the new one, whole.
+func setDefaultSink(t *testing.T, dir, name string) {
+	t.Helper()
+	next := filepath.Join(dir, "default.next")
+	if err := os.WriteFile(next, []byte(name+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(next, filepath.Join(dir, "default")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// followWhile starts the follower for a's sink as the runs do, and returns
+// the func that stops it and waits for it to end, which the test's end calls
+// too.
+func followWhile(t *testing.T, a *app) (stop func()) {
+	t.Helper()
+	halt := make(chan struct{})
+	ended := startFollower(t, a, halt, audioFollowEvery)
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			close(halt)
+			select {
+			case <-ended:
+			case <-time.After(5 * time.Second):
+				t.Error("the follower went on after stop was closed")
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 // TestAudioFollowerStopsWithItsRun: the follower that moves scterm's stream
@@ -298,5 +382,155 @@ func TestWebRunStopsItsAudioFollower(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := count(); got != n {
 		t.Errorf("pactl ran %d more times after the run ended: its follower outlived it", got-n)
+	}
+}
+
+// TestAudioFollowerMovesOnlyAStreamThatIsElsewhere: the follower moves
+// scterm's stream to the default sink, and says so, only when the stream
+// plays on another sink, as when its sink opened elsewhere. At start the
+// stream is usually on the default already, its sink having opened there: the
+// follower then moves nothing and says nothing (on the second real-device run
+// it moved the stream to the sink it played on, and said "audio -> SINK"),
+// and it asks pactl for the sinks once, not at every tick. When pactl does not
+// say where the stream plays, or lists no sinks either, the follower moves
+// it, as before.
+func TestAudioFollowerMovesOnlyAStreamThatIsElsewhere(t *testing.T) {
+	fastAudioFollower(t)
+	a := &app{audio: &audioSink{gain: 256, pct: 100}}
+	for _, tc := range []struct {
+		name         string
+		def, on      string // the default sink, and the index of the sink the stream plays on
+		tells, lists bool   // pactl's listing says which sink the stream plays on; pactl lists the sinks
+		moves        int
+		says         string
+	}{
+		{"on the default", "sink-a", "1", true, true, 0, ""},
+		{"on another sink", "sink-b", "1", true, true, 1, "scterm: audio -> sink-b\n"},
+		{"pactl does not say where", "sink-a", "1", false, true, 1, "scterm: audio -> sink-a\n"},
+		{"pactl does not say where, nor list the sinks", "sink-a", "1", false, false, 1, "scterm: audio -> sink-a\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			startNotices(t)
+			dir := isolatePulse(t)
+			calls := sinksPactl(t, dir, tc.def, tc.on, tc.tells, tc.lists)
+			stop := followWhile(t, a)
+			eventually(t, "the follower looks for scterm's stream 10 times", func() bool {
+				return strings.Count(calls(), "list sink-inputs\n") >= 10
+			})
+			stop()
+			var said strings.Builder
+			notices.stop(&said)
+			got := calls()
+			if n := strings.Count(got, "move-sink-input "); n != tc.moves || said.String() != tc.says {
+				t.Errorf("moved the stream %d times and said %q; want %d and %q", n, said.String(), tc.moves, tc.says)
+			}
+			if n := strings.Count(got, "list sinks short\n"); n != 1 {
+				t.Errorf("asked pactl for the sinks %d times in %d ticks, want once", n, strings.Count(got, "get-default-sink\n"))
+			}
+		})
+	}
+}
+
+// TestAudioFollowerSaysEachSwitch: each time the default sink changes, the
+// follower moves scterm's stream there and says so, a switch back included:
+// from sink-a, where the stream starts, to sink-b, back to sink-a and to
+// sink-b again, it moves the stream three times and says each move (the
+// replay at exit counts the repeat). Said with logOnce, once per process, the
+// second move to sink-b went unsaid, and a user switching outputs could not
+// tell it from a follower that had stopped.
+func TestAudioFollowerSaysEachSwitch(t *testing.T) {
+	fastAudioFollower(t)
+	startNotices(t)
+	dir := isolatePulse(t)
+	calls := sinksPactl(t, dir, "sink-a", "1", true, true)
+	stop := followWhile(t, &app{audio: &audioSink{gain: 256, pct: 100}})
+	eventually(t, "the follower looks for scterm's stream 3 times", func() bool {
+		return strings.Count(calls(), "list sink-inputs\n") >= 3
+	})
+	for _, sw := range []struct{ to, index string }{{"sink-b", "2"}, {"sink-a", "1"}, {"sink-b", "2"}} {
+		setDefaultSink(t, dir, sw.to)
+		eventually(t, "the stream plays on "+sw.to, func() bool {
+			b, _ := os.ReadFile(filepath.Join(dir, "on"))
+			return strings.TrimSpace(string(b)) == sw.index
+		})
+	}
+	stop()
+	var said strings.Builder
+	notices.stop(&said)
+	if want := "scterm: audio -> sink-b (2 times)\nscterm: audio -> sink-a\n"; said.String() != want {
+		t.Errorf("said %q, want %q", said.String(), want)
+	}
+	var moves []string
+	for _, call := range strings.Split(calls(), "\n") {
+		if strings.HasPrefix(call, "move-sink-input ") {
+			moves = append(moves, call)
+		}
+	}
+	if want := []string{"move-sink-input 7 sink-b", "move-sink-input 7 sink-a", "move-sink-input 7 sink-b"}; !slices.Equal(moves, want) {
+		t.Errorf("moved the stream with %q, want %q", moves, want)
+	}
+}
+
+// TestAudioFollowerRetriesAFailedMove: when the move to the default sink
+// fails (a Bluetooth sink that is not ready yet, say), the follower says
+// nothing and tries again at each tick, asking pactl for the sinks each time,
+// until a move works. That move it says, once, and from then on it asks pactl
+// only for the default sink and scterm's streams.
+func TestAudioFollowerRetriesAFailedMove(t *testing.T) {
+	fastAudioFollower(t)
+	startNotices(t)
+	dir := isolatePulse(t)
+	calls := sinksPactl(t, dir, "sink-c", "1", true, true)
+	stop := followWhile(t, &app{audio: &audioSink{gain: 256, pct: 100}})
+	// The fake writes down each call before it looks for sink-c-ready, and
+	// the follower waits for each pactl to end before it runs the next: once
+	// 6 moves are written down, the first 5 have failed, and the 6th may yet
+	// find the file.
+	eventually(t, "the follower tries the move 6 times", func() bool {
+		return strings.Count(calls(), "move-sink-input ") >= 6
+	})
+	if err := os.WriteFile(filepath.Join(dir, "sink-c-ready"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the stream plays on sink-c", func() bool {
+		b, _ := os.ReadFile(filepath.Join(dir, "on"))
+		return strings.TrimSpace(string(b)) == "3"
+	})
+	seen := strings.Count(calls(), "get-default-sink\n")
+	eventually(t, "the follower asks for the default sink 3 times more", func() bool {
+		return strings.Count(calls(), "get-default-sink\n") >= seen+3
+	})
+	stop()
+	var said strings.Builder
+	notices.stop(&said)
+	if want := "scterm: audio -> sink-c\n"; said.String() != want {
+		t.Errorf("said %q, want %q", said.String(), want)
+	}
+	lines := strings.Split(strings.TrimSuffix(calls(), "\n"), "\n")
+	last := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "move-sink-input ") {
+			last = i
+		}
+	}
+	head, tail := lines[:last+1], lines[last+1:]
+	// Up to the move that worked, each tick asks for the default sink,
+	// scterm's streams and the sinks, then tries the move.
+	tick := []string{"get-default-sink", "list sink-inputs", "list sinks short", "move-sink-input 7 sink-c"}
+	if n := len(head) / len(tick); n < 6 || !slices.Equal(head, slices.Repeat(tick, n)) {
+		t.Errorf("up to the move that worked, pactl was asked %q; want %q at each tick, 6 ticks or more", head, tick)
+	}
+	settled, others := 0, 0
+	for _, line := range tail {
+		switch line {
+		case "get-default-sink":
+			settled++
+		case "list sink-inputs":
+		default:
+			others++
+		}
+	}
+	if settled < 3 || others > 0 {
+		t.Errorf("after the move that worked, pactl was asked %q; want only the default sink and scterm's streams, at 3 ticks or more", tail)
 	}
 }

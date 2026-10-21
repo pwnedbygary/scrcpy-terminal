@@ -79,24 +79,43 @@ func (p pactlTool) defaultSink() string {
 }
 
 // sctSinkInputs parses `pactl list sink-inputs` and returns the sink-input ids
-// whose application.name is "scterm" (our streams).
-func (p pactlTool) sctSinkInputs() []string {
+// whose application.name is "scterm" (our streams), each with the index of the
+// sink it plays on ("" when the listing does not say).
+func (p pactlTool) sctSinkInputs() map[string]string {
 	out, err := p.run("list", "sink-inputs")
 	if err != nil {
 		return nil
 	}
-	var ids []string
-	var curID string
+	ids := map[string]string{}
+	var curID, curSink string
 	for _, line := range splitLines(string(out)) {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(line, "Sink Input #") {
-			curID = strings.TrimPrefix(line, "Sink Input #")
+			curID, curSink = strings.TrimPrefix(line, "Sink Input #"), ""
 			continue
 		}
+		if sink, ok := strings.CutPrefix(trimmed, "Sink: "); ok {
+			curSink = sink
+		}
 		if curID != "" && strings.HasPrefix(trimmed, "application.name") && strings.Contains(trimmed, `"scterm"`) {
-			ids = append(ids, curID)
+			ids[curID] = curSink
 			curID = ""
 		}
 	}
 	return ids
+}
+
+// sinkIndex returns the index of the sink named name, from `pactl list sinks
+// short`, or "" when pactl does not list it.
+func (p pactlTool) sinkIndex(name string) string {
+	out, err := p.run("list", "sinks", "short")
+	if err != nil {
+		return ""
+	}
+	for _, line := range splitLines(string(out)) {
+		if fields := splitFields(line); len(fields) >= 2 && fields[1] == name {
+			return fields[0]
+		}
+	}
+	return ""
 }

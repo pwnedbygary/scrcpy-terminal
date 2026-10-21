@@ -628,7 +628,12 @@ func (a *app) runHeadless() error {
 		}
 	}()
 	go func() {
-		if err := a.playAudio(); err != nil {
+		switch err := a.playAudio(); {
+		case err == nil:
+		case a.quitting.Load() && isClosedConnErr(err):
+			// sess.stop closed the socket on the way out. (Not before: the
+			// device ending the audio stream, EOF, is worth a line.)
+		default:
 			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
 		}
 	}()
@@ -640,8 +645,10 @@ func (a *app) runHeadless() error {
 	for {
 		select {
 		case <-a.events:
+			a.quitting.Store(true)
 			return nil
 		case err := <-videoErr:
+			a.quitting.Store(true)
 			return fmt.Errorf("video: %w", err)
 		case f := <-a.frames:
 			// Same mailbox as the TUI: the run loop owns the frame and the

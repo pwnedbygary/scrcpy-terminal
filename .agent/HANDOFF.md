@@ -7,6 +7,181 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 43: two noise messages from the second phone run)
+
+- Found on the second real-device run (sound and control): `scterm --no-tui`
+  printed `scterm: audio: audio stream ended: read tcp ...: use of closed
+  network connection` on a normal Ctrl+C (exit status 0), and the sound
+  follower said `scterm: audio -> SINK` at start for the sink the stream
+  already played on, which the terminal display's replay repeated at exit.
+- `runHeadless` (`app.go`) now sets `quitting` when its loop ends, on a quit
+  and on the end of the video stream, as the terminal display and `runWeb`
+  do, and its audio goroutine takes `watchStreams`' rule: a closed-socket
+  error once the run has ended is not printed; EOF from the device before
+  then, and any other error, still is. `isClosedConnErr` is unchanged.
+- The follower (`audiofollow.go`) moves the stream, and says so, only when
+  it is not on the default sink yet, as pactl tells it: `sctSinkInputs`
+  (`pulsecli.go`) also reads each stream's sink index from the `Sink:` line
+  of the listing it already asks for, and the new `sinkIndex` reads the
+  default's index from `pactl list sinks short`, asked only on a tick where
+  the default differs from the one last seen (at start, after a switch,
+  when the stream comes back), and again at each tick after a move that
+  failed, until one works; other ticks make 2 pactl calls, as before. When
+  pactl does not give both indices, the follower moves the stream, as
+  before.
+- Decided: each move is said (`noticef`, not `logOnce`). With `logOnce`, A
+  to B, back to A and to B again left the second move to B unsaid, which a
+  user switching outputs cannot tell from a follower that has stopped. When
+  pactl gives both indices, a stream already on the default is not moved,
+  so no line repeats without a switch; the replay at exit counts repeats
+  ("(2 times)"). A browser-only `--web` or `--window` session follows too,
+  moving a stream kept silent, so it now prints a line at each switch,
+  where `logOnce` printed one per sink.
+- New tests: `TestHeadlessTeardownSocketErrorsAreQuiet` (`exit_test.go`: a
+  quit and the loss of the picture, each with the demuxer mid-stream on a
+  TCP socket; EOF before a quit; an audio error after one), and
+  `TestAudioFollowerMovesOnlyAStreamThatIsElsewhere` (4 cases) and
+  `TestAudioFollowerSaysEachSwitch` (`audiofollow_test.go`, with a fake
+  pactl whose `move-sink-input` moves the stream). On the base's `app.go`,
+  `audiofollow.go` and `pulsecli.go` all 3 fail, the quit with the phone
+  run's line; each of the builder's 12 mutants fails a test.
+- Checks by the builder (on `b4c410d`, the branch with parts 37 to 42;
+  go1.27.1, `iso.env`, bwrap): gofmt, vet, build and `git diff --check`
+  clean; `go test ./...` 479 passed, 3 skipped, 0 failed (the base 476, 3,
+  0: the 3 new tests); `-race` on 23 tests of the touched files and their
+  neighbours 23/0/0, no race; the new tests `-count=20` 60/60, and 60/60
+  under `-race`.
+- Intake: the five files went into the worktree as built, as none had
+  changed there since the builder's base, which held part 42's first round;
+  part 42's second round changes none of them.
+- Verification, snapshot round 1 (`/tmp/opencode/review-43`, on part 42's
+  second round), every Go command inside the bwrap sandbox with `iso.env`:
+  the base's copies of the five files are the builder's starting ones;
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (479
+  top-level tests pass, 3 skip, 0 fail); `-race -count=3` on the builder's
+  23 related tests; the 3 new tests 20 times and 5 times under `-race`.
+  Under the new tests the base's `app.go`, `audiofollow.go` and
+  `pulsecli.go` fail all 3, and each of the builder's 12 mutants fails at
+  least one. The whole module, in the desktop-like sandbox, connects to
+  none of its decoy sockets, while the positive control reaches two. These
+  checks ran before this bullet was written; the snapshot was then built
+  again with it, which changed only the handoff.
+- Review round 1 (NEEDS CHANGES), MEDIUM: no test retried a failed move.
+  The loop's `already = false` (`audiofollow.go`) is what keeps a stream
+  whose move failed counted as elsewhere, so that the next tick tries
+  again; with that line deleted the whole module still passed (479 pass, 3
+  skip, 0 fail), and one failed move (a Bluetooth sink not ready yet, say)
+  would leave the sound on the old output. The base had no such test
+  either; its fake pactl did not answer `move-sink-input`. NIT: three
+  phrases above said more than the code: the follower also moves the
+  stream, and says so, when pactl gives only one of the two indices; the
+  default's index is also asked at each tick after a failed move; and no
+  line repeats without a switch only when pactl gives both. All three are
+  corrected above. Of its suggestions, round 2 says what browser-only
+  sessions now print (above); running pactl with `LC_ALL=C`, a test of the
+  reset of a stream's sink at each block of the listing, and the signal
+  goroutine each test run of `runHeadless` leaves are left alone (below).
+- Round 2 changes only `audiofollow_test.go` and this entry. `sinksPactl`'s
+  server gains sink-c (index 3, a Bluetooth sink in its listing), which
+  takes no stream until a file `sink-c-ready` is in the test's directory.
+  The new `TestAudioFollowerRetriesAFailedMove` makes sink-c the default
+  with the stream on sink-a: the follower must try the move at every tick,
+  asking pactl for the sinks each time and saying nothing, until the file
+  appears; then the move works and is said once, and at the next 3 ticks
+  or more the follower tries no move and asks for no sinks (round 3 checks
+  that it asks pactl only for the default sink and scterm's streams). The
+  other two follower tests use sink-a and sink-b only, so the third sink
+  changes nothing for them.
+- Verification, round 2, in the worktree (on part 42 as landed, `af78346`),
+  every Go command inside the bwrap sandbox with `iso.env`: gofmt and vet
+  clean; the new test passes 3 runs of 3; with the review's R12 (no
+  `already = false`) it fails, as the follower never tries the move a
+  second time, and R12 passes round 1's test file, the gap.
+- Verification, snapshot round 2 (`/tmp/opencode/review-43b`, on part 42 as
+  landed: its base's tree is `af78346`'s), every Go command inside the
+  bwrap sandbox with `iso.env`: gofmt, vet, the build and `git diff
+  --check`; `go test ./...` (480 top-level tests pass, 3 skip, 0 fail);
+  `-race -count=3` on the 24 related tests; the 4 new tests 20 times and 5
+  times under `-race`. Under the new tests the base's `app.go`,
+  `audiofollow.go` and `pulsecli.go` fail all 4, the retry test only
+  through its count of the sinks listings (the base tried the move at each
+  of 6 ticks and said the one that worked once, but never asked for the
+  sinks). Each of the builder's 12 mutants fails a test, as in round 1, and
+  each of the review's 9 fails one too: R12 only the retry test, which also
+  catches R2 and R10; under round 1's test file R12 passes, the gap. The
+  whole module, in the desktop-like sandbox, connects to none of its decoy
+  sockets, while the positive control reaches two. These checks ran before
+  this bullet was written; the snapshot was then packed again with it,
+  which changed only the handoff.
+- Review round 2 (NEEDS CHANGES), MEDIUM: the new test could fail on
+  correct code. The fake writes down each call before it looks for
+  `sink-c-ready`, so the move written down fifth when the test wrote the
+  file could still work, while the test, which waited for 5 moves, wanted
+  6 ticks up to the move that worked. The review saw 1 failure in 1000
+  runs, 8 in 450 with three copies at once on one CPU, and 20 in 20 with a
+  3 ms pause in the fake before it looks for the file. NIT: the test's
+  comment and the Round 2 bullet said that after the move the follower
+  asks pactl only for the default sink and scterm's streams, but the test
+  checked only that it tries no move and asks for no sinks: a follower that
+  also asked for the sink's volume at each tick passed the whole package.
+  Of its suggestions, round 3 prints the calls in the failure messages; a
+  test that the sinks are asked again when the stream comes back is left
+  alone (below).
+- Round 3 changes only `TestAudioFollowerRetriesAFailedMove` and this
+  entry. The test waits for 6 tried moves before it writes the file: the
+  follower waits for each pactl to end before it runs the next, so by then
+  the first 5 have failed, and the 6th may find the file. It checks the
+  calls in full: up to the move that worked, each tick asks for the default
+  sink, scterm's streams and the sinks, then tries the move of stream 7 to
+  sink-c, at 6 ticks or more; after it, pactl is asked only for the default
+  sink and scterm's streams, at 3 ticks or more. Both failure messages
+  print the calls they looked at.
+- Verification, round 3, in the worktree (on `af78346`), every Go command
+  inside the bwrap sandbox with `iso.env`: gofmt and vet clean; the retry
+  test passes 1000 runs of 1000, and 450 of 450 as three copies at once on
+  one CPU; with the review's 3 ms pause in the fake it passes 20 runs of
+  20, where round 2's test fails 20 of 20 ("5 ticks, 5 moves tried").
+  Against the follower tests, the round-2 review's X1, X2, X3, X5, X6, X7
+  and X15 each fail the retry test only, and the round-1 review's R2, R4,
+  R5, R6, R8, R10 and R12 each fail a test (R12 the retry test only); X15
+  passes round 2's test file and R12 round 1's, the gaps; X9 (the last
+  default kept when the stream disappears) and X16 (no reset of a stream's
+  sink at a new block of the listing) pass, as said below. The follower
+  tests pass 5 times under `-race`; `go test ./...` 480 top-level tests
+  pass, 3 skip, 0 fail.
+- Verification, snapshot round 3 (`/tmp/opencode/review-43c`, on part 42 as
+  landed), every Go command inside the bwrap sandbox with `iso.env`: gofmt,
+  vet, the build and `git diff --check`; `go test ./...` (480 top-level
+  tests pass, 3 skip, 0 fail); `-race -count=3` on the 24 related tests;
+  the 4 new tests 20 times and 5 times under `-race`. Under the new tests
+  the base's `app.go`, `audiofollow.go` and `pulsecli.go` fail all 4, the
+  retry test only at its calls before the move, which on the base never
+  ask for the sinks. Each of the builder's 12 mutants fails a new test;
+  each of the round-1 review's 9, and of the round-2 review's X1, X2, X3,
+  X5, X6, X7 and X15, fails a test, while X9 and X16 pass; X15 passes
+  round 2's test file and R12 round 1's, the gaps. With the review's 3 ms
+  pause in the fake, round 2's retry test fails 20 runs of 20 and round
+  3's passes 20 of 20. The whole module, in the desktop-like sandbox,
+  connects to none of its decoy sockets, while the positive control
+  reaches two. These checks ran before this bullet was written; the
+  snapshot was then packed again with it, which changed only the handoff.
+- Left alone: the browser path's own rule (it also drops EOF before a
+  quit); `--no-tui` starts no follower; the follower still moves the stream
+  to a Bluetooth or virtual default the start-up choice passed over, now
+  only when the stream is elsewhere; a stream whose move keeps failing now
+  costs a third pactl call on each retry tick; resetting the stream's sink
+  at each new block of the listing has no test (it matters only for a block
+  without a `Sink:` line, which pactl 17 never prints), nor has forgetting
+  the last default when the stream disappears, so that the sinks are asked
+  again when it comes back (the follower did so before this part too); each
+  test run of `runHeadless` leaves its signal goroutine running, as the
+  older tests' runs do.
+- Not run: any real device, sound server or pactl (fakes only), so pactl in
+  another language too (if it translates the labels the parser reads, the
+  follower does nothing, as before; running pactl with `LC_ALL=C` would
+  avoid that, a change of its own); the node suites (`web/` untouched);
+  Android; `-race` on the whole module.
+
 ## Update (2026-10-21: QoL overhaul, part 42: the picture's scaler stays inside the picture)
 
 - Found while making the pull request's screenshots: at 80x24 the terminal
