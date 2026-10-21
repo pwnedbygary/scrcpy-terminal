@@ -19,6 +19,7 @@ over the network without adb: this is peer mode.
 - [How it works](#how-it-works)
 - [Development](#development)
 - [Credits](#credits)
+- [License](#license)
 
 ## Requirements
 
@@ -730,3 +731,9 @@ its contributors, and bundles the scrcpy v4.1 server, which is licensed under th
 License 2.0 ([third_party/LICENSE.scrcpy](third_party/LICENSE.scrcpy)). The server's source is
 in [third_party/scrcpy-server-src](third_party/scrcpy-server-src). scterm decodes video and
 sound with the [FFmpeg](https://ffmpeg.org/) libraries and plays sound through PulseAudio.
+
+## License
+
+scterm, the Android app included, is released under the MIT License: see [LICENSE](LICENSE).
+The scrcpy server, which scterm and the app both bundle, keeps its own license, the Apache
+License 2.0 (see above); other third-party files, such as the Gradle wrapper, keep theirs too.

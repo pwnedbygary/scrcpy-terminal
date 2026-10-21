@@ -7,6 +7,103 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 41: the MIT License)
+
+- The owner chose the MIT License. `LICENSE` holds the standard MIT text,
+  with "Copyright (c) 2026 Gary Bagley": the full name on most commits (the
+  first 14 say "Gary", and the merges of pull requests #1 to #5 on GitHub,
+  four merge commits and one squash, "pwnedbygary"), and the year of the
+  first one (2026-08-29). The README ends with a License section, listed in
+  its table of contents: scterm, the Android app included, is released
+  under it; the scrcpy server, which scterm and the app both bundle, keeps
+  the Apache License 2.0 that the Credits section names
+  (`third_party/LICENSE.scrcpy`, unchanged), and other third-party files,
+  such as the Gradle wrapper, keep theirs.
+- Verification (snapshot `/tmp/opencode/review-41`, on `9598a59`, every Go
+  command inside the bwrap sandbox with `iso.env`): `LICENSE`'s permission
+  and warranty paragraphs have the same words as the MIT text this system
+  ships for brotli (`/usr/share/licenses/brotli/LICENSE`), line breaks
+  aside; the docs checker finds 32 relative links in the README and no
+  problem, and no README line is over 100 columns; gofmt and vet are clean,
+  the docs tests and `go test ./...` pass, and `git diff --check` is clean.
+- Review round 1 (NEEDS CHANGES): LOW, the README's table of contents
+  listed every section but the new one; NITs, the docs checker counts only
+  relative links, and "the name on the commits" said too much. The review
+  found `LICENSE` identical to gh's copy of GitHub's MIT template apart
+  from the copyright line, and both README sentences accurate. Suggestion
+  taken: "the scrcpy server that scterm and the app bundle" (the APK
+  carries it too). Left for a later change: a test that the table of
+  contents lists every section; the release assets (the binary and the
+  APK) carry the scrcpy server without `LICENSE.scrcpy`, which Apache 2.0
+  §4(a) asks for, the APK build excludes `/META-INF/{AL2.0,LGPL2.1}`
+  (`android/app/build.gradle.kts:83`), and the server's one local patch is
+  marked only by an inline comment (§4(b)).
+- Round 2: `- [License](#license)` in the README's table of contents, the
+  server sentence, and this entry's wording.
+- Verification, round 2 (snapshot `/tmp/opencode/review-41b`, on
+  `9598a59`, the same way): `LICENSE` is round 1's; the table of contents
+  has an entry for each of the README's 13 `##` headings; the docs checker
+  finds 33 relative links and no problem, and no README line is over 100
+  columns; gofmt and vet are clean, the docs tests and `go test ./...`
+  pass, and `git diff --check` is clean.
+- Review round 2 (PASS), with no findings. Its suggestions, taken in round
+  3: the "pwnedbygary" commits are the merges of 5 pull requests (four
+  merge commits and a squash); name the files the APK build excludes; the
+  README's server sentence; a word on other third-party files (the Gradle
+  wrapper).
+- Round 3: the README's License section and this entry, as above. The
+  commit counts are gone from the first bullet, as each landing part adds
+  to them. The part moves to the top of the stack, onto part 39.
+- Verification, snapshot round 3 (`/tmp/opencode/review-41c`, on part 39's
+  first snapshot), every Go command inside the bwrap sandbox with
+  `iso.env`: `LICENSE` has the same words as the MIT text in
+  `/usr/share/licenses/brotli/LICENSE` after the copyright line; the table
+  of contents names all 13 `##` headings; the docs checker finds 33
+  relative links in the README and no problem, and no README line is over
+  100 columns; gofmt, vet, the 13 docs tests and `go test ./...` pass, and
+  `git diff --check` is clean. The snapshot was built and checked once
+  before this bullet, and again with it, with the same results.
+- Review round 3 (PASS), with no findings. Its suggestion, taken: the
+  path above in backticks.
+- Round 4 changes only this entry, and rebuilds the part on the top of the
+  stack as it then stood, part 39's second round
+  (`/tmp/opencode/review-39b`, on part 37's fifth round): `LICENSE` as it
+  is, and the table-of-contents line and the section added to the README
+  there.
+- Verification, snapshot round 4 (`/tmp/opencode/review-41d`, on part 39's
+  second snapshot), the same checks as round 3's, with the same results:
+  the same words as the MIT text, all 13 `##` headings in the table of
+  contents, 33 relative links and no problem, no README line over 100
+  columns; gofmt, vet, the 13 docs tests and `go test ./...` pass, and
+  `git diff --check` is clean. The snapshot was built three times, each
+  with these checks and the same results: on part 39's snapshot as first
+  packed, again with this bullet, and last on part 39's snapshot re-packed
+  with its own snapshot bullet.
+- Review round 4 (BLOCKED on part 37): part 37's fifth round, under this
+  snapshot, needed changes, so the tree could not land as reviewed, and
+  the Round 4 bullet's claim that it is the branch tip once parts 37 to 40
+  land was not true (corrected above). It found nothing to change in this
+  part: `LICENSE` and the README's lines round 3's bytes, and every check
+  reproduced. Its suggestion, taken: the snapshot bullet says how often the
+  snapshot was built.
+- Round 5 changes only this entry, and rebuilds the part on the top of the
+  stack, part 39's third round, on part 37's sixth.
+- Review round 5 (PASS), with no findings: `LICENSE` and the README's
+  lines round 3's bytes, the base exactly part 39's third round, and every
+  check reproduced. Part 37's sixth round then needed changes.
+- Round 6 changes only this entry, and rebuilds the part on the top of the
+  stack, part 39's fourth round, on part 37's seventh.
+- Review round 6 (PASS), with no findings: `LICENSE` and the README byte
+  for byte round 5's, the base exactly part 39's fourth round, and every
+  check reproduced. Its suggestions, and the last move review's, concern
+  the scripts that build the snapshots: `snap-41f.sh` now compares the
+  whole README, and `snap-move.sh` now counts an entry's changed lines
+  right. Part 37's seventh round then needed changes.
+- Round 7 changes only this entry, and rebuilds the part on the top of the
+  stack, part 39's sixth round, on part 37's eleventh.
+- Not run: GitHub's license detection, which reads the file once it is on
+  the branch.
+
 ## Update (2026-10-21: QoL overhaul, part 39: screenshot tests, held Alt+S)
 
 - Held Alt+S: a terminal sends a held key as more presses, so holding
