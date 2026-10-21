@@ -5,8 +5,17 @@
 // holds a target of ~96 ms, which absorbs host-side scheduling jitter without
 // adding perceptible delay. Underruns are padded with silence (never a stall)
 // and reported so the HUD can show them.
+//
+// The page also loads this file as a classic script, before player.js. An
+// AudioWorklet exists only in secure contexts (https, localhost), so a page
+// opened over plain http from another machine has none; player.js then drains
+// this same ring from a ScriptProcessorNode on the main thread, where there is
+// no AudioWorkletProcessor to extend and nothing to register.
+"use strict";
 
-class SctermPCM extends AudioWorkletProcessor {
+const SctermPCMBase = typeof AudioWorkletProcessor === "function" ? AudioWorkletProcessor : class {};
+
+class SctermPCM extends SctermPCMBase {
   constructor(options) {
     super();
     const opt = (options && options.processorOptions) || {};
@@ -19,7 +28,7 @@ class SctermPCM extends AudioWorkletProcessor {
     this.started = false;
     this.underruns = 0;
     this.dropped = 0;
-    this.port.onmessage = (e) => this.feed(e.data);
+    if (this.port) this.port.onmessage = (e) => this.feed(e.data);
     this.reportAt = 0;
   }
 
@@ -55,16 +64,21 @@ class SctermPCM extends AudioWorkletProcessor {
 
   process(inputs, outputs) {
     const out = outputs[0];
-    const left = out[0];
-    const right = out[1] || out[0];
+    this.pull(out[0], out[1] || out[0]);
+    this.report();
+    return true;
+  }
+
+  // pull plays the next left.length frames into left and right (the same
+  // array for both on a mono output), as silence while buffering or starved.
+  pull(left, right) {
     const frames = left.length;
 
     if (!this.started || this.count === 0) {
       left.fill(0);
       if (right !== left) right.fill(0);
       if (this.started && this.count === 0) this.underruns++;
-      this.report();
-      return true;
+      return;
     }
 
     for (let i = 0; i < frames; i++) {
@@ -80,18 +94,18 @@ class SctermPCM extends AudioWorkletProcessor {
       this.read = (this.read + 1) % this.max;
       this.count--;
     }
-    this.report();
-    return true;
+  }
+
+  stats() {
+    return { underruns: this.underruns, dropped: this.dropped, queued: this.count };
   }
 
   report() {
     const now = currentFrame;
     if (now - this.reportAt < sampleRate) return; // ~1 Hz
     this.reportAt = now;
-    this.port.postMessage({
-      stats: { underruns: this.underruns, dropped: this.dropped, queued: this.count },
-    });
+    this.port.postMessage({ stats: this.stats() });
   }
 }
 
-registerProcessor("scterm-pcm", SctermPCM);
+if (typeof registerProcessor === "function") registerProcessor("scterm-pcm", SctermPCM);

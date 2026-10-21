@@ -24,6 +24,7 @@ func TestWebClientSuites(t *testing.T) {
 		"web/pointer_test.mjs", // the visible pointer: ghost, drag, touch ripples
 		"web/conn_test.mjs",    // the status card, the reconnect policy, the HUD readouts
 		"web/page_test.mjs",    // the whole page's connection wiring, end to end
+		"web/audio_test.mjs",   // starting the sound, the compatibility path, the sound chip
 	} {
 		suite := suite
 		t.Run(filepath.Base(suite), func(t *testing.T) {

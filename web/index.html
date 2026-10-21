@@ -19,6 +19,15 @@
   <button id="conn-retry" type="button" hidden>Reconnect</button>
 </div>
 
+<!-- Sound chip: this browser's own sound state, shown only while there is
+     something to do about it (player.js picks the words): tap to start the
+     sound, sound off here, the compatibility audio path, or no sound at all.
+     It stays up while the HUD is hidden, and only the chip itself takes
+     pointer events. -->
+<div id="sound" role="status" aria-live="polite">
+  <button id="sound-chip" type="button" class="off"></button>
+</div>
+
 <!-- Local pointer indication (hover ghost, drag trail, touch ripples). It
      never talks to the device; player.js paints it from the same events that
      do. Kept as DOM elements so CSS does the animation. -->
@@ -41,7 +50,7 @@
     <span class="sep">·</span>
     <span id="fps">—</span>
     <span class="sep">·</span>
-    <span id="audio">audio —</span>
+    <span id="audio">device vol —</span>
     <span class="spacer"></span>
     <span id="state">connecting…</span>
   </div>
@@ -115,6 +124,9 @@
 
 <div id="toast"></div>
 
+<!-- The AudioWorklet's code, loaded here as well: on a page with no AudioWorklet
+     (plain http from another machine) player.js plays from this same ring. -->
+<script src="/pcm-worklet.js"></script>
 <script src="/pointer.js"></script>
 <script src="/player.js"></script>
 </body>

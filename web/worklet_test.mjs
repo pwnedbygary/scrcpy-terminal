@@ -168,5 +168,72 @@ console.log("stats reporting");
   check("stats carry the queue depth", typeof stats[0].stats.queued, "number");
 }
 
+console.log("loaded as a classic script, on the main thread");
+{
+  // An AudioWorklet exists only in secure contexts, so a page opened over plain
+  // http from another machine has none. index.html therefore also loads this
+  // file as a classic script, and player.js drains the same ring from a
+  // ScriptProcessorNode. That scope has no AudioWorkletProcessor, no
+  // registerProcessor and no port.
+  const main = {};
+  vm.createContext(main);
+  let threw = null;
+  try {
+    vm.runInContext(src + "\n;globalThis.__Ring = SctermPCM;", main);
+  } catch (e) { threw = String(e); }
+  check("it loads with no AudioWorklet globals", threw, null);
+  const Ring = main.__Ring;
+  check("and leaves the ring for the page", typeof Ring, "function");
+  if (typeof Ring === "function") {
+    // Everything the server sends must come back out, unchanged and in order,
+    // when drained in ScriptProcessor-sized blocks.
+    const ring = new Ring(OPTIONS);
+    const want = [];
+    for (let b = 0; b < 6; b++) {
+      const buf = burst(b * 7);
+      const v = new Int16Array(buf);
+      for (let i = 0; i < BURST_FRAMES; i++) want.push([v[i * 2] / 32768, v[i * 2 + 1] / 32768]);
+      ring.feed({ pcm: buf });
+    }
+    const got = [];
+    let guard = 0;
+    while (ring.count > 0 && guard++ < 100) {
+      const left = new Float32Array(2048), right = new Float32Array(2048);
+      const before = ring.count;
+      ring.pull(left, right);
+      for (let i = 0; i < before - ring.count; i++) got.push([left[i], right[i]]);
+    }
+    check("frames in equal frames out", got.length, want.length);
+    check("unchanged and in order",
+      got.every(([l, r], i) => Math.abs(l - want[i][0]) < 1e-7 && Math.abs(r - want[i][1]) < 1e-7), true);
+    const starved = new Float32Array(2048);
+    const before = ring.underruns;
+    ring.pull(starved, new Float32Array(2048));
+    check("running dry is silence and an underrun",
+      starved.every((x) => x === 0) && ring.underruns === before + 1, true);
+    check("its stats have the worklet's fields", Object.keys(ring.stats()).sort(),
+      ["dropped", "queued", "underruns"]);
+
+    // The same bursts through the worklet and through the classic copy must
+    // give the same blocks: one ring, not two.
+    const a = new Ring(OPTIONS);
+    const b = new P(OPTIONS);
+    let same = true;
+    for (let i = 0; i < 80; i++) {
+      if (i < 10) {
+        a.feed({ pcm: burst(i) });
+        b.port.onmessage({ data: { pcm: burst(i) } });
+      }
+      const la = new Float32Array(128), ra = new Float32Array(128);
+      const lb = new Float32Array(128), rb = new Float32Array(128);
+      a.pull(la, ra);
+      b.process([], [[lb, rb]]);
+      for (let k = 0; k < 128; k++) if (la[k] !== lb[k] || ra[k] !== rb[k]) same = false;
+    }
+    check("it plays exactly what the worklet plays", same, true);
+    check("and counts the same", a.stats(), { underruns: b.underruns, dropped: b.dropped, queued: b.count });
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

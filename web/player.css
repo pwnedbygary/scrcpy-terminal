@@ -379,6 +379,41 @@ html, body {
 
 #conn-retry:hover { background: rgba(80,80,96,.95); }
 
+/* ---------------------------------------------------------------------------
+   sound chip: this browser's own sound state, shown only while there is
+   something to do about it, and kept up while the HUD is hidden. Top right:
+   clear of the menu button (top left) and the status card (centre). Only the
+   chip takes pointer events, and only while it is shown (visibility).
+   --------------------------------------------------------------------------- */
+#sound {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  pointer-events: none;
+}
+
+#sound-chip {
+  appearance: none;
+  height: 34px;
+  max-width: calc(100vw - 70px); /* never under the menu button */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 14px;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 17px;
+  background: rgba(28,28,34,.85);
+  color: #e8e8e8;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+  transition: opacity .25s ease, visibility .25s;
+}
+
+#sound-chip:hover { background: rgba(58,58,68,.95); }
+#sound-chip.off { opacity: 0; visibility: hidden; }
+
 @media (prefers-reduced-motion: reduce) {
-  #screen.dim, #conn { transition: none; }
+  #screen.dim, #conn, #sound-chip { transition: none; }
 }

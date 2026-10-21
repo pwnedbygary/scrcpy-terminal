@@ -7,6 +7,65 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 12: browser sound start and the http fallback)
+
+- Sound starts from any tap, click or key, not only a press on the picture,
+  including a touch's end (pointerup or touchend), which is when phones count
+  a tap as a gesture. The listeners sit on the window in the capture phase,
+  leave while sound plays, and return if the browser suspends or interrupts
+  it.
+- One start at a time: overlapping starts each built an AudioContext and the
+  first was never closed. A failed start closes its context, and only a later
+  gesture tries again, never an audio packet. Audio that arrives while the
+  context is not running is dropped rather than queued, so sound does not
+  start about 240 ms late.
+- Over plain http from another machine there is no AudioWorklet (it needs a
+  secure context), so the page plays through a ScriptProcessorNode fed by the
+  same ring code: `pcm-worklet.js` also loads as a page script, in 2048-frame
+  blocks, with a little more delay. Before, the start threw and the page
+  stayed silent while the HUD showed a volume.
+- A sound chip at the top right shows only while there is something to do:
+  "Tap for sound" (starts it), "Sound off · Alt+M" (a tap unmutes, since
+  phones have no Alt), a note about the compatibility path (fades after 6 s; a
+  tap explains it), or "No sound in this browser" (stays until tapped). It is
+  a live region and does not fade with the HUD.
+- The HUD's volume reads "device vol NN%", "device vol muted", "device vol —",
+  "audio off" or "audio error"; "audio 47%" read like this browser's volume.
+  The `gain` op's comment in `webinput.go` now says it sets the host's sound
+  output (the PulseAudio sink), not the browser's volume.
+- Verification: `go vet ./...` and `go test ./...` passed. Node suites: input
+  110/0, worklet 25/0, pointer 17/0, conn 61/0, page 56/0, and the new audio
+  132/0, which loads every script `index.html` lists into one scope against a
+  stub Web Audio. The stub's plain-http page keeps the AudioWorkletNode
+  constructor but gives the context no `audioWorklet`, as Chromium does, and
+  a second case drops the constructor too, as Firefox does; choosing the path
+  by the constructor alone fails 13 checks. Against the old files, audio fails
+  73 checks and worklet 2. In the builder's tree, removing each of 12
+  behaviours from `player.js` failed at least one check. In both reviews,
+  headless Chrome 155, Firefox 157 and WebKitGTK 2.54.1 drove the page from a
+  scratch server with the page's CSP and synthetic 48 kHz audio: on an
+  insecure origin all three took the compatibility path and started on a
+  tap's end or a key; on localhost all three used the worklet (WebKit in the
+  second review only); WebKit reports a context made before any gesture as
+  "interrupted", which the broadened resume starts; every engine ran at
+  48000 Hz. Not run: a phone,
+  Safari or iOS (`webkitAudioContext`), sound heard on real speakers, the
+  compatibility path under a busy main thread.
+- Known gaps, for a later web part: a start that keeps failing leaves "Tap for
+  sound" up and builds and closes a context on every tap and key; the context's
+  sample rate is not checked (a browser that ignores the 48 kHz request would
+  play slow); until the session ends the chip, like the toolbar, cannot be
+  reached with Tab, which goes to the device; "Sound off · Alt+M" stays over
+  the picture's top-right corner while muted, so a tap there unmutes instead
+  of reaching the device; on narrow screens a toast covers the chip; after a
+  session has ended a key still starts the sound and the chip still offers
+  it (on plain http with the 6 s compatibility note), with nothing to hear.
+- Left alone: the `gain` op clamps -1 ("no change") to 0, which mutes, and
+  `{op:"gain", mute:false}` without a `gain` mutes a sink that is not muted
+  (the missing gain reads as 0); the ring counts underruns unevenly and never
+  re-buffers after starving; the README and the `webui.go` header describe
+  only the AudioWorklet path.
+
 ## Update (2026-10-20: QoL overhaul, part 11: Android readiness, notification, permission help)
 
 - Readiness badges use short labels: "Helper not running", "Too many

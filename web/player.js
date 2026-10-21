@@ -24,6 +24,7 @@ const els = {
   connText: document.getElementById("conn-text"),
   connDetail: document.getElementById("conn-detail"),
   connRetry: document.getElementById("conn-retry"),
+  soundChip: document.getElementById("sound-chip"),
 };
 
 const MSG_VIDEO = 0x01;
@@ -318,7 +319,10 @@ class View {
 }
 
 // ---------------------------------------------------------------------------
-// audio: raw PCM into an AudioWorklet ring buffer
+// audio: raw PCM into the ring buffer of web/pcm-worklet.js, played by an
+// AudioWorklet or, on a page without one, a ScriptProcessorNode; and what the
+// sound chip says about it. web/audio_test.mjs lifts this section, up to the
+// input section, and runs it on its own.
 // ---------------------------------------------------------------------------
 
 class Pcm {
@@ -326,8 +330,18 @@ class Pcm {
     this.ctx = null;
     this.node = null;
     this.gain = null;
+    this.ring = null;     // the compatibility path's ring (a worklet holds its own)
     this.ready = false;
-    this.failed = false;
+    this.starting = null; // the start in flight, shared by every caller
+    this.failed = false;  // the last start failed: only a gesture tries again
+    // How the sound plays: "worklet", "compat" (no AudioWorklet, so a
+    // ScriptProcessorNode drains the same ring, with a little more delay) or
+    // "none" (no Web Audio at all); "" until the first start.
+    this.mode = "";
+    this.heard = false;   // PCM has arrived from the server
+    this.armed = false;   // the gestures that can start the sound are listened for
+    this.unlocker = (ev) => this.unlock(ev);
+    this.onchange = null; // the page redraws the sound chip
     // Local playback gain (Alt+M / Alt+- / Alt+=). Kept here rather than only on
     // the node because the node is created asynchronously, on the first audio
     // packet -- muting before any sound has arrived still has to stick.
@@ -338,48 +352,188 @@ class Pcm {
   setLocalGain(v) {
     this.localGain = Math.max(0, Math.min(2, v));
     if (this.gain) this.gain.gain.value = this.localGain;
+    this.changed();
   }
 
-  async start() {
-    if (this.ready || this.failed) return;
+  get running() {
+    return !!this.ctx && this.ctx.state === "running";
+  }
+
+  // play takes one packet of PCM from the server. start() goes first so that
+  // the chip, redrawn when the first packet arrives, already knows the mode.
+  play(buf) {
+    this.start().then(() => this.push(buf));
+    if (!this.heard) {
+      this.heard = true;
+      this.changed();
+    }
+  }
+
+  // start builds the audio graph once. Every caller shares the attempt in
+  // flight, so the packets that each call it cannot build two contexts, and
+  // after a failure only a gesture (unlock) tries again, never the packets.
+  start(retry) {
+    if (!this.ready && !this.starting && this.mode !== "none" && (retry || !this.failed)) {
+      const done = () => {
+        this.starting = null;
+        this.changed();
+      };
+      this.starting = this.build();
+      this.starting.then(done, done);
+    }
+    return this.starting || Promise.resolve();
+  }
+
+  async build() {
     const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) { this.failed = true; return; }
+    if (!AC) {
+      this.mode = "none";
+      return;
+    }
+    let ctx = null;
     try {
-      const ctx = new AC({ sampleRate: 48000, latencyHint: "interactive" });
-      await ctx.audioWorklet.addModule("/pcm-worklet.js");
-      const node = new AudioWorkletNode(ctx, "scterm-pcm", {
-        numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [2],
-        processorOptions: { targetFrames: 4608, maxFrames: 11520 },
-      });
+      ctx = new AC({ sampleRate: 48000, latencyHint: "interactive" });
+      this.ctx = ctx;
+      this.failed = false;
+      ctx.onstatechange = () => this.changed();
+      // Before the first await: a gesture that called this is still being
+      // handled here, and some browsers start sound only inside one.
+      this.resume();
       const gain = ctx.createGain();
       gain.gain.value = this.localGain;
-      node.connect(gain).connect(ctx.destination);
-      node.port.onmessage = (e) => {
-        if (e.data && e.data.stats) this.stats = e.data.stats;
-      };
-      this.ctx = ctx;
+      let node;
+      if (ctx.audioWorklet && typeof AudioWorkletNode === "function") {
+        this.mode = "worklet";
+        await ctx.audioWorklet.addModule("/pcm-worklet.js");
+        node = new AudioWorkletNode(ctx, "scterm-pcm", {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+          processorOptions: PCM_RING,
+        });
+        node.port.onmessage = (e) => {
+          if (e.data && e.data.stats) this.stats = e.data.stats;
+        };
+      } else {
+        // The same ring, which index.html loads as a classic script, drained
+        // on the main thread one COMPAT_FRAMES block at a time.
+        this.mode = "compat";
+        const ring = new SctermPCM({ processorOptions: PCM_RING });
+        node = ctx.createScriptProcessor(COMPAT_FRAMES, 0, 2);
+        node.onaudioprocess = (e) => {
+          const out = e.outputBuffer;
+          ring.pull(out.getChannelData(0), out.getChannelData(1));
+          this.stats = ring.stats();
+        };
+        this.ring = ring;
+      }
+      node.connect(gain);
+      gain.connect(ctx.destination);
       this.node = node;
       this.gain = gain;
       this.ready = true;
-      this.resume();
     } catch (e) {
+      // Close what was built: a later gesture starts again from nothing, and
+      // no context is ever left open beside the next one.
       this.failed = true;
+      this.ctx = null;
+      this.node = null;
+      this.gain = null;
+      this.ring = null;
+      if (ctx) {
+        ctx.onstatechange = null;
+        try { ctx.close().catch(() => {}); } catch (err) { /* already closed */ }
+      }
     }
   }
 
   resume() {
-    if (this.ctx && this.ctx.state === "suspended") {
-      this.ctx.resume().catch(() => {});
+    const ctx = this.ctx;
+    if (ctx && ctx.state !== "running" && ctx.state !== "closed") {
+      ctx.resume().catch(() => {});
     }
   }
 
+  // unlock is a gesture's chance to start the sound: it resumes the context,
+  // or builds the graph if there is none (yet, or since a failed attempt). A
+  // touch's pointerdown is skipped, because the browser counts only the end of
+  // a touch as the gesture, and so is a key repeating while held down.
+  unlock(ev) {
+    if (ev && ev.type === "pointerdown" && ev.pointerType !== "mouse") return;
+    if (ev && ev.repeat) return;
+    if (this.ctx) this.resume();
+    else this.start(true);
+  }
+
+  // armUnlock starts or stops listening for the gestures that can start the
+  // sound. Capture phase on the window, so a toolbar button or a key counts as
+  // much as the canvas, whatever handles the event after.
+  armUnlock(on) {
+    if (on === this.armed) return;
+    this.armed = on;
+    for (const type of UNLOCK_EVENTS) {
+      if (on) window.addEventListener(type, this.unlocker, true);
+      else window.removeEventListener(type, this.unlocker, true);
+    }
+  }
+
+  // changed runs after anything that can change the sound's state. The gesture
+  // listeners stay only while the sound is not playing (a browser can suspend
+  // it again later), and the page redraws the sound chip.
+  changed() {
+    this.armUnlock(!this.running && this.mode !== "none");
+    if (this.onchange) this.onchange();
+  }
+
   push(buf) {
-    if (!this.ready) return;
+    // A context that is not running plays nothing, and audio queued meanwhile
+    // would only come out late, ahead of everything after it.
+    if (!this.ready || !this.running) return;
+    if (this.ring) {
+      this.ring.feed({ pcm: buf });
+      return;
+    }
     // Transfer the underlying buffer: no copy on the main thread.
     this.node.port.postMessage({ pcm: buf }, [buf]);
   }
+}
+
+// PCM_RING sizes the ring both paths play from, in frames at 48 kHz: playback
+// starts once it holds 96 ms, and it never holds more than 240 ms.
+const PCM_RING = { targetFrames: 4608, maxFrames: 11520 };
+
+// COMPAT_FRAMES is the ScriptProcessorNode's block: ~43 ms at 48 kHz, small
+// enough that the 96 ms the ring starts with still covers a late burst
+// between two blocks.
+const COMPAT_FRAMES = 2048;
+
+// UNLOCK_EVENTS are the gestures that let a page start sound. Per the HTML
+// spec that is a key press, a mouse press or the end of a touch; a touch's
+// pointerdown is not one, so a phone needs the pointerup or touchend. A click
+// comes after one of them and covers a toolbar button.
+const UNLOCK_EVENTS = ["pointerdown", "pointerup", "touchend", "click", "keydown"];
+
+// COMPAT_NOTE explains the compatibility path: the chip's tooltip, and a toast
+// when the chip is tapped (a phone shows no tooltips).
+const COMPAT_NOTE = "Plain http uses an older audio path,\n" +
+  "with a little more delay. localhost\n" +
+  "or https gives the low-delay path.";
+
+// soundChip is what the sound chip says about this browser's own sound, or
+// null when there is nothing to act on. `s` has Pcm's mode, heard and running,
+// plus muted (the local gain is 0), note (the compatibility note is still due)
+// and dismissed (the viewer closed the no-sound note). `act` is what tapping
+// the chip does.
+function soundChip(s) {
+  if (s.mode === "none") {
+    return s.heard && !s.dismissed ? { text: "No sound in this browser", act: "dismiss" } : null;
+  }
+  if (s.muted) return { text: "Sound off · Alt+M", act: "unmute" };
+  if (s.heard && !s.running) return { text: "Tap for sound", act: "unlock" };
+  if (s.mode === "compat" && s.heard && s.running && s.note) {
+    return { text: "Sound: compatibility mode", title: COMPAT_NOTE, act: "explain" };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,6 +1331,20 @@ function geomLabel(st) {
   return st.videoW ? st.videoW + "×" + st.videoH : "—";
 }
 
+// audioLabel is the HUD's sound readout: while the host audio is on, the
+// DEVICE's media volume -- what the volume keys change, as a percentage of the
+// device's own scale, "—" until the first reading -- and otherwise the host
+// audio state ("off", "error"). It is not this browser's volume (the sound
+// chip reports that), hence "device vol". The underruns are this page's.
+function audioLabel(st, underruns) {
+  let text;
+  if (st.audio !== "on") text = "audio " + st.audio;
+  else if (!st.devVolOk) text = "device vol —";
+  else if (st.devVol === 0) text = "device vol muted";
+  else text = "device vol " + st.devVol + "%";
+  return text + (underruns ? " · u" + underruns : "");
+}
+
 // end of connection status
 
 // ---------------------------------------------------------------------------
@@ -1258,21 +1426,11 @@ net.on("status", (msg) => {
   lastStatus = msg;
   els.geom.textContent = geomLabel(msg);
   showFps();
-  // Show the DEVICE's media volume. The old display used msg.gain, but that gain
-  // is applied in writePCM16 for the PulseAudio sink while the browser is fed
-  // raw PCM by pushPCM -- so it was reporting a control that could not change
-  // what you hear. devVol is the volume the volume keys actually change, as a
-  // percentage of the device's own scale (index 0 = muted).
-  let level;
-  if (!msg.devVolOk) {
-    level = "—";
-  } else if (msg.devVol === 0) {
-    level = "muted";
-  } else {
-    level = msg.devVol + "%";
-  }
-  els.audio.textContent = "audio " + (msg.audio === "on" ? level : msg.audio) +
-    (pcm.stats.underruns ? " · u" + pcm.stats.underruns : "");
+  // The DEVICE's media volume. The old display used msg.gain, but that gain is
+  // applied in writePCM16 for the PulseAudio sink while the browser is fed raw
+  // PCM by pushPCM -- so it was reporting a control that could not change what
+  // you hear.
+  els.audio.textContent = audioLabel(msg, pcm.stats.underruns);
   const now = performance.now();
   const st = stateLabel(msg.control, now - view.errorAt, now - stats.lostAt);
   setState(st.text, st.cls);
@@ -1316,9 +1474,58 @@ els.connRetry.addEventListener("click", () => {
   net.reconnect();
 });
 
-net.on("audio", (buf) => {
-  pcm.start().then(() => pcm.push(buf));
+net.on("audio", (buf) => pcm.play(buf));
+
+// showSound puts this browser's own sound state on the sound chip. The
+// compatibility note shows for NOTE_MS, the first time sound plays that way.
+const NOTE_MS = 6000;
+let soundShown;
+let soundAct = "";
+let compatNote = "due"; // "due", then "shown" for NOTE_MS, then "done"
+let soundDismissed = false;
+function showSound() {
+  if (compatNote === "due" && pcm.mode === "compat" && pcm.heard && pcm.running) {
+    compatNote = "shown";
+    setTimeout(() => {
+      compatNote = "done";
+      showSound();
+    }, NOTE_MS);
+  }
+  const chip = soundChip({
+    mode: pcm.mode,
+    heard: pcm.heard,
+    running: pcm.running,
+    muted: pcm.localGain === 0,
+    note: compatNote === "shown",
+    dismissed: soundDismissed,
+  });
+  soundAct = chip ? chip.act : "";
+  const key = JSON.stringify(chip);
+  if (key === soundShown) return;
+  soundShown = key;
+  els.soundChip.classList.toggle("off", chip === null);
+  if (!chip) return; // the words stay while it fades out
+  els.soundChip.textContent = chip.text;
+  els.soundChip.title = chip.title || "";
+}
+
+els.soundChip.addEventListener("click", () => {
+  if (soundAct === "unlock") {
+    pcm.unlock();
+  } else if (soundAct === "unmute") {
+    input.localMute();
+  } else if (soundAct === "explain") {
+    toast(COMPAT_NOTE, NOTE_MS);
+    compatNote = "done";
+  } else if (soundAct === "dismiss") {
+    soundDismissed = true;
+  }
+  showSound();
 });
+
+// Arms the gestures that start the sound (Pcm.unlock) and draws the chip.
+pcm.onchange = showSound;
+pcm.changed();
 
 // Client-side telemetry: proves the page is really painting (and lets
 // SCT_DEBUG_WEB=1 on the host log it). Cheap: one small JSON per second.
@@ -1417,8 +1624,6 @@ if (typeof ResizeObserver !== "undefined") {
 }
 pokeHud();
 
-// A tap on the page is the user gesture audio needs.
-window.addEventListener("pointerdown", () => pcm.start(), { once: true });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     pokeHud();

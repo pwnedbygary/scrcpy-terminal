@@ -19,7 +19,8 @@ package main
 //	home, menu, appswitch, power, volup, voldown, mute, notif, settings, collapse
 //	rotate                      rotate the device
 //	resetvideo                  ask the device for a keyframe
-//	gain    {gain}              local (browser) volume, percent
+//	gain    {gain,mute}         host sound output (the PulseAudio sink), percent;
+//	                            the page's own volume is local and never sent
 //	quit                        end the session
 
 import (
