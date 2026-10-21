@@ -7,6 +7,103 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 18: the browser viewer's server side)
+
+- Reloading the `--window` page no longer ends the session. When the last
+  viewer leaves, the session ends `webLeaveGrace` (3 s) later unless a viewer
+  connects first, and a reloaded page connects well within that, as soon as
+  its script loads (a page that stays loaded retries a dropped socket after
+  250 ms). Closing the window still ends scterm, now about 3 s after its
+  socket drops: `window.go` only waits for the browser and never stops the
+  server, so the end still comes through the socket. A stop or a returning
+  viewer cancels the pending timer. When it fires, it checks under the lock
+  that it is still the current timer and that no viewer is connected, then
+  checks that no stop has begun and quits after releasing the lock; a connect
+  or a stop landing between those checks and the quit does not prevent it,
+  which is the same as arriving just after the grace. A browser that never
+  connects still never ends the session, as before.
+- A failed text write closes the client fully (`writeJSON` calls `close()`):
+  it leaves the list, the viewer count drops and its socket closes, so its
+  page shows "Connection lost. Reconnecting…" and connects again; before, a
+  status write that timed out after 30 s could leave the page on a frozen
+  picture with its socket still open, because the client was only marked
+  closed, stayed listed, and `close()` returned early (the gap the part-8
+  entry recorded). In `--window` mode, if it was the last viewer, the leave
+  grace then starts, so the session ends only if the page does not
+  reconnect. A failed binary write still leaves it to the next status
+  write, at most 500 ms later.
+- The client list is copy-on-write: `frame()` and `pushPCM()` walk a snapshot
+  without the lock, and a list once stored is never written again; `frame()`
+  allocates nothing new. Viewers coming and going while frames and sound fan
+  out used to race (`closeWith` and `handleWS` against `frame`/`pushPCM`).
+- A viewer that stopped reading no longer holds up shutdown. A close sets a
+  2 s write deadline (`wsCloseTimeout`) before it takes the write lock, which
+  also cuts short a frame being written to that viewer, and a write that
+  starts as the close begins keeps the close's deadline. The bye is still the
+  last message before the close frame. A stalled viewer gets neither, and a
+  live viewer that needs more than 2 s to finish its current frame gets a cut
+  frame and no bye, so its page shows "Reconnecting" rather than "Session
+  ended". With a stalled viewer the stop took 2.05 s; before, the first stop
+  waited out the 30 s write timeout and a second stop gave up after 5 s with
+  the window still open.
+- The `gain` op (no shipped page sends it): an absent or negative `gain`
+  keeps the level, then `mute:true` mutes and remembers the level and
+  `mute:false` restores it when muted. Before, an absent `gain` meant 0 and
+  -1 was clamped to 0, so both muted, even beside `mute:false`, and
+  `mute:false` restored 100%. `webEvent.Gain` is now `*int`, like `Mute`.
+  This closes the `gain` problems the part-9 and part-12 entries recorded.
+- Verification: gofmt, `go vet ./...`, the build, `go test -count=1 ./...`,
+  and `-race -count=3` on the web, bye, second-stop, WebSocket, window-kill
+  and encoder tests (40 tests, 120 passes, the node client suites included;
+  the builder's base had 39, before part 17 added
+  `TestWebExitsTwoWhenTheDeviceIsLost`).
+  New tests: `web_session_test.go` (`TestWebWindowSurvivesAReload`,
+  `TestWebWindowReloadCancelsTheGrace`, `TestWebWindowEndsAfterItsLastViewer`,
+  `TestWebStopCancelsTheWindowGrace`, `TestWebFailedWriteClosesTheClient`,
+  `TestWebClientListChurn`, `TestWebStopWithAStalledViewerClosesTheWindow`,
+  `TestWSCloseBoundsARacingWrite`) and `webinput_gain_test.go`
+  (`TestWebGainOp`, 11 cases from wire JSON). Each of the nine fails on the
+  base files: six on behaviour (the churn test under `-race`, in 10 of 10
+  processes; the gain test in 8 of its 11 cases), three on the new state
+  behind a three-field compile shim. Mutations, each caught: quitting at
+  once, no cancel on connect or on stop, `writeJSON` only marking the client
+  closed, removing or adding and removing in place, no close deadline,
+  bounding only the final frames, no re-check in `writeAll`, and the old gain
+  handling. Adding in place (copying only on remove) survives: an in-place
+  add writes only past the current length, and a copy-on-write remove either
+  allocates a new array or, when it drops the viewer at the end of the list,
+  leaves capacity equal to length, so no older, longer list shares the
+  slots an add writes. The add-side copy stays so the rule does not depend
+  on that. The tests simulate a reload and a window close by a test client
+  dropping and reopening its socket. Not run: a real browser or device, a
+  measured page reload, or `window.go` with a real browser exiting (read
+  only).
+- Review round 1 found the surviving mutation described backwards with a
+  false reason, the timer's and the failed write's consequences overstated,
+  the 5.5 s worst case below missing, and the user-visible change for a
+  failed status write unstated; round 2 found the test count stale and the
+  failed write's last-viewer condition dropped. Rounds 2 and 3 correct this
+  entry only (the code is as reviewed).
+- Left alone, for later changes: every viewer that takes a shared frame
+  returns its buffer to the pool, so with two or more JPEG viewers one buffer
+  can reach two senders at once (a throwaway `-race` probe with 3 viewers at
+  480×1080 reported races in `sendFrame` on the base files and after);
+  `nClients` is stored after the lock is released, so two viewers coming or
+  going together can leave it stale; a viewer whose upgrade finishes while
+  `stopWith` runs can miss the stop; `quit()` drops the event when the app's
+  queue is full (read only); the `a == nil` check in the `gain` case cannot be
+  true; the timer's guards against a connect or a stop at the same moment are
+  reasoned, not tested deterministically (removing either guard passes the
+  window tests); a stop can still outlast the 5 s a second stop waits, in
+  the worst case 2 s for an in-flight page request or an idle connection
+  that sent none (a browser's preconnect), 2 s to close a stalled viewer and
+  1.5 s for a browser that ignores SIGTERM, so the process can
+  exit with the window open; an unmute through the `gain` op can race Alt+M
+  on the app loop and mute instead; `README.md` still says closing the
+  window ends scterm, without the grace or the reload, and a note in
+  `web/player.js` still says `--window` ends when the last client
+  disconnects.
+
 ## Update (2026-10-21: QoL overhaul, part 24: scterm update)
 
 - `scterm update` shows what it is about to do first: the current and new

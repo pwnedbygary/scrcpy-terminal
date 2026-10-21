@@ -19,8 +19,11 @@ package main
 //	home, menu, appswitch, power, volup, voldown, mute, notif, settings, collapse
 //	rotate                      rotate the device
 //	resetvideo                  ask the device for a keyframe
-//	gain    {gain,mute}         host sound output (the PulseAudio sink), percent;
-//	                            the page's own volume is local and never sent
+//	gain    {gain,mute}         host sound output (the PulseAudio sink): gain is a
+//	                            percent (absent or negative: unchanged), then
+//	                            mute:true mutes and mute:false restores the volume
+//	                            from before the mute; the page's own volume is
+//	                            local and never sent
 //	quit                        end the session
 
 import (
@@ -109,15 +112,16 @@ func (s *webServer) applyControl(c *webClient, ev *webEvent) {
 			break
 		}
 		if a.audio != nil && a.audio.err == nil {
-			g := ev.Gain
+			if ev.Gain != nil && *ev.Gain >= 0 {
+				a.audio.setGain(*ev.Gain)
+			}
 			if ev.Mute != nil {
 				if *ev.Mute {
-					g = 0
+					a.audio.setGain(0)
 				} else if a.audio.gainPercent() == 0 {
-					g = 100
+					a.audio.toggleMute()
 				}
 			}
-			a.audio.setGain(g)
 			a.refreshStatus()
 		}
 		if c != nil {

@@ -388,7 +388,8 @@ user_pref("browser.fullscreen.autohide", true);
 
 // openWindow launches the browser window and returns immediately: the process
 // outlives nothing important (the server is the parent), and window mode ends
-// when the last client disconnects.
+// webLeaveGrace after the last client disconnects, unless a client (a reloaded
+// page) connects again first.
 func (s *webServer) openWindow(url string) error {
 	w, h := s.windowGeometry()
 	bc, err := findBrowser(url, w, h)

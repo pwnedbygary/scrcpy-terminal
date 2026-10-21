@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,6 +42,11 @@ const (
 	wsMaxPayload = 8 << 20
 
 	wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+	// wsCloseTimeout bounds a close: its last frames, and a frame still being
+	// written when it starts. A peer that stopped reading would otherwise hold
+	// the close, and the server's shutdown, for the whole writeTimeout.
+	wsCloseTimeout = 2 * time.Second
 )
 
 // wsConn is a hijacked HTTP connection speaking WebSocket.
@@ -58,6 +64,9 @@ type wsConn struct {
 	hdr [10]byte
 
 	writeTimeout time.Duration
+	// closeBy is the write deadline (unix nanoseconds) of every write once a
+	// close has begun; 0 until then.
+	closeBy atomic.Int64
 
 	// closeOnce makes Close idempotent and thread-safe: the reader and the
 	// writer goroutines both call it, and the close frame must not race the
@@ -146,6 +155,11 @@ func (c *wsConn) CloseWith(last string) error {
 		return nil
 	}
 	c.closeOnce.Do(func() {
+		// A frame being written to a peer that stopped reading holds wmu
+		// until its deadline: bring that deadline in first.
+		by := time.Now().Add(wsCloseTimeout)
+		c.closeBy.Store(by.UnixNano())
+		_ = c.conn.SetWriteDeadline(by)
 		// Take the write lock so the close frame cannot interleave with a
 		// frame that is mid-write, then take the socket down.
 		c.wmu.Lock()
@@ -196,6 +210,11 @@ func (c *wsConn) writeFrame(opcode byte, payload []byte) error {
 func (c *wsConn) writeAll(b []byte) error {
 	if c.writeTimeout > 0 {
 		_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+	}
+	// Read after setting ours: a close that begins in between sets its
+	// deadline after ours, so its deadline is the one left standing.
+	if by := c.closeBy.Load(); by != 0 {
+		_ = c.conn.SetWriteDeadline(time.Unix(0, by))
 	}
 	_, err := c.bw.Write(b)
 	return err

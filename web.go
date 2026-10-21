@@ -91,7 +91,7 @@ type webEvent struct {
 	Meta   uint32 `json:"meta,omitempty"`   // Android metastate
 	Text   string `json:"text,omitempty"`
 	Delta  int    `json:"delta,omitempty"`  // wheel notches, positive = up
-	Gain   int    `json:"gain,omitempty"`   // percent, -1 = no change
+	Gain   *int   `json:"gain,omitempty"`   // percent; absent or negative = no change
 	Mute   *bool  `json:"mute,omitempty"`   // toggle/pin the audio gain
 	W      int    `json:"w,omitempty"`      // viewport px (hello)
 	H      int    `json:"h,omitempty"`      // viewport px (hello)
@@ -247,8 +247,14 @@ type webServer struct {
 	http *http.Server
 
 	clientsMu sync.Mutex
-	clients   []*webClient
-	nextID    uint64
+	// clients is copy-on-write: frame and pushPCM walk a snapshot of it
+	// without the lock, so a slice once stored here is never written again.
+	clients []*webClient
+	nextID  uint64
+	// leaveTimer ends a --window session once its last viewer has been gone
+	// for leaveGrace (webLeaveGrace; tests shorten it). Guarded by clientsMu.
+	leaveGrace time.Duration
+	leaveTimer *time.Timer
 
 	// frame pool: slots returned by clients as soon as they are encoded/sent
 	poolMu sync.Mutex
@@ -478,6 +484,8 @@ func newWebServer(cfg config, sess *session, stream *streamState, audio *audioSi
 		done:     make(chan struct{}),
 		stopped:  make(chan struct{}),
 		volKick:  make(chan struct{}, 1),
+
+		leaveGrace: webLeaveGrace,
 	}
 	s.devVolIdx.Store(-1) // no reading yet; 0 would mean "device muted"
 	return s
@@ -565,9 +573,15 @@ func (s *webServer) stop() {
 	s.stopWith(webByeStopped)
 }
 
-// webStopWait bounds how long a later stop waits for the first to finish: a
-// viewer that stopped reading can hold its socket for the full write timeout.
+// webStopWait bounds how long a later stop waits for the first to finish: the
+// first may still be closing a stalled viewer's socket (up to wsCloseTimeout),
+// and then the window.
 const webStopWait = 5 * time.Second
+
+// webLeaveGrace is how long a --window session outlives its last viewer: a
+// reload drops the page's socket, and the reloaded page connects again well
+// within it.
+const webLeaveGrace = 3 * time.Second
 
 // stopWith is stop, telling every client why in a bye, the last message before
 // its close frame. Only the first call stops the server, so its reason is the
@@ -594,6 +608,7 @@ func (s *webServer) stopWith(reason string) {
 	}
 	s.clientsMu.Lock()
 	clients := append([]*webClient(nil), s.clients...)
+	s.cancelLeave()
 	s.clientsMu.Unlock()
 	// All at once, so a viewer that stopped reading delays only its own bye.
 	bye := byeMessage(reason)
@@ -845,8 +860,9 @@ func (s *webServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		closeCh:     make(chan struct{}),
 		statusEvery: 500 * time.Millisecond,
 	}
-	s.clients = append(s.clients, c)
+	s.clients = append(s.clients[:len(s.clients):len(s.clients)], c)
 	n := len(s.clients)
+	s.cancelLeave()
 	s.clientsMu.Unlock()
 	s.nClients.Store(int64(n))
 	s.hadClient.Store(true)
@@ -886,19 +902,47 @@ func (c *webClient) closeWith(last string) {
 	s.clientsMu.Lock()
 	for i, x := range s.clients {
 		if x == c {
-			s.clients = append(s.clients[:i], s.clients[i+1:]...)
+			s.clients = append(s.clients[:i:i], s.clients[i+1:]...)
 			break
 		}
 	}
 	n := len(s.clients)
+	// Window mode: the window *is* the session. When its last viewer has been
+	// gone for leaveGrace there is nothing left to display, so stop; a reload
+	// comes back sooner than that.
+	if s.cfg.window && n == 0 && !s.closing.Load() {
+		s.leaveLater()
+	}
 	s.clientsMu.Unlock()
 	s.nClients.Store(int64(n))
 	logOnce(fmt.Sprintf("scterm: web client %d disconnected (%d left)\n", c.id, n))
+}
 
-	// Window mode: the window *is* the session. When its last viewer goes
-	// away there is nothing left to display, so stop.
-	if s.cfg.window && n == 0 && !s.closing.Load() {
-		s.quit()
+// leaveLater ends the session leaveGrace from now unless a viewer connects
+// first. Callers hold clientsMu.
+func (s *webServer) leaveLater() {
+	s.cancelLeave()
+	var t *time.Timer
+	t = time.AfterFunc(s.leaveGrace, func() {
+		s.clientsMu.Lock()
+		current := s.leaveTimer == t
+		if current {
+			s.leaveTimer = nil
+		}
+		empty := len(s.clients) == 0
+		s.clientsMu.Unlock()
+		if current && empty && !s.closing.Load() {
+			s.quit()
+		}
+	})
+	s.leaveTimer = t
+}
+
+// cancelLeave drops a pending leaveLater. Callers hold clientsMu.
+func (s *webServer) cancelLeave() {
+	if s.leaveTimer != nil {
+		s.leaveTimer.Stop()
+		s.leaveTimer = nil
 	}
 }
 
@@ -1307,7 +1351,7 @@ func (c *webClient) writeJSON(v any) {
 		return
 	}
 	if err := c.ws.WriteText(string(b)); err != nil {
-		c.closed.Store(true)
+		c.close()
 	}
 }
 
