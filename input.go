@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
+
+	"scterm/peer"
 )
 
 // ---------------------------------------------------------------------------
@@ -21,6 +26,7 @@ func (a *app) inputLoop() {
 	}()
 	buf := make([]byte, 4096)
 	pend := make([]byte, 0, 4096)
+	var dec inputDecoder
 	for {
 		if len(pend) == 0 || len(pend) > 1 || pend[0] != 0x1b {
 			// normal path: block until readable
@@ -45,20 +51,172 @@ func (a *app) inputLoop() {
 			}
 			pend = append(pend, buf[:n]...)
 		}
-		for len(pend) > 0 {
-			if dbgControl != "" {
-				fmt.Fprintf(os.Stderr, "scterm: raw % x\n", pend)
-			}
-			ev, consumed := a.decodeInput(pend)
-			if consumed == 0 {
-				break
-			}
-			pend = pend[consumed:]
-			if ev != nil {
-				a.events <- inputEvent{kind: evBytes, buf: ev}
-			}
+		pend = dec.feed(a, pend, func(ev []byte) {
+			a.events <- inputEvent{kind: evBytes, buf: ev}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// bracketed paste: while the terminal UI runs, the terminal sends a paste
+// between pasteStart and pasteEnd (shellInit turns the mode on), so a paste is
+// one event. It goes to the device as one paste, and nothing in it is read as
+// a key or a shortcut.
+// ---------------------------------------------------------------------------
+
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+)
+
+// maxPasteBytes is the longest paste sent: what one set-clipboard message
+// carries. A longer one is dropped, and a notice says so.
+const maxPasteBytes = clipboardTextMaxBytes
+
+// inputDecoder decodes what the terminal sends into input events. All it
+// keeps from one read to the next is whether it is dropping a paste too long
+// to send, and how many bytes of it so far.
+type inputDecoder struct {
+	dropping bool
+	dropped  int
+}
+
+// feed decodes the events at the front of pend, hands each to emit, and
+// returns what is left: the start of an event that a later read completes.
+func (d *inputDecoder) feed(a *app, pend []byte, emit func([]byte)) []byte {
+	for len(pend) > 0 {
+		if dbgControl != "" {
+			fmt.Fprintf(os.Stderr, "scterm: raw %s\n", d.logged(pend))
+		}
+		ev, n := d.decode(a, pend)
+		if n == 0 {
+			break
+		}
+		pend = pend[n:]
+		if ev != nil {
+			emit(ev)
 		}
 	}
+	return pend
+}
+
+// decode is decodeInput, except that a bracketed paste is one event, its
+// markers included, however many reads it spans. A paste longer than
+// maxPasteBytes is not kept: it is dropped as it comes in.
+func (d *inputDecoder) decode(a *app, pend []byte) ([]byte, int) {
+	if d.dropping {
+		return nil, d.drop(a, pend)
+	}
+	body, ok := bytes.CutPrefix(pend, []byte(pasteStart))
+	if !ok {
+		return a.decodeInput(pend)
+	}
+	if end := bytes.Index(body, []byte(pasteEnd)); end >= 0 && end <= maxPasteBytes {
+		n := len(pasteStart) + end + len(pasteEnd)
+		return pend[:n], n
+	}
+	if len(body) < maxPasteBytes+len(pasteEnd) {
+		return nil, 0 // the rest of the paste is still to come
+	}
+	d.dropping, d.dropped = true, 0
+	return nil, len(pasteStart) + d.drop(a, body)
+}
+
+// drop takes the bytes of a paste too long to send, up to and including its
+// end marker. Until the marker comes, the last bytes stay in case they are its
+// beginning; so while dropping, at least that many are left over, never a
+// lone Esc that the input loop would time out as a key.
+func (d *inputDecoder) drop(a *app, pend []byte) int {
+	end := bytes.Index(pend, []byte(pasteEnd))
+	if end < 0 {
+		n := max(len(pend)-(len(pasteEnd)-1), 0)
+		d.dropped += n
+		return n
+	}
+	d.dropped += end
+	d.dropping = false
+	if a.ctrl != nil { // without control no paste is sent, so none is missed
+		noticef("scterm: paste not sent: %d bytes, more than the %d one paste can carry\n", d.dropped, maxPasteBytes)
+	}
+	return end + len(pasteEnd)
+}
+
+// logged is pend as the debug log shows it: its bytes in hex, but of a paste
+// only how long it is, never its text.
+func (d *inputDecoder) logged(pend []byte) string {
+	if d.dropping {
+		return fmt.Sprintf("(%d bytes of a paste)", len(pend))
+	}
+	if i := bytes.Index(pend, []byte(pasteStart)); i >= 0 {
+		return fmt.Sprintf("% x (then %d bytes from a paste)", pend[:i], len(pend)-i)
+	}
+	return fmt.Sprintf("% x", pend)
+}
+
+// isPaste reports whether b is a paste as inputDecoder hands it on. No other
+// event is that long and bracketed by both markers.
+func isPaste(b []byte) bool {
+	return len(b) >= len(pasteStart)+len(pasteEnd) &&
+		bytes.HasPrefix(b, []byte(pasteStart)) && bytes.HasSuffix(b, []byte(pasteEnd))
+}
+
+// pasteText is the text of a paste as the device should get it. Terminals
+// send each line break in a paste as CR (some as CR LF), and Android text
+// breaks lines at LF. Tabs stay; the other C0 control characters and DEL, and
+// bytes that are not UTF-8, are left out: in a text field they are noise, and
+// typed as text they would press keys. C1 characters (U+0080 to U+009F) are
+// kept.
+func pasteText(b []byte) string {
+	s := string(b[len(pasteStart) : len(b)-len(pasteEnd)])
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.ToValidUTF8(s, "")
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\n' && r != '\t' || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// paste sends a paste to the device as one paste: onto the device clipboard
+// and pasted from it where the device takes clipboard text from this computer,
+// and as injected text (in as many messages as that takes) where it does not.
+func (a *app) paste(b []byte) {
+	if a.ctrl == nil {
+		return
+	}
+	text := pasteText(b)
+	if text == "" {
+		return
+	}
+	var err error
+	if a.clipboardPaste() {
+		err = a.ctrl.setClipboard(text, true)
+	} else {
+		err = a.ctrl.injectText(text)
+	}
+	if err != nil {
+		noticef("scterm: paste: %v\n", err)
+		return
+	}
+	if n := utf8.RuneCountInString(text); n == 1 {
+		noticef("scterm: pasted 1 character\n")
+	} else {
+		noticef("scterm: pasted %d characters\n", n)
+	}
+}
+
+// clipboardPaste reports whether a paste can go through the device clipboard:
+// always with the scrcpy server, and with a peer whose pairing grants the
+// clipboard and whose backend can set it (the target refuses it otherwise).
+func (a *app) clipboardPaste() bool {
+	if a.sess == nil || a.sess.peer == nil {
+		return true
+	}
+	w := a.sess.peer.Welcome
+	return slices.Contains(w.Grants, peer.GrantClipboard) &&
+		w.Caps != nil && slices.Contains(w.Caps.Control, "set_clipboard")
 }
 
 // waitReadable waits (up to usec microseconds) for stdin to become readable.
@@ -103,6 +261,17 @@ func (a *app) decodeInput(pend []byte) ([]byte, int) {
 		return []byte{0x7f}, 1
 	case c < 0x20:
 		return []byte{c}, 1
+	case c >= 0x80:
+		// A character beyond ASCII is its whole UTF-8 sequence, which the
+		// next read may complete. A byte that is not UTF-8 goes on alone, as
+		// before, and nothing types it.
+		if !utf8.FullRune(pend) {
+			return nil, 0
+		}
+		if _, n := utf8.DecodeRune(pend); n > 1 {
+			return pend[:n], n
+		}
+		return []byte{c}, 1
 	default:
 		return []byte{c}, 1
 	}
@@ -137,7 +306,16 @@ func escSeqLen(b []byte) int {
 		}
 		return 0
 	default:
-		// Alt+key: ESC + char
+		// Alt+key: ESC + char, all of a character beyond ASCII, so none of
+		// its bytes is left over to be read as a key of its own
+		if b[1] >= 0x80 {
+			if !utf8.FullRune(b[1:]) {
+				return 0
+			}
+			if _, n := utf8.DecodeRune(b[1:]); n > 1 {
+				return 1 + n
+			}
+		}
 		return 2
 	}
 }
@@ -147,6 +325,10 @@ func escSeqLen(b []byte) int {
 func (a *app) handleInput(b []byte) {
 	defer func() {
 		if r := recover(); r != nil {
+			if isPaste(b) { // not its text: a paste can hold a password
+				noticef("scterm: input ignored: %v (a paste of %d bytes)\n", r, len(b))
+				return
+			}
 			noticef("scterm: input ignored: %v (bytes % x)\n", r, b)
 		}
 	}()
@@ -172,6 +354,12 @@ func (a *app) handleInput(b []byte) {
 			a.toggleKeyboard()
 			return
 		}
+	}
+	// A paste, or a typed character beyond ASCII, is text the menu has no row
+	// for: it closes the menu, as such a key does, and is not typed.
+	if a.menuOpen && (isPaste(b) || isTypedRune(b)) {
+		a.closeMenu()
+		return
 	}
 	// menu open: consume keys for its rows (modal, like the software keyboard)
 	if a.menuOpen && a.menuKeyInput(b) {
@@ -257,6 +445,16 @@ func (a *app) handleInput(b []byte) {
 	// Single bytes: printable text / control keys
 	if len(b) == 1 {
 		a.handleByte(b[0])
+		return
+	}
+	// Text: a paste goes as one paste, and a typed character beyond ASCII,
+	// which no Android key types, as text.
+	if isPaste(b) {
+		a.paste(b)
+		return
+	}
+	if isTypedRune(b) {
+		a.injectRune(b)
 		return
 	}
 	// Sequences: arrows, home/end, etc.
@@ -393,6 +591,27 @@ func (a *app) injectChar(c byte) {
 	}
 	// Other printable: text injection.
 	if err := a.ctrl.injectText(string(c)); err != nil {
+		noticef("scterm: inject text: %v\n", err)
+	}
+}
+
+// isTypedRune reports whether b is one typed character beyond ASCII, as
+// decodeInput hands it on: one whole UTF-8 sequence and nothing else.
+func isTypedRune(b []byte) bool {
+	if len(b) < 2 || b[0] < 0x80 {
+		return false
+	}
+	_, n := utf8.DecodeRune(b)
+	return n == len(b)
+}
+
+// injectRune sends a typed character beyond ASCII as text, as the browser's
+// typing does.
+func (a *app) injectRune(b []byte) {
+	if a.ctrl == nil {
+		return
+	}
+	if err := a.ctrl.injectText(string(b)); err != nil {
 		noticef("scterm: inject text: %v\n", err)
 	}
 }

@@ -470,6 +470,9 @@ func (t *tui) shellInit() {
 	// emoji with a variation selector) is clipped at the edge instead of
 	// wrapping, which on the bottom row would scroll the whole picture.
 	os.Stdout.WriteString("\x1b[?7l")
+	// Bracketed paste: the terminal marks where a paste starts and ends, so
+	// it reaches the device as one paste and nothing in it is read as a key.
+	os.Stdout.WriteString("\x1b[?2004h")
 	os.Stdout.WriteString("\x1b[2J\x1b[H")
 	t.statusDrawn = ""
 	t.running = true
@@ -517,5 +520,5 @@ func (t *tui) shellClose() {
 	// Always disable mouse reporting + restore the normal screen, so a crash
 	// or quit never leaves SGR garbage pouring into the shell.
 	os.Stdout.WriteString(mouseOffSeq)
-	os.Stdout.WriteString("\x1b[0m\x1b[?25h\x1b[?7h\x1b[?1049l")
+	os.Stdout.WriteString("\x1b[0m\x1b[?25h\x1b[?7h\x1b[?2004l\x1b[?1049l")
 }

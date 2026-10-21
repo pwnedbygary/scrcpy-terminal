@@ -7,6 +7,111 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 23: typing beyond ASCII, and pasting, in the terminal)
+
+- Characters beyond ASCII typed in the terminal UI (é, ñ, €, CJK, emoji)
+  reach the device as injected text; they were dropped. A character split
+  across two reads waits for its other bytes, and bytes that are not UTF-8
+  are still ignored. ASCII keeps the keycode path. Alt plus such a character
+  is one chord that does nothing, like other unmapped Alt chords (it used to
+  be read as an Alt chord on its first byte, `ESC 0xC3` for é, then one
+  stray byte). With the menu open, such a character
+  closes the menu and is not typed, as other keys without a row do; with the
+  on-screen keyboard open it is typed.
+- Bracketed paste is on while the terminal UI owns the screen (`shellInit`
+  writes `\x1b[?2004h`; `shellClose`, also on the panic path, writes
+  `\x1b[?2004l`). A paste is one event however many reads it spans, and
+  nothing inside it acts as a key (it used to be typed key by key, so a CR
+  pressed Enter and a pasted Esc or Ctrl key acted), apart from the cases
+  under "Left alone" where the start marker is not seen: then the rest of
+  the marker (`[200~`) and the paste are typed key by key. It goes to the
+  device as
+  one set-clipboard message with paste on, as scrcpy's Ctrl+V does, so it
+  replaces the device's clipboard; a peer that lacks the clipboard grant or
+  does not list `set_clipboard` gets inject-text messages of at most 300
+  bytes instead. Line breaks become LF, and the other C0 control characters
+  and DEL are removed (tabs stay; C1 characters, U+0080 to U+009F, are
+  kept). A notice says "pasted N characters" once it is sent, also
+  when the device then refuses it (see "Left alone"); a paste over
+  262130 bytes (scrcpy's limit, which the Android peer also enforces) is
+  dropped as it arrives, with a notice giving its size, never truncated.
+  Notices, the debug log and the panic notice show sizes only, never pasted
+  text. With the menu open a paste closes it and is not sent.
+- Newlines in a paste: on the set-clipboard path they arrive as line breaks
+  inside the text and no Enter is pressed (on Android 6 and older the
+  clipboard is set but nothing is pasted, since the server presses the paste
+  key only on API 24 and later); on the inject-text fallback the scrcpy
+  server presses Enter for each one, while a projection-backend peer inserts
+  them as text.
+- With control off (`--control=false`, a view-only peer), typed text and
+  pastes do nothing and say nothing.
+- Verification: gofmt, `go vet ./...`, the build, `go test -count=1 ./...`,
+  and the 26 tests in the five test files below under `-race` (no race) and
+  20 times each. New tests (in `input_test.go`, `paste_test.go`,
+  `control_text_test.go`, `fuzz_input_test.go` and `crash_test.go`): typing
+  (`TestTypedNonASCIIGoesAsText`, `TestTypedNonASCIISplitAcrossReads`,
+  `TestTypedMixedASCIIAndNonASCII`, `TestEscAndAltWithNonASCII`,
+  `TestNonASCIIInTheOverlays`, `TestTextLeavesTheActionBarAlone`,
+  `TestInputFuzzSplitReads`), pasting (`TestBracketedPasteWhileTheUIOwnsTheScreen`,
+  `TestPasteIsOnePaste`, `TestPasteSplitAcrossReads`,
+  `TestPasteLongerThanOneMessage`, `TestDroppingAPasteNeverLeavesALoneEsc`,
+  `TestPasteWithoutTheDeviceClipboard`, `TestPasteIsNeverKeys`,
+  `TestPasteInTheOverlaysAndUngrabbed`, `TestPastedTextIsNeverPrinted`,
+  `TestSetClipboardWire` against the shared wire fixture,
+  `TestSetClipboardLimit`) and guards that pass on the old code by design
+  (`TestInvalidUTF8StaysIgnored`, `TestPasteWithoutControl`,
+  `TestTextWithoutAControlSocket`, the extended `TestInputFuzz`). The other
+  18 fail on the old code, and 26 mutations are each caught. Built on part
+  16's first round; `tui.go` was merged three ways onto its second round,
+  cleanly, with the same added and removed lines. Not run: a real terminal
+  (its paste markers and line breaks are taken from documented behaviour), a
+  device, adb or a peer; the input loop's own reads and its 25 ms Esc window
+  have no test.
+- Review round 1 (read-only) also ran the real input loop in a child process
+  reading a pipe, and the vendored server's message parser compiled with
+  `javac` and a stub `Size`; both behaved as this entry describes. It found
+  this entry's wording wrong or incomplete on an unfinished paste, C1
+  characters, an Esc just before a paste, the notice for a refused paste and
+  how Alt+é used to be read; round 2 corrects the entry and the `pasteText`
+  comment, which now says C1 characters are kept (the code is otherwise as
+  reviewed). Review round 2 found that comment also saying tabs are
+  removed; round 3 corrects it and takes the review's wording notes (the
+  rest of the start marker is typed too, ESC O has no time limit, mouse
+  reports join an unfinished paste).
+- Left alone, for later changes: the browser still pastes key by key
+  through the `text` op, so the two front ends paste differently; the scrcpy
+  server types injected text only through its key map, so typed €, CJK and
+  emoji do not appear in adb sessions (accented letters do, and pasting
+  carries them all); a paste start marker cut by more than 25 ms on a slow
+  link is read as Esc (Back), and the rest of the marker (`[200~`) and the
+  paste are typed, as for any escape sequence; an Esc in the same read as a
+  paste's start marker, or less than 25 ms before it, is read together with
+  the marker's ESC as Alt+Esc, so the rest of the marker and the whole
+  paste are typed key by key (a pasted ESC q would then quit scterm and a CR
+  would press Enter), and an ESC O with nothing after it before a paste
+  does the same however long before (ESC O waits for its third byte with no
+  time limit); a terminal that sends a start marker
+  and never an end marker holds all further input, and the keyboard cannot
+  get out of it: Ctrl-C, Alt+Q and Esc do nothing (raw mode reads Ctrl-C as
+  a byte, and every byte until an end marker belongs to the paste), so only
+  closing the terminal, a signal from outside or the session ending ends
+  scterm, and if an end marker comes later, for example with the next paste,
+  everything typed in between, mouse reports included (without their Esc),
+  goes to the device as one paste, or is dropped with the size notice once
+  it passes the paste limit (bash's
+  readline and vim also hold later keys, but Ctrl-C gets out of both; zsh
+  ends such a paste without its marker); the notice "pasted N characters"
+  also appears when a peer refuses the paste because this computer does not
+  hold control (the lease), and that refusal notice shows only once per run,
+  so after the first refusal the success notice is the only feedback; a
+  large set-clipboard is written from the run loop and can briefly hold up
+  drawing over a slow peer link; `TestNilConnGuard` does not list
+  `setClipboard`; test gaps the review found: mutations that survive
+  (dropping once the text alone reaches the limit, no `Caps` nil check,
+  sending an empty paste), and the paste markers in `TestInputFuzz` go
+  straight to `decodeInput`, so they never reach the paste decoder; the
+  README says nothing about pasting in the terminal.
+
 ## Update (2026-10-21: QoL overhaul, part 18: the browser viewer's server side)
 
 - Reloading the `--window` page no longer ends the session. When the last
