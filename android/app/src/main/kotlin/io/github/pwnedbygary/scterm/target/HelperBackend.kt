@@ -5,6 +5,7 @@ import android.os.Build
 import io.github.pwnedbygary.scterm.helper.HelperHandshake
 import io.github.pwnedbygary.scterm.peer.BackendSink
 import io.github.pwnedbygary.scterm.peer.PeerLog
+import io.github.pwnedbygary.scterm.peer.Readiness
 import io.github.pwnedbygary.scterm.protocol.Capabilities
 import io.github.pwnedbygary.scterm.protocol.ControlMessage
 import io.github.pwnedbygary.scterm.protocol.DeviceMessage
@@ -100,7 +101,7 @@ class HelperBackend(context: Context) : ServingBackend {
     val activationCommand: String = "adb shell '$shellCommand'"
 
     override val notReadyReason: String
-        get() = "its full-control helper is not running. Start it on that device (Start with Shizuku) or from a computer with adb"
+        get() = Readiness.HELPER_NOT_RUNNING_REASON
 
     init {
         thread(name = "helper-accept", isDaemon = true) { acceptHelper() }

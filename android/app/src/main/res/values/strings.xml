@@ -93,6 +93,14 @@
     <string name="serve_not_serving">Not serving.</string>
     <string name="serve_starting">Starting…</string>
     <string name="serve_failed">Serving stopped: %1$s</string>
+    <string name="serve_listening">Listening on %1$s:%2$d</string>
+    <string name="serve_controlling">controlling</string>
+    <string name="serve_viewing">viewing</string>
+    <string name="serve_notifications_blocked">Notifications are blocked, so the Stop button and pairing requests can\'t appear.</string>
+    <string name="serve_input_restricted">If the switch is greyed out, open App info, tap the three-dot menu, then Allow restricted settings.</string>
+    <string name="local_network_denied">Local network access is denied, so this device can\'t reach other devices or serve them. Allow it in App info, under Permissions.</string>
+    <string name="open_notification_settings">Notification settings</string>
+    <string name="open_app_info">App info</string>
     <string name="pair_allow_back">Also let it see, hear and control this device</string>
     <string name="viewer_retry">Retry</string>
 </resources>

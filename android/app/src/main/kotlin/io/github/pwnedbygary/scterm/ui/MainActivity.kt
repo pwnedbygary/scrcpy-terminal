@@ -88,6 +88,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var inviteButton: Button
     private lateinit var kickButton: Button
     private lateinit var inputButton: Button
+    private lateinit var inputHelp: View
+    private lateinit var notificationsHelp: View
+    private lateinit var networkHelp: View
+    private var localNetworkDenied = false
     private lateinit var helperBox: LinearLayout
     private lateinit var helperCommand: TextView
     private lateinit var shizukuButton: Button
@@ -111,16 +115,22 @@ class MainActivity : ComponentActivity() {
     private var requestDialog: AlertDialog? = null
     private var requestShown: TargetServer.PairingRequest? = null
     private var nearbyPairing: NearbyPairing? = null
+    private var pairDialog: AlertDialog? = null
     private var nearbyBrowser: Nearby.Browser? = null
 
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val next = pendingAfterPermissions
         pendingAfterPermissions = null
         // Notifications are optional; local network access is not.
-        if (Permissions.missingForNetworking(this, serving = false).isEmpty()) {
-            next?.invoke()
-        } else {
-            toast("Local network access is required to reach other devices.")
+        when {
+            Permissions.missingForNetworking(this, serving = false).isEmpty() -> next?.invoke()
+            shouldShowRequestPermissionRationale(Permissions.LOCAL_NETWORK) -> toast("Local network access is required to reach other devices.")
+            else -> {
+                // Android no longer asks: only App info can grant it now.
+                localNetworkDenied = true
+                renderNetworkHelp()
+                pageScroll.smoothScrollTo(0, 0)
+            }
         }
     }
 
@@ -178,6 +188,13 @@ class MainActivity : ComponentActivity() {
         maybeCheckForUpdate()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Back from a settings page or a permission prompt: the lines about them show what changed there.
+        renderServing(Serving.state.value)
+        renderNetworkHelp()
+    }
+
     override fun onStop() {
         Serving.uiVisible = false
         app.peerMonitor.setVisible(false)
@@ -211,9 +228,10 @@ class MainActivity : ComponentActivity() {
         addressView = text("", 13f, color = R.color.muted)
         versionView = text("", 13f, color = R.color.muted)
         updateButton = button(getString(R.string.update_check)) { onUpdateButton() }
+        networkHelp = settingsHelp(text(getString(R.string.local_network_denied), 14f), getString(R.string.open_app_info)) { openAppInfo() }
         column.addView(card(
             getString(R.string.section_this_device),
-            nameView, identityView, addressView, versionView,
+            nameView, identityView, addressView, networkHelp, versionView,
             row(button("Rename") { showRenameDialog() }, updateButton),
         ))
 
@@ -238,6 +256,12 @@ class MainActivity : ComponentActivity() {
         inviteButton = button(getString(R.string.serve_invite)) { showInviteDialog() }
         kickButton = button(getString(R.string.serve_kick)) { TargetService.disconnectAll(this) }
         inputButton = button(getString(R.string.serve_enable_input)) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        inputHelp = settingsHelp(text(getString(R.string.serve_input_restricted), 13f, color = R.color.muted), getString(R.string.open_app_info)) {
+            openAppInfo()
+        }
+        notificationsHelp = settingsHelp(text(getString(R.string.serve_notifications_blocked), 14f), getString(R.string.open_notification_settings)) {
+            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+        }
         helperCommand = text("", 12f).apply {
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
@@ -250,7 +274,7 @@ class MainActivity : ComponentActivity() {
         )
         column.addView(card(
             getString(R.string.section_serve),
-            backendGroup, serveStatus, row(serveButton, inviteButton), row(kickButton, inputButton), helperBox,
+            backendGroup, serveStatus, notificationsHelp, row(serveButton, inviteButton), row(kickButton, inputButton), inputHelp, helperBox,
         ))
 
         peersList = column()
@@ -324,6 +348,8 @@ class MainActivity : ComponentActivity() {
         inviteButton.visibility = View.GONE
         kickButton.visibility = View.GONE
         inputButton.visibility = View.GONE
+        inputHelp.visibility = View.GONE
+        notificationsHelp.visibility = View.GONE
         helperBox.visibility = View.GONE
         when (state) {
             ServeState.Stopped -> {
@@ -343,13 +369,13 @@ class MainActivity : ComponentActivity() {
             is ServeState.Serving -> {
                 val address = Net.localAddresses().firstOrNull() ?: "this device"
                 serveStatus.text = buildString {
-                    append(state.status).append("\nListening on ").append(address).append(':').append(state.port)
+                    append(state.status).append('\n').append(getString(R.string.serve_listening, address, state.port))
                     if (state.sessions.isEmpty()) {
                         append("\nNo one is connected.")
                     } else {
                         for (s in state.sessions) {
-                            append("\n• ").append(s.peerName).append(" (").append(s.address).append(")")
-                            append(if (s.holdsLease) " controlling" else " viewing")
+                            append("\n• ").append(s.peerName).append(" (").append(s.address).append(") ")
+                            append(getString(if (s.holdsLease) R.string.serve_controlling else R.string.serve_viewing))
                         }
                     }
                     invitationExpiresAtMs?.let {
@@ -361,7 +387,12 @@ class MainActivity : ComponentActivity() {
                 serveButton.isEnabled = true
                 inviteButton.visibility = View.VISIBLE
                 if (state.sessions.isNotEmpty()) kickButton.visibility = View.VISIBLE
-                if (state.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) inputButton.visibility = View.VISIBLE
+                if (state.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) {
+                    inputButton.visibility = View.VISIBLE
+                    // Android 13+ greys out the switch for apps installed from outside a store.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) inputHelp.visibility = View.VISIBLE
+                }
+                if (TargetService.notificationsBlocked(this)) notificationsHelp.visibility = View.VISIBLE
                 state.helperCommand?.takeIf { !state.ready }?.let {
                     helperCommand.text = it
                     helperShellCommand = state.helperShellCommand
@@ -370,6 +401,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** Shown once Android stopped asking for local network access, until it is granted. */
+    private fun renderNetworkHelp() {
+        if (Permissions.missingForNetworking(this, serving = false).isEmpty()) localNetworkDenied = false
+        networkHelp.visibility = if (localNetworkDenied) View.VISIBLE else View.GONE
     }
 
     private fun renderInvitation(expiresAtMs: Long?) {
@@ -615,6 +652,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showPairDialog(prefill: String?) = withNetworkPermissions(serving = false) {
+        // One at a time (a second link or a double tap): onDestroy stops only the newest search.
+        pairDialog?.dismiss()
+        nearbyBrowser?.stop()
         val input = EditText(this).apply {
             hint = "192.168.1.20:${Invitation.DEFAULT_PORT} ABCD-EFGH-JKMN-PQRS"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_FLAG_MULTI_LINE
@@ -656,8 +696,10 @@ class MainActivity : ComponentActivity() {
             .setOnDismissListener {
                 browser.stop()
                 if (nearbyBrowser === browser) nearbyBrowser = null
+                if (pairDialog === dialog) pairDialog = null
             }
             .show()
+        pairDialog = dialog
         nearbyBrowser = browser
         browser.start()
     }
@@ -762,8 +804,7 @@ class MainActivity : ComponentActivity() {
                 name = result.device.name,
                 target = TargetAddress(host, port),
                 grantedByPeer = Grant.toWire(result.grants),
-                // The invite dialog's defaults: the clipboard is only shared when asked for.
-                inbound = if (allowBack) Grant.toWire(Grant.FULL - Grant.CLIPBOARD) else old?.inbound ?: emptyList(),
+                inbound = inboundAfterPairing(allowBack, old?.inbound),
                 lastSeenMs = now,
             )
         }
@@ -955,6 +996,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun openAppInfo() = startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()))
+
     // --------------------------------------------------------------- helpers
 
     private fun describePairingFailure(e: Throwable, nearby: Boolean = false): String = when {
@@ -1067,6 +1110,10 @@ class MainActivity : ComponentActivity() {
         addView(text(title.uppercase(), 13f, Typeface.BOLD, R.color.accent))
         children.forEach { addView(it) }
     }
+
+    /** A line about something only system settings can change, with the button that opens them; hidden until needed. */
+    private fun settingsHelp(line: TextView, label: String, open: () -> Unit) =
+        column(line, row(button(label, open))).apply { visibility = View.GONE }
 
     private fun padded(view: View) = LinearLayout(this).apply {
         setPadding(dp(20), dp(8), dp(20), 0)

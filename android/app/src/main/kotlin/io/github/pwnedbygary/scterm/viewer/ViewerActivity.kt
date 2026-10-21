@@ -285,7 +285,9 @@ class ViewerActivity : ComponentActivity() {
                 pending = connected
                 if (!attempts.isCurrent(attempt)) { connected.closeNow(); return@thread }
                 app.peers.update(fingerprint) { it?.copy(grantedByPeer = Grant.toWire(connected.grants), lastSeenMs = System.currentTimeMillis()) }
-                main.post { onConnected(connected, attempt) }
+                // Not through main, whose queue onDestroy empties: a session that arrives
+                // during onDestroy must still reach onConnected, which closes it.
+                runOnUiThread { onConnected(connected, attempt) }
             } catch (e: Exception) {
                 pending?.closeNow()
                 main.post { if (attempts.isCurrent(attempt) && !leaving) fail(describe(e, "$host:$port", name ?: "The target")) }

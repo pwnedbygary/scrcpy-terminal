@@ -7,6 +7,39 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 11: Android readiness, notification, permission help)
+
+- Readiness badges use short labels: "Helper not running", "Too many
+  viewers", "Serving not ready" for any other not-ready answer, and "Peer
+  refused the check" (the refusal used to be the label). The full sentence is
+  the detail shown when the badge is tapped. A `Readiness.State` enum replaces
+  matching on English labels. The not-ready sentences come from shared
+  constants, so the probe text on the wire, which the Go client and older apps
+  read, is byte-identical.
+- The serving notification no longer changes text on every check: a re-check
+  keeps each device's last result, and only a device never checked shows
+  "Checking…". There is no summary line without paired devices, "Disconnect
+  all" appears only while a device is connected, and the wording matches the
+  main screen ("Listening on HOST:PORT", "NAME controlling" or "NAME
+  viewing").
+- Help lines with a button to the right settings page: notifications blocked
+  while serving (Notification settings), local network access denied for good
+  (App info), and on Android 13 and later a hint under "Enable remote input…"
+  about Allow restricted settings (App info). They are re-checked on resume.
+- From the part-5 review: only one pair dialog is open at a time (the previous
+  dialog and its device search are dismissed first); a session that connects
+  while the viewer is being destroyed is now closed, since `onConnected` is
+  posted with `runOnUiThread` rather than to the handler `onDestroy` empties;
+  and the allow-back grant is a pure function with a JVM unit test.
+- Verification: no Gradle or lint here (offline, and the pinned plugin and
+  libraries are not cached), so CI is the first real build. aapt2 (build-tools
+  36.0.0) compiled and linked the resources and manifest against android-37.
+  Kotlin 2.4.10 (the pin is 2.4.20) type-checked every app source against
+  stubs and cached androidx; `Readiness.kt` and `PairingGrants.kt` compiled
+  with `-Werror`, and their tests passed 11 of 11. Three new expectations fail
+  with the old `Readiness.kt`. Not run: a device, the notification, the
+  settings pages and the permission flows.
+
 ## Update (2026-10-20: QoL overhaul, part 10: grouped help, scrcpy flag names)
 
 - `scterm -h`, `--help` and `scterm help` print the same help on stdout:

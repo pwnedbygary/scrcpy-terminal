@@ -336,7 +336,7 @@ class TargetServer(
         PeerFrames.write(output, PeerMessage.ProbeResult(
             v = PEER_PROTOCOL_VERSION, device = device, ready = status.ready && !full,
             grants = Grant.toWire(record.inboundGrants), caps = status.caps,
-            controlOccupied = occupied, reason = if (full) "too many sessions" else status.reason,
+            controlOccupied = occupied, reason = if (full) Readiness.TOO_MANY_SESSIONS_REASON else status.reason,
         ))
     }
 
