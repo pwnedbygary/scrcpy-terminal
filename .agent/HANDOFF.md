@@ -7,6 +7,95 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 17: scrcpy's exit codes)
+
+- Exit status follows scrcpy: 0 for a normal end (Quit, closing the
+  `--window` window, a signal during a session, `-h`, `help`, `version` and
+  commands that worked), 1 when scterm could not start, a command failed or
+  the session failed for another reason (a decoder error, the web server
+  failing), 2 when the device is lost during the session. Usage errors (flag
+  mistakes, unknown words, `validateConfig` refusals such as all streams off
+  or `--no-tui --web`, `version x`, `update --bogus`, `peers --bogus`, a bare
+  `forget`) now exit 1, not the 2 that parts 4 and 10 gave them; their
+  messages are unchanged. The help has an "Exit status" section between
+  Environment and Examples, which also says a crash exits 2.
+- "Lost" means a read from the device failed inside the video or audio
+  packet loop after the stream started: `stream.go` wraps those six reads in
+  `lostError` (messages unchanged), and `exitStatus` maps it to 2 and any
+  other error to 1. As in scrcpy v4.1 (`demuxer.c`, `scrcpy.c`), a failure
+  before the stream starts (declined, an unknown codec, an unreadable codec
+  id or session packet, a decoder that won't open) or a decoder error
+  mid-stream exits 1: the bundled server sends the codec id before it sets up
+  the encoder and closes the socket if that fails, so an early read failure
+  usually means the server failed, not the device. Unlike scrcpy, a
+  disconnect in the middle of a packet also exits 2.
+- Per display: the terminal UI exits 2 when the stream it shows (video, or
+  audio without video) is lost (it was 1); `--web` and `--window` when video
+  is lost after it started (1 before); `--no-tui` likewise (0 before: it now
+  returns the error to `main`, which prints the same `scterm: video: …` line
+  once, after shutdown, about 200 ms later, as the other displays already
+  did; found in review: after a signal quit it no longer prints the
+  teardown's closed-connection video line, and that line can no longer
+  interleave with a late stats line). A peer target ending the session while
+  the stream runs exits 2 (its reason line still prints first), before the
+  stream started 1. `main`'s ending moved into `endSession`: the peer reason
+  line, then for an error the session's stop before `exitWith` prints the
+  line and exits, while a quit returns as before; `fatal` still exits 1.
+  Panics stay Go's 2, and a signal before the session starts still kills
+  scterm (130, 143 or 129 in a shell), as before.
+- Verification: gofmt, `go vet ./...`, `go test -count=1 ./...` (on the
+  part-13 commit, 187 top-level tests in `scterm` pass and one skips; that
+  commit alone has 182 and the same skip), `-race -count=3` on the seven exit
+  and help tests, a `go test -cover` run of the three child-process tests,
+  and the production build, also with CI's flags. New `exit_test.go`:
+  `TestOnlyALostDeviceExitsTwo` (14 cases through the terminal UI's stream
+  watcher: 7 lost give 2, covering each of the six wrapped reads and a socket
+  closed at this end; 7 pre-stream failures give 1),
+  `TestWebExitsTwoWhenTheDeviceIsLost`,
+  `TestHeadlessExitsTwoWhenTheDeviceIsLost` (which also checks that
+  `runHeadless` prints nothing itself), `TestSessionEndExitsWithItsStatus`
+  (`endSession` in a child process: a lost device exits 2 and any other
+  error 1, each after the session's sockets are closed; a quit returns) and
+  `TestCommandLineExitStatus` (the real `main()` in a child process with no
+  inherited environment but `GOCOVERDIR`, an empty PATH or a fake adb;
+  expected stderr taken from the base binary). The renamed
+  `TestLostDeviceIsPrintedAndExitsTwo` drives the real watcher into
+  `exitWith` in a child process and checks stderr exactly. On the base,
+  `TestCommandLineExitStatus` fails on exactly the nine usage cases and
+  `TestHelpIsGrouped` on the missing section; with a shim reproducing the
+  base `main`'s ending, the four exit-2 tests fail on their lost cases (and
+  `--no-tui` on its declined case, which exited 0). Mutations, each caught:
+  nine in the first round (lost exits 1, usage exits 2, each kind of wrap
+  removed, a decline or a codec-id failure marked lost, `runHeadless`
+  returning nil) and six in the second (the raw-audio header read and the
+  decoded-audio packet body read unwrapped, `endSession` calling `fatal`,
+  skipping the stop or exiting on a quit, and the help's old line for 1).
+  The real binary under `env -i` with an empty PATH (first round): the nine
+  usage cases went from 2 to 1, every other case kept its status, and stderr
+  is byte-identical; stdout differs only by the help section. Built on part
+  13's round-2 files and merged onto round 3 (only `tui_notice_test.go`,
+  cleanly); with parts 14 and 16 in the same tree, vet and `go test ./...`
+  pass. Not run: a device, an unplug, a peer revoking access, the terminal
+  UI's full `run()` in a terminal, or `main()` past the session start; the
+  peer reason line in `endSession` is checked by reading only.
+- Review round 1 asked for this entry's test counts (taken from a tree
+  without part 13's last test) and its list of out-of-date entries to be
+  corrected, and noted that reverting `main`'s final call to `fatal` passed
+  the whole suite, that `TestCommandLineExitStatus` failed all 14 cases under
+  `go test -cover` (the child lost `GOCOVERDIR`; the first round's test file
+  still prints 14 coverage warnings there), that the two reads above had no
+  case, and that the help's 1 left out sessions that fail for other reasons.
+  All are fixed as described above.
+- Left alone: `--web` prints a video error twice when it is not a closed
+  connection (older); the terminal UI's "lost the video stream from …"
+  wording also shows for a decline, which now exits 1; an audio stream
+  ending under a picture is only a notice, and control-only sessions or
+  `--web` without a video socket never notice a lost device; scrcpy exits 0
+  on Ctrl+C while waiting for the server, where a signal still kills scterm;
+  the part-4, part-10 and part-13 entries describe the exit codes of their
+  time (part 13's says a lost device and a peer ending the session exit 1,
+  and that `--no-tui` exits 0 on a lost device).
+
 ## Update (2026-10-20: QoL overhaul, part 15: Android looks and accessibility)
 
 - Cards are 16 dp rounded rectangles with a thin outline (same fill, padding

@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -121,6 +122,13 @@ func main() {
 	app := newApp(sess, cfg)
 	err := app.run()
 	app.shutdown()
+	endSession(sess, err)
+}
+
+// endSession reports how a session ended. A peer target's reason comes first;
+// an error then stops the session and exits with the error's line and status,
+// while a quit returns for main to return.
+func endSession(sess *session, err error) {
 	// A peer target says why it ended a session (revoked, serving stopped, ...).
 	if sess.peer != nil {
 		if reason := sess.peer.Reason(); reason != "" && reason != "closed" {
@@ -128,12 +136,31 @@ func main() {
 		}
 	}
 	if err != nil {
-		sess.stop() // fatal's exit skips the deferred stop
-		fatal(err)
+		sess.stop() // exitWith's exit skips main's deferred stop
+		exitWith(err)
 	}
 }
 
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "scterm: %v\n", err)
 	os.Exit(1)
+}
+
+// exitWith reports the error a session ended with and exits with its status.
+func exitWith(err error) {
+	fmt.Fprintf(os.Stderr, "scterm: %v\n", err)
+	os.Exit(exitStatus(err))
+}
+
+// exitStatus is the exit status of a session that ended with err, as scrcpy's:
+// 0 for a quit, 2 when the device was lost during the session (the stream the
+// display shows ended after it started), and 1 for anything else.
+func exitStatus(err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, new(lostError)):
+		return 2
+	}
+	return 1
 }

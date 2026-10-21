@@ -178,7 +178,7 @@ func readHelp(t *testing.T) (*flag.FlagSet, string, []helpEntry) {
 	heading := ""
 	for _, line := range strings.Split(b.String(), "\n") {
 		switch {
-		case strings.HasSuffix(line, ":") && !strings.Contains(line, " "):
+		case strings.HasSuffix(line, ":") && !strings.HasPrefix(line, " "):
 			heading = strings.TrimSuffix(line, ":")
 		case heading != "" && strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   "):
 			entries = append(entries, helpEntry{heading, []string{line}})
@@ -250,7 +250,8 @@ func TestHelpListsEveryFlagOnce(t *testing.T) {
 
 // TestHelpIsGrouped: scterm -h puts each flag under a heading, with a word
 // for its value and its default said once, then the commands (one line
-// each), the environment and a few examples, all within 80 columns.
+// each), the environment, the exit statuses and a few examples, all within
+// 80 columns.
 func TestHelpIsGrouped(t *testing.T) {
 	fs, help, entries := readHelp(t)
 	for i, line := range strings.Split(help, "\n") {
@@ -264,7 +265,7 @@ func TestHelpIsGrouped(t *testing.T) {
 			headings = append(headings, e.heading)
 		}
 	}
-	want := []string{"Device", "Video", "Audio", "Display", "Peer", "Debugging", "Commands", "Environment", "Examples"}
+	want := []string{"Device", "Video", "Audio", "Display", "Peer", "Debugging", "Commands", "Environment", "Exit status", "Examples"}
 	if strings.Join(headings, ", ") != strings.Join(want, ", ") {
 		t.Errorf("headings %q, want %q", headings, want)
 	}
@@ -311,9 +312,24 @@ func TestHelpIsGrouped(t *testing.T) {
 		"pair": "Commands", "peers": "Commands", "forget": "Commands", "update": "Commands", "version": "Commands", "help": "Commands",
 		"ANDROID_SERIAL": "Environment", "SCTERM_HOME": "Environment", "SCTERM_CHROME": "Environment",
 		"SCTERM_FIREFOX_KIOSK": "Environment", "SCT_AUDIO_DEVICE": "Environment",
+		"0": "Exit status", "1": "Exit status", "2": "Exit status",
 	} {
 		if under[name] != heading {
 			t.Errorf("%s is under %q, want %q", name, under[name], heading)
+		}
+	}
+	// scrcpy's exit statuses, a mistake in the command line being a failure
+	// to start, and Go's status for a panic sharing 2.
+	for status, says := range map[string][]string{
+		"0": {"normal end"},
+		"1": {"could not start", "command line", "session failed for another reason"},
+		"2": {"device was lost during the session", "crash"},
+	} {
+		entry := strings.Join(strings.Fields(text[status]), " ")
+		for _, s := range says {
+			if !strings.Contains(entry, s) {
+				t.Errorf("exit status %s does not say %q: %q", status, s, entry)
+			}
 		}
 	}
 	for _, v := range []string{"CHROME_BIN", "CHROMIUM_BIN"} {

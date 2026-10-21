@@ -174,6 +174,11 @@ var helpSections = []struct {
 		{"SCTERM_FIREFOX_KIOSK=1", "when --window falls back to Firefox, open it full screen without its toolbars"},
 		{"SCT_AUDIO_DEVICE", "the PulseAudio sink to play the sound on, rather than following the desktop's choice"},
 	}},
+	{heading: "Exit status", lines: [][2]string{
+		{"0", "a normal end: a quit, or a command that worked"},
+		{"1", "scterm could not start (a mistake in the command line included), a command failed, or the session failed for another reason"},
+		{"2", "the device was lost during the session (a crash exits 2 as well)"},
+	}},
 	{heading: "Examples", lines: [][2]string{
 		{"scterm --window", "mirror the only device in a window of its own"},
 		{"scterm -s R5CT --no-audio", "mirror one of several devices, without sound"},
@@ -375,11 +380,11 @@ func editDistance(a, b string) int {
 	return prev[len(b)]
 }
 
-// usageError reports a mistake in how scterm was run and exits with status 2,
-// as the flag package does for an unknown flag.
+// usageError reports a mistake in how scterm was run and exits with status 1,
+// as scrcpy does for a bad option: scterm could not start.
 func usageError(msg string) {
 	fmt.Fprintf(os.Stderr, "scterm: %s\n", msg)
-	os.Exit(2)
+	os.Exit(1)
 }
 
 // The values the bundled scrcpy server accepts (AudioCodec.java and

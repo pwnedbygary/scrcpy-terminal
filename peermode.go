@@ -101,8 +101,8 @@ terminal to ask on.
 `,
 }
 
-// usageErr is a command run the wrong way; it exits with status 2, as a bad
-// flag does, rather than 1.
+// usageErr is a command run the wrong way; it is reported through usageError,
+// as a bad flag is.
 type usageErr string
 
 func (e usageErr) Error() string { return string(e) }

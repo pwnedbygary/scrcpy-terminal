@@ -529,10 +529,12 @@ func (a *app) runHeadless() error {
 			}
 		}
 	}()
+	// The end of the video stream ends the run with its error, which main
+	// prints ("scterm: video: ...") before it exits.
+	videoErr := make(chan error, 1)
 	go func() {
 		if err := a.stream.runVideo(); err != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: video: %v\n", err)
-			a.events <- inputEvent{kind: evQuit}
+			videoErr <- err
 		}
 	}()
 	go func() {
@@ -548,6 +550,8 @@ func (a *app) runHeadless() error {
 		select {
 		case <-a.events:
 			return nil
+		case err := <-videoErr:
+			return fmt.Errorf("video: %w", err)
 		case f := <-a.frames:
 			// Same mailbox as the TUI: the run loop owns the frame and the
 			// demux goroutine never waits on disk I/O either. At most three

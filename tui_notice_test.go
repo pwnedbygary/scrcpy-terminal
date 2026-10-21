@@ -361,24 +361,42 @@ func TestRunLoopEndsWithTheLostStream(t *testing.T) {
 	}
 }
 
-// TestLostDeviceIsPrintedAndExitsOne: the error main gets from run is printed
-// on stderr and the exit status is 1. Runs main's fatal in a child process.
-func TestLostDeviceIsPrintedAndExitsOne(t *testing.T) {
-	if os.Getenv("SCTERM_TEST_LOST_DEVICE") == "1" {
-		a := &app{sess: &session{deviceName: "Pixel 8"}}
-		fatal(a.lostStream("video", fmt.Errorf("stream ended: %w", io.EOF)))
+// TestLostDeviceIsPrintedAndExitsTwo: the error main gets from run is printed
+// on stderr. The device going away after the stream started exits 2, as
+// scrcpy does when the device disconnects; a device that declines video at
+// the start is a failure to start, status 1. Runs main's exitWith in a child
+// process, on what the terminal UI's stream watcher returns.
+func TestLostDeviceIsPrintedAndExitsTwo(t *testing.T) {
+	// "h264", then a session packet (top bit set, then 1080 by 2400), then
+	// the device goes away; or a zero codec id, the device declining video.
+	heads := map[string][][]byte{
+		"lost":     {[]byte("h264"), {0x80, 0, 0, 0, 0, 0, 0x04, 0x38, 0, 0, 0x09, 0x60}},
+		"declined": {{0, 0, 0, 0}},
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestLostDeviceIsPrintedAndExitsOne$")
-	cmd.Env = append(os.Environ(), "SCTERM_TEST_LOST_DEVICE=1")
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
-		t.Fatalf("exit: %v, want status 1", err)
+	if name := os.Getenv("SCTERM_TEST_LOST_DEVICE"); name != "" {
+		a := streamApp(&session{deviceName: "Pixel 8", video: deviceStream(t, heads[name]...)})
+		exitWith(waitLost(t, a.watchStreams()))
 	}
-	if got, want := stderr.String(), "scterm: lost the video stream from Pixel 8: stream ended: EOF\n"; got != want {
-		t.Errorf("stderr %q, want %q", got, want)
+	for _, tc := range []struct {
+		name   string
+		status int
+		stderr string
+	}{
+		{"lost", 2, "scterm: lost the video stream from Pixel 8: stream ended: EOF\n"},
+		{"declined", 1, "scterm: lost the video stream from Pixel 8: video stream disabled by device (code=0)\n"},
+	} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLostDeviceIsPrintedAndExitsTwo$")
+		cmd.Env = append(os.Environ(), "SCTERM_TEST_LOST_DEVICE="+tc.name)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != tc.status {
+			t.Errorf("%s: exit: %v, want status %d", tc.name, err, tc.status)
+		}
+		if got := stderr.String(); got != tc.stderr {
+			t.Errorf("%s: stderr %q, want %q", tc.name, got, tc.stderr)
+		}
 	}
 }
 

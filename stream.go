@@ -267,6 +267,15 @@ func (s *streamState) mapCell(cellX, cellY int) position {
 	return position{x: x, y: y, screenW: uint16(s.videoW), screenH: uint16(s.videoH)}
 }
 
+// lostError is how a stream that has started ends when a read from the device
+// fails: the device, or the connection to it, went away. When it ends the
+// stream the display shows, scterm exits 2, as scrcpy does when the device
+// disconnects. A stream that fails before it starts (declined, an unknown
+// codec, no session header) ends with another error.
+type lostError struct{ error }
+
+func (e lostError) Unwrap() error { return e.error }
+
 // runVideo demuxes the video socket: headers -> packets -> decoder.
 func (s *streamState) runVideo() error {
 	if s.sess.video == nil {
@@ -309,7 +318,7 @@ func (s *streamState) runVideo() error {
 
 	for {
 		if _, err := io.ReadFull(r, he); err != nil {
-			return fmt.Errorf("stream ended: %w", err)
+			return lostError{fmt.Errorf("stream ended: %w", err)}
 		}
 		isSession, ptsUs, isConfig, _, size := parsePacketHeader(he)
 		if isSession {
@@ -328,7 +337,7 @@ func (s *streamState) runVideo() error {
 		}
 		payload := make([]byte, size)
 		if _, err := io.ReadFull(r, payload); err != nil {
-			return fmt.Errorf("packet: %w", err)
+			return lostError{fmt.Errorf("packet: %w", err)}
 		}
 
 		if isConfig {
@@ -439,7 +448,7 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 		// raw s16le stereo 48k: packets are the samples themselves.
 		for {
 			if _, err := io.ReadFull(r, he); err != nil {
-				return fmt.Errorf("audio raw: %w", err)
+				return lostError{fmt.Errorf("audio raw: %w", err)}
 			}
 			_, ptsUs, _, _, size := parsePacketHeader(he)
 			if size == 0 {
@@ -449,7 +458,7 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 			s.lastAudioPts.Store(ptsUs)
 			payload := make([]byte, size)
 			if _, err := io.ReadFull(r, payload); err != nil {
-				return fmt.Errorf("audio raw packet: %w", err)
+				return lostError{fmt.Errorf("audio raw packet: %w", err)}
 			}
 			s.audioBytes += int64(len(payload))
 			s.noteAudioPeak(maxAbsInt16(payload))
@@ -466,7 +475,7 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 
 	for {
 		if _, err := io.ReadFull(r, he); err != nil {
-			return fmt.Errorf("audio stream ended: %w", err)
+			return lostError{fmt.Errorf("audio stream ended: %w", err)}
 		}
 		isSession, ptsUs, isConfig, _, size := parsePacketHeader(he)
 		if isSession {
@@ -477,7 +486,7 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 		}
 		payload := make([]byte, size)
 		if _, err := io.ReadFull(r, payload); err != nil {
-			return fmt.Errorf("audio packet: %w", err)
+			return lostError{fmt.Errorf("audio packet: %w", err)}
 		}
 		if isConfig {
 			// opus: the config packet contains OpusHead; libavcodec does NOT
