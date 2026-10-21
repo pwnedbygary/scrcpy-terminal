@@ -1,7 +1,8 @@
 package main
 
 /*
-#cgo CFLAGS: -O3 -mavx2 -fomit-frame-pointer -I${SRCDIR}
+#cgo CFLAGS: -O3 -fomit-frame-pointer -I${SRCDIR}
+#cgo amd64 CFLAGS: -mavx2
 #cgo pkg-config: libpulse-simple
 #include <pulse/simple.h>
 #include <pulse/error.h>

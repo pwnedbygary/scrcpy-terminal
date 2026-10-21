@@ -7,6 +7,19 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 7: AVX2 flag on amd64 only)
+
+- `-mavx2` was passed to the C compiler on every architecture, so an aarch64
+  build failed at once (clang: unsupported option) although `native.c` has a
+  NEON path. It is now an amd64-only cgo flag; amd64 builds are unchanged and
+  still need a CPU with AVX2.
+- Verification: `go list` shows `-mavx2` in the amd64 cgo flags and not in the
+  arm64 ones. `native.c`, compiled for aarch64 with the Android NDK's clang and
+  arm64 sysroot (FFmpeg headers from the host), fails with the old flags and
+  builds with the new ones, and the object holds NEON code. A full linux/arm64
+  build needs arm64 FFmpeg and PulseAudio libraries and was not run.
+  `go vet ./...`, `go test ./...` and the amd64 build passed.
+
 ## Update (2026-10-20: QoL overhaul, part 6: terminal status row, colours, overlay padding)
 
 - The status row is painted on its own as soon as it changes: grab, mute and
