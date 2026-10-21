@@ -159,10 +159,15 @@ on the picture does nothing.
 > it also accepts this computer's name, with or without `.local`. Any other name gets an error
 > that says what to do. This stops a website that points its own name at this computer (DNS
 > rebinding) from seeing and controlling the device. The WebSocket connection also refuses a page
-> opened on another address. These checks do not stop anyone who can reach the port and uses
-> this computer's address, or, with an address that is not a loopback address, someone on your
-> network who can answer for this computer's name. Use such addresses only on a network you
-> trust, or keep the default address and use an SSH tunnel: `ssh -L 6969:127.0.0.1:6969 HOST`.
+> opened on another address. scterm also tells the browser not to show the page inside another
+> page, where a website could trick you into clicking or typing on it. These checks do not stop
+> anyone who can reach the port and uses this computer's address, or, with an address that is not
+> a loopback address, someone on your network who can answer for this computer's name. scterm
+> accepts a name in `SCTERM_WEB_HOSTS` or given to `--web-addr` with any address, a loopback
+> address included, so the checks do not stop someone who can answer for that name either. For a
+> `.local` name, that is anyone on your network. Use such addresses and names only on a network
+> you trust, or keep the default address, list no names in `SCTERM_WEB_HOSTS`, and use an SSH
+> tunnel: `ssh -L 6969:127.0.0.1:6969 HOST`.
 
 ### Window
 

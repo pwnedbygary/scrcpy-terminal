@@ -7,6 +7,123 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 31: follow-ups to part 28's reviews)
+
+- Framing: the page (`/`) is now sent with `X-Frame-Options: DENY`, and
+  its Content-Security-Policy ends with `frame-ancestors 'none'`; its
+  seven other directives are unchanged. A page opened as `127.0.0.1`
+  passes the Host check, so until now any website could put the live page
+  in a frame and trick the viewer into clicks and keys that reach the
+  device. Only the page carries them: its files do nothing in a frame but
+  show their text, the 403 and the other errors are one line of plain
+  text, and the 403 goes only to names scterm does not serve, whose own
+  page can read it anyway; the WebSocket's 101 is written by hand after
+  the hijack. Nothing in scterm frames its page: `web/` has no frames, and
+  `--window` opens Chromium with `--app=URL`, or Firefox with
+  `--new-window URL` or `--kiosk URL`.
+- `run()` takes the names from the new `allowedNames(ln)`: the listener's
+  address, `--web-addr` (`s.addr`), and the host name from `osHostname`
+  (`os.Hostname`). It listens through `webListen` (`net.Listen`). Tests
+  replace both. Behaviour is unchanged. With an empty `--web-addr`
+  (`--web-addr=`; the default is 127.0.0.1) the names no longer hold
+  "127.0.0.1", which the check never looks up (it accepts any IP address
+  first).
+- `SCTERM_WEB_HOSTS`: each ignored entry is reported at start (a repeated
+  entry once for each time it appears), as `scterm: web: ignored ENTRY in
+  SCTERM_WEB_HOSTS: an entry must be a name, or a name and a port, such as
+  mirror.lan or mirror.lan:8443`, with ENTRY quoted by `%+q` (a Kelvin
+  sign shows as `\u212a`). When ENTRY has a character outside ASCII, the
+  line adds `; write an international name in its xn-- form` (no
+  conversion: `x/net/idna` needs `x/text`, which is not in `go.sum`). A
+  name with an empty label (a leading dot, as in Django's `.example.lan`,
+  two dots in a row, or two final dots) is now ignored too, with `no
+  request can match a name that starts with a dot or has two dots in a
+  row; list each name in full, such as mirror.example.lan`. A Host header
+  with such a name, served until now, gets the 403. One final dot is
+  still allowed. A path was already refused (`/` is not allowed in a
+  name).
+- Docs: the README's Browser warning says that the page asks not to be
+  shown inside another page, and that a name in `SCTERM_WEB_HOSTS` or
+  given to `--web-addr` is accepted with any address, loopback included,
+  so the checks do not stop whoever can answer for it (for a `.local`
+  name, anyone on the network); its safe way is now the default address,
+  no names in `SCTERM_WEB_HOSTS`, and an SSH tunnel.
+  `docs/ARCHITECTURE.md` gives the warnings' wording and a bullet for the
+  frame headers. `flags.go` is unchanged.
+- Tests: `TestWebPageRefusesFrames` (new `web_iframe_test.go`: the two
+  headers, and the policy's directives parsed and compared);
+  `TestWebServesTheNamesItStartsWith` (new: `run()` with `--web-addr
+  Mirror.Scterm.test`, a fixed host name, a loopback listener that
+  reports 192.0.2.10, so no DNS, no /etc/hosts and nothing off loopback,
+  and `SCTERM_WEB_HOSTS` emptied, so a developer's own list cannot add
+  names); `TestWebWarnsOfHostsEntriesItIgnores` (replaces
+  `TestWebWarnsOfHostsEntriesThatAreNotNames`; whole lines compared, at
+  start and after requests; among its entries `*..example.lan`, which
+  would not be a name even without its extra dot, so it gets the
+  not-a-name advice); `TestWebHostsEntriesMustBeNames` (extended).
+- Verification. Builder, on `bb396d9` (`fd9e086` plus earlier rounds of
+  parts 27, 29 and 30), with iso.env: gofmt, vet, the build, `go test
+  ./...` (in the root package 366 top-level tests pass, against 364 on
+  that base: two new, one renamed; 3 skip across the packages, on both),
+  `-race -count=3` on the web tests (189 passes over 63 tests, no races),
+  the changed tests 20 times and 5 times under `-race`, the docs tests
+  and the docs checker. The new tests fail on the base files for their
+  reasons; the `run()` test needs seams the base lacks, so instead N17
+  and N18 were shown to pass the whole base package and each to fail the
+  new test. 19 of 19 mutations are caught, part 28's survivor (`run()`
+  passing no listener address) included. Headless Firefox 157 (no
+  display, scratch profile, loopback): the base page loads in another
+  site's iframe; this part's does not, with either header alone too,
+  while the page opened directly loads. Not run: Chromium, a browser that
+  knows only `X-Frame-Options`, real DNS rebinding or mDNS, a device.
+- Review round 1 passed it, with one low finding and two nits, fixed in
+  round 2: this entry said that with no `--web-addr` the names no longer
+  hold "127.0.0.1", though the default `--web-addr` is 127.0.0.1; its test
+  counts mixed the root package's count with the skips of every package,
+  and counted the extended test as new; and the reviewer's mutant H12
+  (`webHostsAdvice` choosing the empty-label advice by the entry's dots,
+  without asking whether it is a name) survived the whole package, as no
+  test entry that is not a name had a leading dot or two dots in a row.
+  Round 2 adds `*..example.lan`, empties `SCTERM_WEB_HOSTS` in the
+  `run()` test, says to list no names with the SSH tunnel, and moves the
+  part onto part 29's fourth round and part 32's second, which changed
+  none of its files.
+- Verification, round 2's snapshot (review-31b: `141cd3e` plus parts 29
+  and 32 as reviewed, with iso.env): gofmt, vet and the build are clean;
+  `go test ./...` passes 353 top-level tests in the root package with 1
+  skip (380 and 3 across the packages); the six node suites pass (input
+  130, worklet 41, pointer 17, conn 61, page 285, audio 182); `-race
+  -count=3` on the 61 web tests (`Web|^TestOriginOK$`) finds no races; the
+  four changed tests pass 20 times, and 5 times under `-race`. Against the
+  base's `web.go`, the three changed tests other than the `run()` one
+  fail. N17, N18 and W1 (`allowedNames` given no listener address) each
+  fail the `run()` test, and H12 fails
+  `TestWebWarnsOfHostsEntriesItIgnores`. The docs checker finds no
+  problems in 33 links, and the docs tests pass. The whole root package,
+  run in a sandbox set up like a desktop session (a decoy sound server at
+  `/run/user/1000/pulse/native`, `PULSE_SERVER` unset, a fake adb, a
+  scratch HOME), made no connection to the decoy.
+- Note for part 30 (`scterm doctor`, not yet committed, so not in this
+  part's tree): its `doctorWebHosts` reads `SCTERM_WEB_HOSTS` with
+  `webHostName` alone. With this part, it would say it adds
+  `.example.lan` or `box..lan`, which the server now ignores, quote
+  entries with `%q`, and keep its own hint. It should take the names and
+  the ignored entries from `webHostNames` and print `webHostsAdvice`.
+- Corrections to part 28's entry: it says the addresses `--window` opens
+  are served, though its test covered only `127.0.0.1`, `localhost` and
+  `::1` (a `--web-addr` name is covered from this part on); and it says
+  that replaying gave the worktree's docs exactly, though a comparison of
+  changed lines showed it.
+- Left alone: the files and the error responses carry no frame headers
+  (above), so a later HTML route would have to add them; `flags.go`'s
+  help line, which says nothing of how an entry is written; the
+  Host-header reader `webHostName`, so `a..b.localhost` and `.localhost`
+  as a Host are still served by the `.localhost` rule, and
+  `.foo.localhost` in `SCTERM_WEB_HOSTS` is told that no request can
+  match it, though that rule serves such a Host anyway; the `xn--` hint
+  comes for any character outside ASCII, an invisible one included (the
+  `%+q` escape shows which); part 28's own left-alone items.
+
 ## Update (2026-10-21: QoL overhaul, part 32: follow-ups to part 19's reviews)
 
 - Keyboard focus on a control of the chrome now holds the HUD and the bar

@@ -184,23 +184,25 @@ func TestWebServesThisComputersNamesOnlyOnTheNetwork(t *testing.T) {
 
 // TestWebHostsEntriesMustBeNames: an entry of SCTERM_WEB_HOSTS is a name, or a
 // name and a port, with spaces around it allowed and empty entries skipped.
-// Anything else, which no request could match, is handed back to be reported,
-// in order, and its parts are not served.
+// Anything else, and a name that starts with a dot or has two dots in a row,
+// which no request could match either, is handed back to be reported, in
+// order, and is not served, nor are its parts. One final dot is allowed.
 func TestWebHostsEntriesMustBeNames(t *testing.T) {
-	names, unreadable := webHostNames(net.ParseIP("127.0.0.1"), "", "",
+	names, ignored := webHostNames(net.ParseIP("127.0.0.1"), "", "",
 		" Mirror.lan ,, http://phone.lan,phone.lan/,phone.lan:8443/,*.lan,a.lan b.lan,a.lan;b.lan,user@phone.lan,"+
-			":8443,::1,[::1,proxy.example.org:8443 ,my_box.lan,")
+			":8443,::1,[::1,proxy.example.org:8443 ,my_box.lan,.example.lan,box..lan,box.lan..,..,b\u00fccher.lan,box.lan.,")
 	want := []string{"http://phone.lan", "phone.lan/", "phone.lan:8443/", "*.lan", "a.lan b.lan", "a.lan;b.lan",
-		"user@phone.lan", ":8443", "::1", "[::1"}
-	if !slices.Equal(unreadable, want) {
-		t.Errorf("unreadable entries %q, want %q", unreadable, want)
+		"user@phone.lan", ":8443", "::1", "[::1", ".example.lan", "box..lan", "box.lan..", "..", "b\u00fccher.lan"}
+	if !slices.Equal(ignored, want) {
+		t.Errorf("ignored entries %q, want %q", ignored, want)
 	}
-	for _, host := range []string{"mirror.lan", "proxy.example.org", "my_box.lan:6969"} {
+	for _, host := range []string{"mirror.lan", "proxy.example.org", "my_box.lan:6969", "box.lan"} {
 		if !webHostAllowed(host, names) {
 			t.Errorf("%q refused, want allowed", host)
 		}
 	}
-	for _, host := range []string{"phone.lan", "a.lan", "b.lan", "lan", "user"} {
+	for _, host := range []string{"phone.lan", "a.lan", "b.lan", "lan", "user", ".example.lan", "example.lan",
+		"box..lan", "box.lan..", "..", "xn--bcher-kva.lan"} {
 		if webHostAllowed(host, names) {
 			t.Errorf("%q allowed, want refused", host)
 		}

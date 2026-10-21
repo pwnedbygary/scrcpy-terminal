@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -182,6 +183,68 @@ func TestWebServesTheAddressItPrints(t *testing.T) {
 	}
 }
 
+// addrListener is a listener that reports addr as its address, whatever
+// address it listens on.
+type addrListener struct {
+	net.Listener
+	addr net.Addr
+}
+
+func (l addrListener) Addr() net.Addr { return l.addr }
+
+// TestWebServesTheNamesItStartsWith: when --web-addr is a name, the server
+// serves the address it prints, and that name on any port; and when it listens
+// on an address on the network, it serves this computer's host name, with and
+// without .local. Names around them stay refused. Here it listens on 127.0.0.1
+// whatever address it asks for, and is told that it listens on 192.0.2.10, an
+// address on the network, so no name is looked up: the test needs no DNS and
+// no /etc/hosts. SCTERM_WEB_HOSTS is emptied, so that a developer's own list
+// cannot add names.
+func TestWebServesTheNamesItStartsWith(t *testing.T) {
+	t.Setenv(webHostsEnv, "")
+	listen, hostname := webListen, osHostname
+	t.Cleanup(func() { webListen, osHostname = listen, hostname })
+	var asked string
+	webListen = func(network, address string) (net.Listener, error) {
+		asked = address
+		ln, err := listen(network, "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		return addrListener{ln, &net.TCPAddr{IP: net.IPv4(192, 0, 2, 10), Port: ln.Addr().(*net.TCPAddr).Port}}, nil
+	}
+	osHostname = func() (string, error) { return "Scterm-Box", nil }
+	startNotices(t)
+	cfg := config{web: true, webAddr: "Mirror.Scterm.test"}
+	srv := newWebServer(cfg, &session{deviceName: "testphone"}, &streamState{cfg: cfg}, nil, nil, nil)
+	go func() { _ = srv.run(false) }()
+	select {
+	case <-srv.ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("web server never started listening")
+	}
+	t.Cleanup(srv.stop)
+	port := strconv.Itoa(srv.port)
+	if asked != "Mirror.Scterm.test:0" {
+		t.Errorf("the server asked to listen on %q, want Mirror.Scterm.test:0", asked)
+	}
+	printed, err := url.Parse(srv.url)
+	if err != nil || printed.Host != "Mirror.Scterm.test:"+port {
+		t.Fatalf("the server prints %q (%v), want the address http://Mirror.Scterm.test:%s/", srv.url, err, port)
+	}
+	addr := net.JoinHostPort("127.0.0.1", port)
+	for _, host := range []string{printed.Host, "mirror.scterm.test", "scterm-box:" + port, "Scterm-Box.local:" + port} {
+		resp, body := askAs(t, addr, "/", host, "", false)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(body, `<canvas id="screen"`) {
+			t.Errorf("GET / as %q: status %d, want the page", host, resp.StatusCode)
+		}
+	}
+	for _, host := range []string{"www.mirror.scterm.test:" + port, "scterm.test:" + port, "other-box.local:" + port} {
+		resp, body := askAs(t, addr, "/", host, "", false)
+		checkRefused(t, "GET / as "+host, resp, body)
+	}
+}
+
 // TestWebRefusalSuggestsTheAddressReached: the address a refusal suggests is
 // the one the request reached, so one the server listens on: here 127.0.0.2,
 // not 127.0.0.1.
@@ -268,33 +331,56 @@ func TestWebLoopbackRefusesThisComputersName(t *testing.T) {
 	}
 }
 
-// TestWebWarnsOfHostsEntriesThatAreNotNames: an entry of SCTERM_WEB_HOSTS that
-// is not a name, or a name and a port, is reported as ignored when the server
-// starts, once, with the reason; the entries that are names are served.
-func TestWebWarnsOfHostsEntriesThatAreNotNames(t *testing.T) {
-	t.Setenv("SCTERM_WEB_HOSTS", "http://phone.lan, mirror.example.lan,*.example.lan")
+// TestWebWarnsOfHostsEntriesItIgnores: each entry of SCTERM_WEB_HOSTS that no
+// request can match is reported once, when the server starts, as ignored, with
+// what to write instead: an entry that is not a name, or a name and a port (a
+// URL, a pattern, a path, or an international name, which goes in its xn--
+// form), and a name that starts with a dot or has two dots in a row (an entry
+// that would not be a name even without its extra dots gets the first advice).
+// The entry is quoted in ASCII, so a letter that only looks like an ASCII one
+// shows as an escape. The entries that are names are served, and the ignored
+// ones are not.
+func TestWebWarnsOfHostsEntriesItIgnores(t *testing.T) {
+	t.Setenv("SCTERM_WEB_HOSTS", "http://phone.lan, mirror.example.lan,*.example.lan,mirror.example.lan/scterm,"+
+		".example.lan,box..example.lan,box.example.lan..:8443,*..example.lan,b\u00fccher.lan,\u212aitchen.lan")
 	startNotices(t)
 	h := newWebTestHarness(t, config{web: true}, false)
-	if resp, _ := askAs(t, h.url(), "/", "mirror.example.lan", "", false); resp.StatusCode != http.StatusOK {
-		t.Errorf("GET / as mirror.example.lan: status %d, want 200", resp.StatusCode)
+	const notAName = "an entry must be a name, or a name and a port, such as mirror.lan or mirror.lan:8443"
+	const noMatch = "no request can match a name that starts with a dot or has two dots in a row; " +
+		"list each name in full, such as mirror.example.lan"
+	const international = notAName + "; write an international name in its xn-- form"
+	reported := map[string]string{
+		`"http://phone.lan"`:          notAName,
+		`"*.example.lan"`:             notAName,
+		`"mirror.example.lan/scterm"`: notAName,
+		`".example.lan"`:              noMatch,
+		`"box..example.lan"`:          noMatch,
+		`"box.example.lan..:8443"`:    noMatch,
+		`"*..example.lan"`:            notAName,
+		`"b\u00fccher.lan"`:           international,
+		`"\u212aitchen.lan"`:          international,
 	}
-	for _, host := range []string{"phone.lan", "www.example.lan"} {
-		resp, body := askAs(t, h.url(), "/", host, "", false)
-		checkRefused(t, "GET / as "+host, resp, body)
-	}
-	for _, entry := range []string{`"http://phone.lan"`, `"*.example.lan"`} {
-		lines, times := reportsOf(entry)
-		if len(lines) != 1 || times != 1 {
-			t.Errorf("SCTERM_WEB_HOSTS entry %s was reported %d times in %q, want once", entry, times, lines)
-			continue
-		}
-		for _, says := range []string{"SCTERM_WEB_HOSTS", "ignored", "not a name"} {
-			if !strings.Contains(lines[0], says) {
-				t.Errorf("the report of %s does not say %q: %q", entry, says, lines[0])
+	checkReported := func(when string) {
+		t.Helper()
+		for entry, why := range reported {
+			want := "scterm: web: ignored " + entry + " in SCTERM_WEB_HOSTS: " + why
+			if lines, times := reportsOf("ignored " + entry + " "); len(lines) != 1 || times != 1 || lines[0] != want {
+				t.Errorf("%s: SCTERM_WEB_HOSTS entry %s was reported %d times in %q, want once, as %q",
+					when, entry, times, lines, want)
 			}
 		}
 	}
-	if lines, _ := reportsOf(`"mirror.example.lan"`); len(lines) != 0 {
+	checkReported("at start")
+	if resp, _ := askAs(t, h.url(), "/", "mirror.example.lan", "", false); resp.StatusCode != http.StatusOK {
+		t.Errorf("GET / as mirror.example.lan: status %d, want 200", resp.StatusCode)
+	}
+	for _, host := range []string{"phone.lan", "www.example.lan", "example.lan", ".example.lan", "box..example.lan",
+		"box.example.lan..", "kitchen.lan", "xn--bcher-kva.lan"} {
+		resp, body := askAs(t, h.url(), "/", host, "", false)
+		checkRefused(t, "GET / as "+host, resp, body)
+	}
+	checkReported("after requests")
+	if lines, _ := reportsOf(`ignored "mirror.example.lan"`); len(lines) != 0 {
 		t.Errorf("a SCTERM_WEB_HOSTS entry that is a name was reported: %q", lines)
 	}
 }

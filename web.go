@@ -32,10 +32,12 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 // ---------------------------------------------------------------------------
@@ -507,6 +509,10 @@ func newWebServer(cfg config, sess *session, stream *streamState, audio *audioSi
 	return s
 }
 
+// webListen opens the server's listener: net.Listen, or in tests one on
+// loopback whatever address it is asked for.
+var webListen = net.Listen
+
 // run starts the HTTP server, prints the URL, optionally opens a browser
 // window, and blocks until the server is shut down.
 func (s *webServer) run(openWindow bool) error {
@@ -514,15 +520,14 @@ func (s *webServer) run(openWindow bool) error {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	ln, err := net.Listen("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", s.port)))
+	ln, err := webListen("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", s.port)))
 	if err != nil {
 		return fmt.Errorf("web: listen on %s:%d: %w", host, s.port, err)
 	}
 	s.ln = ln
-	// Record the real port (0 = pick any free port) and address.
-	var ip net.IP
+	// Record the real port (0 = pick any free port).
 	if ta, ok := ln.Addr().(*net.TCPAddr); ok {
-		s.port, ip = ta.Port, ta.IP
+		s.port = ta.Port
 	}
 
 	mux := http.NewServeMux()
@@ -533,15 +538,8 @@ func (s *webServer) run(openWindow bool) error {
 	mux.HandleFunc("/pcm-worklet.js", s.handleWorklet)
 	mux.HandleFunc("/ws", s.handleWS)
 
-	hostname, _ := os.Hostname()
-	names, unreadable := webHostNames(ip, hostname, host, os.Getenv(webHostsEnv))
-	for _, e := range unreadable {
-		noticef("scterm: web: ignored %q in %s: it is not a name, or a name and a port (such as mirror.lan or mirror.lan:8443)\n",
-			e, webHostsEnv)
-	}
-
 	s.http = &http.Server{
-		Handler:           s.hostCheck(mux, names),
+		Handler:           s.hostCheck(mux, s.allowedNames(ln)),
 		ReadHeaderTimeout: 5 * time.Second,
 		// No WriteTimeout: /ws hijacks the connection and owns it afterwards.
 	}
@@ -805,10 +803,14 @@ func (s *webServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	webNoCache(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Inline script/style only; connect-src for the WebSocket. img-src blob:
-	// is used by the screenshot key.
+	// is used by the screenshot key. frame-ancestors, and X-Frame-Options for
+	// browsers without it, keep any website from framing the page and steering
+	// clicks and keys into it: as 127.0.0.1 the page passes hostCheck.
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
-			"connect-src 'self' ws: wss:; img-src 'self' blob: data:; media-src 'none'; worker-src 'self' blob:")
+			"connect-src 'self' ws: wss:; img-src 'self' blob: data:; media-src 'none'; worker-src 'self' blob:; "+
+			"frame-ancestors 'none'")
+	w.Header().Set("X-Frame-Options", "DENY")
 	_, _ = w.Write([]byte(webIndexHTML))
 }
 
@@ -845,6 +847,41 @@ const webHostsEnv = "SCTERM_WEB_HOSTS"
 // make requests addressed to any number of names.
 const webRefusedMax = 16
 
+// osHostname is this computer's host name: os.Hostname, or in tests a fixed
+// one.
+var osHostname = os.Hostname
+
+// allowedNames returns the names, besides IP addresses and localhost, that a
+// request may address the server by when it listens on ln (webHostNames). It
+// reports each entry of SCTERM_WEB_HOSTS that it ignores, quoted in ASCII, so
+// a letter that only looks like an ASCII one shows as an escape.
+func (s *webServer) allowedNames(ln net.Listener) map[string]bool {
+	var ip net.IP
+	if ta, ok := ln.Addr().(*net.TCPAddr); ok {
+		ip = ta.IP
+	}
+	hostname, _ := osHostname()
+	names, ignored := webHostNames(ip, hostname, s.addr, os.Getenv(webHostsEnv))
+	for _, e := range ignored {
+		noticef("scterm: web: ignored %+q in %s: %s\n", e, webHostsEnv, webHostsAdvice(e))
+	}
+	return names
+}
+
+// webHostsAdvice says what is wrong with entry, an entry of SCTERM_WEB_HOSTS
+// that webHostNames ignores, and how to write it.
+func webHostsAdvice(entry string) string {
+	if _, ok := webHostName(entry); ok {
+		return "no request can match a name that starts with a dot or has two dots in a row; " +
+			"list each name in full, such as mirror.example.lan"
+	}
+	advice := "an entry must be a name, or a name and a port, such as mirror.lan or mirror.lan:8443"
+	if strings.ContainsFunc(entry, func(r rune) bool { return r > unicode.MaxASCII }) {
+		advice += "; write an international name in its xn-- form"
+	}
+	return advice
+}
+
 // webHostNames are the names, besides IP addresses and localhost, that a
 // request to the server may be addressed to when it listens on ip: addr, the
 // address it was asked to listen on, in case it is a name, since scterm prints
@@ -856,15 +893,15 @@ const webRefusedMax = 16
 // or localhost, so the hostname would only serve someone on the network who
 // answers for it with 127.0.0.1. 0.0.0.0 and :: are not loopback addresses:
 // they put the server on the network. It also returns the entries of hosts
-// that are not a name, or a name and a port, which no request can match.
-func webHostNames(ip net.IP, hostname, addr, hosts string) (names map[string]bool, unreadable []string) {
+// that no request can match, which it leaves out: those that are not a name,
+// or a name and a port, and the names with an empty label, which start with a
+// dot or have two dots in a row.
+func webHostNames(ip net.IP, hostname, addr, hosts string) (names map[string]bool, ignored []string) {
 	names = map[string]bool{}
-	add := func(s string) bool {
-		name, ok := webHostName(s)
-		if ok {
+	add := func(s string) {
+		if name, ok := webHostName(s); ok {
 			names[name] = true
 		}
-		return ok
 	}
 	if h, ok := webHostName(hostname); ok && ip != nil && !ip.IsLoopback() {
 		h = strings.TrimSuffix(h, ".local")
@@ -876,11 +913,17 @@ func webHostNames(ip net.IP, hostname, addr, hosts string) (names map[string]boo
 	}
 	add(addr)
 	for _, s := range strings.Split(hosts, ",") {
-		if s = strings.TrimSpace(s); s != "" && !add(s) {
-			unreadable = append(unreadable, s)
+		s = strings.TrimSpace(s)
+		name, ok := webHostName(s)
+		switch {
+		case s == "":
+		case ok && !slices.Contains(strings.Split(name, "."), ""):
+			names[name] = true
+		default:
+			ignored = append(ignored, s)
 		}
 	}
-	return names, unreadable
+	return names, ignored
 }
 
 // webHostName reads a Host header: a name (ASCII letters, digits, '-', '.' and

@@ -145,9 +145,18 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   none of the page, which stops DNS rebinding. Before that, Go's HTTP server answers 400 to a
   request with two Host headers, or with one that has a byte no Host header may have, and to an
   HTTP/1.1 request with none; none of the page is served either way. At start, scterm reports
-  each entry of `SCTERM_WEB_HOSTS` that is not a name, or a name and a port, and ignores it. The
-  server also refuses WebSocket connections whose Origin header names a different host. It has
-  no other access control: no password and no encryption.
+  and ignores each entry of `SCTERM_WEB_HOSTS` that no request can match (`allowedNames`). An
+  entry must be a name, or a name and a port, such as `mirror.lan` or `mirror.lan:8443`, and an
+  international name must be in its `xn--` form. No request can match a name that starts with a
+  dot, as in Django's `.example.lan`, or has two dots in a row. The report quotes the entry in
+  ASCII, so a letter that only looks like an ASCII one, such as the Kelvin sign, shows as an
+  escape. The server also refuses WebSocket connections whose Origin header names a different
+  host. It has no other access control: no password and no encryption.
+- The page cannot be shown in a frame: its Content-Security-Policy has `frame-ancestors 'none'`,
+  and it comes with `X-Frame-Options: DENY` for browsers that do not read that (`handleIndex`).
+  Opened as `127.0.0.1`, the page passes the Host check, so a website could otherwise frame it
+  and steer clicks and keys into it. The other files and the error responses need neither: in a
+  frame, a browser shows them as plain text, with nothing to click.
 - Messages from the server to the page: binary video frames (`0x01`, a 16-byte header, then a
   JPEG, or raw pixels for a client that asks for them), binary sound (`0x02`), the `hello`
   reply (`0x03`), JSON status messages, and a `bye` with the reason just before the server
