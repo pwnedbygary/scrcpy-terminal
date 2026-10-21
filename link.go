@@ -334,6 +334,35 @@ func (s *session) serverOutputNote() string {
 	return "; it said:\n  " + strings.Join(lines, "\n  ")
 }
 
+// audioOffWait bounds audioOffReason's wait for the server's reason.
+var audioOffWait = time.Second
+
+// audioOffReason is why the server turned the audio stream off: its last
+// warning or error about audio, without the "[server] WARN: " before it, or ""
+// when it gave none (a peer target gives none). The server prints it just
+// before, but its output comes through adb on another stream than the audio
+// socket, so this waits up to wait for it.
+func (s *session) audioOffReason(wait time.Duration) string {
+	if s.serverOut == nil {
+		return ""
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		lines := s.serverOut.lastLines(keptLines)
+		for i := len(lines) - 1; i >= 0; i-- {
+			for _, level := range []string{"[server] WARN: ", "[server] ERROR: "} {
+				if msg, ok := strings.CutPrefix(lines[i], level); ok && strings.Contains(strings.ToLower(msg), "audio") {
+					return msg
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return ""
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func socketName(i int) string {
 	switch i {
 	case 0:
@@ -416,8 +445,12 @@ func serverParams(video, audio, control bool, cfg config) []string {
 	if cfg.audioDup {
 		p = append(p, "audio_dup=true")
 	}
-	if cfg.audioSource != "" {
-		p = append(p, fmt.Sprintf("audio_source=%s", cfg.audioSource))
+	source := cfg.audioSource
+	if source == "" && cfg.audioDup {
+		source = "playback" // the only source that keeps playing on the device
+	}
+	if source != "" {
+		p = append(p, fmt.Sprintf("audio_source=%s", source))
 	}
 	if cfg.audioCodec != "" {
 		p = append(p, fmt.Sprintf("audio_codec=%s", cfg.audioCodec))

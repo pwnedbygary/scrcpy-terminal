@@ -1958,6 +1958,7 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 // NOTE: closing a tab must NOT end the session -- a second viewer, or a reload,
-// would lose the mirror. --window ends when the last client disconnects, and
-// closing the window disconnects.
+// would lose the mirror. --window ends 3 s after the last client disconnects
+// (webLeaveGrace in web.go), unless a page connects again first, as a reload
+// does; closing the window disconnects.
 

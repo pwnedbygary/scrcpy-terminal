@@ -303,13 +303,19 @@ func TestUpdateAsksOnATerminal(t *testing.T) {
 		withInteractive(t, true)
 		answering(t, tc.answer)
 		exe := installed(t, "1.2.3")
-		out, _, err := runUpdate(t, exe, updateOptions{})
+		out, errOut, err := runUpdate(t, exe, updateOptions{})
 		if err != nil {
 			t.Errorf("answer %q: %v", tc.answer, err)
 			continue
 		}
-		if !strings.Contains(out, "Update scterm 1.2.3 to 1.3.0? [Y/n] ") {
-			t.Errorf("answer %q: never asked: %q", tc.answer, out)
+		// The question goes to stderr, where it shows with stdout redirected
+		// (scterm update > log); the input ending ends its line there too.
+		question := "Update scterm 1.2.3 to 1.3.0? [Y/n] "
+		if tc.answer == "" {
+			question += "\n"
+		}
+		if errOut != question || strings.Contains(out, "[Y/n]") {
+			t.Errorf("answer %q: stderr %q, stdout %q; want the question on stderr only", tc.answer, errOut, out)
 		}
 		got, _ := os.ReadFile(exe)
 		if updated := string(got) == string(fakeBinary("1.3.0")); updated != tc.updates {
@@ -318,10 +324,7 @@ func TestUpdateAsksOnATerminal(t *testing.T) {
 		if tc.updates {
 			continue
 		}
-		want := "[Y/n] Kept scterm 1.2.3.\n" // a terminal echoes the answer and its Enter
-		if tc.answer == "" {
-			want = "[Y/n] \nKept scterm 1.2.3.\n"
-		}
+		want := "Release page: https://example.invalid/releases/tag/v1.3.0\nKept scterm 1.2.3.\n"
 		if !strings.HasSuffix(out, want) || downloads.Load() != 0 {
 			t.Errorf("answer %q: %d downloads, printed %q", tc.answer, downloads.Load(), out)
 		}
@@ -502,12 +505,15 @@ func TestUpdateSaysWhenThereIsNoDigest(t *testing.T) {
 		withInteractive(t, true)
 		answering(t, "\n")
 		exe := installed(t, "1.2.3")
-		out, _, err := runUpdate(t, exe, updateOptions{})
+		out, errOut, err := runUpdate(t, exe, updateOptions{})
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if !strings.Contains(out, tc.notice+question) || (tc.notice == "" && strings.Contains(out, "GitHub published no")) {
-			t.Errorf("%s: printed %q, want %q just before the question", name, out, tc.notice)
+		// The notice is the last line on stdout before the question, which
+		// goes to stderr, and the answer, which starts the download.
+		if !strings.Contains(out, tc.notice+"Downloading scterm 1.3.0…\n") || errOut != question ||
+			(tc.notice == "" && strings.Contains(out, "GitHub published no")) {
+			t.Errorf("%s: printed %q, and %q on stderr; want %q just before the question", name, out, errOut, tc.notice)
 		}
 		if got, _ := os.ReadFile(exe); string(got) != string(fakeBinary("1.3.0")) {
 			t.Errorf("%s: not updated", name)
@@ -555,11 +561,14 @@ func TestUpdateShowsTheStartOfTheNotes(t *testing.T) {
 	updating(t, srv, "1.2.3")
 	withInteractive(t, true)
 	answering(t, "n\n")
-	out, _, err := runUpdate(t, installed(t, "1.2.3"), updateOptions{})
+	out, errOut, err := runUpdate(t, installed(t, "1.2.3"), updateOptions{})
 	want := "Release page: https://example.invalid/releases/tag/v1.3.0\n\n" + shown.String() +
-		"  … (the rest is on the release page)\n\nUpdate scterm 1.2.3 to 1.3.0? [Y/n] "
+		"  … (the rest is on the release page)\n\nKept scterm 1.2.3.\n"
 	if err != nil || !strings.Contains(out, want) || strings.Contains(out, "Line 16") || strings.Contains(out, "\r") {
 		t.Errorf("printed %q, %v; want it to hold %q", out, err, want)
+	}
+	if errOut != "Update scterm 1.2.3 to 1.3.0? [Y/n] " {
+		t.Errorf("asked %q on stderr", errOut)
 	}
 }
 

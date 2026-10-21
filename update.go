@@ -272,7 +272,7 @@ func trimBlank(lines []string) []string {
 func confirmed(question string) bool {
 	answer, err := ask(question)
 	if err != nil {
-		fmt.Println() // end the prompt's line, which no answer did
+		fmt.Fprintln(os.Stderr) // end the prompt's line, which no answer did
 		return false
 	}
 	switch strings.ToLower(answer) {

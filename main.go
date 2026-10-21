@@ -88,7 +88,8 @@ func main() {
 		usageError(err.Error())
 	}
 
-	// Show the version in the status line (useful for bug reports).
+	// A session prints its version first, on stderr, as scterm version prints
+	// it (useful for bug reports).
 	logOnce(fmt.Sprintf("scterm %s\n", version))
 
 	var sess *session

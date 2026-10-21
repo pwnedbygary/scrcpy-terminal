@@ -130,7 +130,7 @@ func (a *app) keyboardInput(b []byte) bool {
 			a.closeKeyboard()
 			return true
 		case 0x11: // Ctrl-Q
-			return false // let the global handler quit
+			return false // not the keyboard's: it goes to the device, as with the keyboard closed
 		}
 	}
 	switch string(b) {

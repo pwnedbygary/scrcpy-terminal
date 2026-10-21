@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -81,6 +82,10 @@ type app struct {
 	// ("stream ended: use of closed network connection") are not reported as
 	// failures on the way out.
 	quitting atomic.Bool
+
+	// audioOff is set once the device has turned the audio stream off (see
+	// playAudio): the status row then shows no volume.
+	audioOff atomic.Bool
 
 	// restoreTerm gives the terminal back (normal screen, no mouse reporting,
 	// cooked mode) once, whichever of the run loop's exit and a panic on
@@ -305,7 +310,7 @@ func (a *app) watchStreams() <-chan error {
 		}
 	})
 	a.goTUI(func() {
-		err := a.stream.runAudio(a.audio)
+		err := a.playAudio()
 		switch {
 		case err == nil:
 		case a.sess.video == nil:
@@ -318,6 +323,27 @@ func (a *app) watchStreams() <-chan error {
 		}
 	})
 	return lost
+}
+
+// playAudio runs the audio demuxer and returns how the audio stream ended.
+// When the device turns the stream off, the session goes on without sound, as
+// in scrcpy: playAudio says so, with the server's reason, and returns nil.
+func (a *app) playAudio() error {
+	err := a.stream.runAudio(a.audio)
+	if !errors.Is(err, errAudioOff) {
+		return err
+	}
+	a.audioOff.Store(true)
+	line := "scterm: no sound from " + a.deviceName()
+	if reason := a.sess.audioOffReason(audioOffWait); reason != "" {
+		line += ": " + reason
+	}
+	if a.cfg.audioDup && a.cfg.audioSource == "" && !a.cfg.usePeer {
+		// serverParams asked for the playback source.
+		line += " (--audio-dup implies --audio-source playback, which needs Android 13 or later)"
+	}
+	notice(line + "\n")
+	return nil
 }
 
 // lostStream is the error the terminal UI ends with when the stream it shows
@@ -406,9 +432,6 @@ func hostAudioSilent(cfg config) bool {
 // browser is the display, so this loop only owns the stream goroutines, the
 // shutdown signal path and the shutdown sequence.
 func (a *app) runWeb() error {
-	if a.cfg.audio && a.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
-	}
 	if a.web == nil {
 		return fmt.Errorf("web display not configured")
 	}
@@ -428,6 +451,12 @@ func (a *app) runWeb() error {
 	if a.audio != nil {
 		a.audio.silent.Store(hostAudioSilent(a.cfg))
 		switch {
+		case !a.cfg.audio:
+			// No sound, so nowhere for it to play.
+		case a.audio.err != nil:
+			// The PCM tap does not go through the sink: the browser still plays.
+			fmt.Fprintf(stderrWriter(),
+				"scterm: audio: browser only; no sound on this computer: %v\n", a.audio.errString())
 		case a.audio.silent.Load():
 			// "muted" here is the POLICY, not a reading of the host mixer: the
 			// browser is the audio output, so the host sink is deliberately
@@ -461,7 +490,7 @@ func (a *app) runWeb() error {
 		}
 	}()
 	go func() {
-		if err := a.stream.runAudio(a.audio); err != nil && !a.quitting.Load() && !isClosedConnErr(err) {
+		if err := a.playAudio(); err != nil && !a.quitting.Load() && !isClosedConnErr(err) {
 			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
 		}
 	}()
@@ -553,7 +582,7 @@ func (a *app) runHeadless() error {
 		}
 	}()
 	go func() {
-		if err := a.stream.runAudio(a.audio); err != nil {
+		if err := a.playAudio(); err != nil {
 			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
 		}
 	}()
@@ -864,7 +893,7 @@ func (a *app) statusParts() []statusPart {
 	var vol string
 	if a.cfg.audio {
 		vol = "audio off"
-		if a.audio.err == nil {
+		if a.audio.err == nil && !a.audioOff.Load() {
 			vol = "vol " + strconv.Itoa(a.audio.gainPercent()) + "%"
 		}
 	}

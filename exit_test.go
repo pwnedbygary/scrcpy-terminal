@@ -17,9 +17,9 @@ import (
 
 // ---------------------------------------------------------------------------
 // scterm exits as scrcpy does: 0 for a normal end, 1 when it could not start
-// (a mistake in the command line included) or a command failed, and 2 when
-// the device was lost during the session, in the terminal UI, with --web or
-// --window, and with --no-tui.
+// (a mistake in the command line included), a command failed, or the session
+// failed for another reason, and 2 when the device was lost during the
+// session, in the terminal UI, with --web or --window, and with --no-tui.
 // ---------------------------------------------------------------------------
 
 // sessionPacket starts a video stream: the top bit set, then 1080 by 2400.
@@ -262,6 +262,8 @@ func TestCommandLineExitStatus(t *testing.T) {
 		{[]string{"--video=false", "--audio=false", "--control=false"}, "", 1, "",
 			"scterm: --video, --audio and --control are all off, so there is nothing to show or control\n"},
 		{[]string{"--no-tui", "--web"}, "", 1, "", "scterm: --web/--window and --no-tui are mutually exclusive\n"},
+		{[]string{"--audio-dup", "--audio-source", "mic"}, "", 1, "",
+			"scterm: --audio-dup needs --audio-source playback, not mic: only playback capture keeps the sound playing on the device\n"},
 		{[]string{"version", "x"}, "", 1, "", "scterm: usage: scterm version (it takes no arguments)\n"},
 		{[]string{"update", "--bogus"}, "", 1, "", "scterm: usage: scterm update [--check] [-y|--yes] (\"--bogus\" is not one of these)\n"},
 		{[]string{"peers", "--bogus"}, "", 1, "", "scterm: usage: scterm peers [--check]\n"},

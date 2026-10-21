@@ -2,7 +2,7 @@ package main
 
 import (
 	"bufio"
-	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -277,6 +277,12 @@ type lostError struct{ error }
 
 func (e lostError) Unwrap() error { return e.error }
 
+// errAudioOff is how runAudio ends when the device turns the audio stream off
+// (codec id 0), which the server does when it cannot record the sound, as with
+// playback capture before Android 13. The session goes on without sound, as in
+// scrcpy.
+var errAudioOff = errors.New("the device turned the audio stream off")
+
 // runVideo demuxes the video socket: headers -> packets -> decoder.
 func (s *streamState) runVideo() error {
 	if s.sess.video == nil {
@@ -435,7 +441,7 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 		return fmt.Errorf("audio codec id: %w", err)
 	}
 	if codecID == 0 {
-		return nil // disabled
+		return errAudioOff
 	}
 	if codecID == 1 {
 		return fmt.Errorf("audio config error")
@@ -460,6 +466,10 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 			payload := make([]byte, size)
 			if _, err := io.ReadFull(r, payload); err != nil {
 				return lostError{fmt.Errorf("audio raw packet: %w", err)}
+			}
+			if s.cfg.audioDump != "" {
+				// before writePCM16, which scales the samples in place
+				dumpAudioPacket(s.cfg.audioDump, payload)
 			}
 			s.audioBytes += int64(len(payload))
 			s.noteAudioPeak(maxAbsInt16(payload))
@@ -501,14 +511,7 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 		s.packets++
 		s.lastAudioPts.Store(ptsUs)
 		if s.cfg.audioDump != "" {
-			// raw wire capture: 4-byte size + payload, for offline analysis
-			f := audioDumpFile(s.cfg.audioDump)
-			if f != nil {
-				var sz [4]byte
-				binary.BigEndian.PutUint32(sz[:], uint32(len(payload)))
-				f.Write(sz[:])
-				f.Write(payload)
-			}
+			dumpAudioPacket(s.cfg.audioDump, payload)
 		}
 		if err := adecSend(dec, payload, ptsUs); err != nil {
 			continue

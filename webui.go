@@ -10,9 +10,9 @@ package main
 //
 // At most one decode is in flight: a newer frame that arrives while the
 // previous one is still decoding replaces it, so the picture is never a queue
-// of stale frames behind the live one. Audio is raw PCM into an AudioWorklet
-// ring buffer -- ~20 ms of latency, no codec, no jitter buffer, and no
-// autoplay gesture needed in --window mode.
+// of stale frames behind the live one. Audio is raw PCM, played from a ring
+// buffer (pcm-worklet.js) that starts once it holds about 96 ms -- no codec,
+// and no autoplay gesture needed in --window mode.
 
 import (
 	"bytes"

@@ -7,6 +7,124 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 26: loose ends)
+
+- `--audio-dup` now does what scrcpy's does (v4.1, `cli.c`): without
+  `--audio-source` it asks for playback capture, so the sound keeps playing
+  on the device (Android 13 and later), and it is refused with another
+  source ("--audio-dup needs --audio-source playback, not mic: only playback
+  capture keeps the sound playing on the device") or with `--no-audio`,
+  exit 1 before any device work. Before, with the default `output` source it
+  did nothing on the device and said nothing. As in scrcpy, `--web
+  --audio-dup --audio-source output` is now refused. In peer mode the rule
+  does not apply: a peer device gets neither flag.
+- On Android 11 and 12 the server turns playback capture off, so
+  `--audio-dup` alone now gives no sound in the terminal display (it used
+  to play on this computer) or in the browser display (it used to play in
+  the browser and on this computer); the sound stays on the device. scterm
+  says why: when the device turns its audio stream off (codec id 0), it
+  prints `scterm: no sound from DEVICE`, then the server's last warning or
+  error line about audio when there is one, and "(--audio-dup implies
+  --audio-source playback, which needs Android 13 or later)" when
+  `--audio-dup` chose the source. The terminal display shows the line on
+  the status row and once in the exit replay, and its status row then says
+  `audio off`; `--web`, `--window` and `--no-tui` print it on stderr. The
+  session goes on without sound. scterm waits up to 1 s for the server's
+  line, which comes over adb's shell stream, not the audio socket. A peer
+  target also sends codec id 0 for a stream it turns off, so the same line
+  appears there, without a reason. The README says so; the help names only
+  the implied source and Android 13 or later.
+- Without PulseAudio, `--web` and `--window` say "scterm: audio: browser
+  only; no sound on this computer: REASON" and then only the address; they
+  used to print "audio disabled", a line about `--audio-dup` that was not
+  true, and "video only", though the browser still plays the sound. With
+  `--no-audio` they print no line about where the sound plays (it suggested
+  `--audio-dup`, which `--no-audio` now refuses outside peer mode).
+- `--dump-audio` with `--audio-codec raw` writes the packets as sent, before
+  the volume scaling; it wrote nothing. The encoded path writes the same
+  bytes as before, through the same helper.
+- `scterm peers` with no pairings also offers plain `scterm pair` on the
+  same network.
+- Questions go to stderr, with their numbered choices, the nearby pairing
+  code and the newline that ends an unanswered question, so a redirected
+  stdout no longer hides them (`scterm update`'s question, `forget`'s
+  confirmation, the `--peer` chooser, nearby pairing). Answers are still
+  read from the terminal; results and status lines stay on stdout.
+- Stale comments and notes: `main.go`, `appkeys.go` (Ctrl+Q with the
+  on-screen keyboard open goes to the device), `webui.go` (the sound buffer
+  starts at about 96 ms), `exit_test.go`, `web/player.js` (`--window` ends
+  3 s after the last page leaves) and `android/devicetest/ui.py`. The Alt+K
+  notice without control now says "Refresh video needs control, and this
+  session is view only" (it said "control disabled (no -control)"), and the
+  `--window` note no longer says there is no DISPLAY when there is one.
+- New pins for part 10's review gaps: the defaults `scterm -h` shows, the
+  one-letter-word skip in the quoting hint, and K and M bit rates.
+- This closes the part-21 entry's items on "video only", `--audio-dup`,
+  `--dump-audio` with raw, `scterm peers` without pairings and the stale
+  comments, the part-18 entry's `web/player.js` note, and part 24's question
+  printed on a redirected stdout.
+- Review round 1 found that on Android 11 and 12 `--audio-dup` now gave no
+  sound and no message; that the snapshot's base did not isolate this part;
+  test gaps (`--web` and `--window` without `--audio-dup`, the other
+  sources); the README's peer-mode sentence against the refusal, and the
+  routing line with `--no-audio`; and this entry's wording. Round 2 adds
+  the "no sound" line, the peer-mode exception and the tests, drops the
+  routing line with `--no-audio`, corrects the README and this entry, and
+  is reviewed alone, on top of part 25.
+- Verification. Round 1, in its builder's tree (HEAD then, with every part
+  in the worktree): gofmt, `go vet ./...`, the build, `go test ./...` (the
+  six node suites included), `-race` on the whole run and 5 times on the 30
+  touched or related tests; 12 behaviour tests failed on the base files
+  (through an overlay) and the three pins passed there, as pins should; 26
+  mutations were each caught. Round 2, in its builder's tree (`8641ad7`
+  with every part then in the worktree, round 1 included): the same checks
+  (`-race -count=3` on 30 tests: 90 of 90). New tests:
+  `TestNoSoundFromTheDeviceIsSaid`, `TestSoundThatStartedIsNotSaidToBeOff`,
+  `TestNoSoundFromTheDeviceSaysWhy`, `TestNoSoundWaitsForTheServersReason`
+  and `TestNoSoundFromTheDeviceIsPrinted` (new `audiooff_test.go`), and
+  `TestWebWithoutSoundSaysNothingOfWhereItPlays`;
+  `TestAudioDupNeedsThePlaybackSource` gains `--web`, `--window`, the ten
+  other sources and the peer cases. On round 1's code they fail as
+  expected, and the pins of unchanged behaviour pass. The builder's 20
+  mutations are caught, and so are the review's B, C, E and G, and two
+  forms of its A (A as written no longer applies); D (raw packets trimmed
+  to whole 4-byte frames, close to a no-op for the test's packets) and F
+  (the pairing code back on stdout, which no test reaches) survive. Binary
+  runs up to argument handling (fake adb, scratch HOME): exit statuses and
+  output as before, except the three `--peer` cases; `-h` and `version`
+  byte-identical. Round 2 was merged three ways onto the worktree (one
+  README conflict, where part 29 changed the line after round 2's, resolved
+  by keeping both). For review, this part was rebuilt alone on `e0919d4`
+  (with part 25) by replaying both rounds onto that commit's files (one
+  README conflict there too, resolved by keeping round 2's lines and that
+  commit's wording of the next bullet); with the other uncommitted parts
+  of the time replayed on top, that gave the worktree's
+  files exactly (for the README, a line count showed the difference was
+  exactly parts 27, 28 and 29's lines). On that snapshot, with iso.env:
+  gofmt, vet, the build,
+  `go test ./...` (327 top-level tests pass and 3 skip; the six node suites
+  ran), `-race -count=3` on the touched tests (141 passes over 47 tests, no
+  races), `-race` on the whole module, round 2's tests 20 times each, and
+  the docs checker on the README. Not run: a device (the implied playback
+  source on Android 13, and on 11 and 12), a peer target, a desktop without
+  PulseAudio, a browser or a window, a real terminal with stdout
+  redirected, the pairing-code lines (no test reaches them), or a raw dump
+  played back. The 1 s wait for the server's line is a judgement, not a
+  measurement.
+- Left alone: the X fallback note is wrong when DISPLAY is set but its
+  socket is missing, and that check hard-codes `/tmp/.X11-unix`; `scterm
+  pair` keeps its status lines on stdout; `closeAudioDump` is never called
+  and dump write errors are ignored; `android/devicetest/ui.py` defaults
+  ADB to the macOS SDK path; the browser page's sound chip has no state for
+  a device that sends no sound (the line goes to stderr); the peer target's
+  welcome carries its audio error (`audioError`), which the Go client does
+  not read, and a peer target that grants no audio says nothing while the
+  status row shows a volume (older than this part); an audio-only terminal
+  session goes on after the device turns its sound off; the reason is read
+  with `lastLines`, which can return a line still being written (not
+  tested; judged unlikely); no test has a raw packet whose size is not a
+  multiple of 4 (mutant D).
+
 ## Update (2026-10-21: QoL overhaul, part 25: browser viewers share frames safely)
 
 - With two or more browser viewers, every viewer that took a video frame put

@@ -8,6 +8,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,10 @@ func TestLeftoverWordsAreRefused(t *testing.T) {
 		// A flag word after a value is that flag, not more of the value.
 		{[]string{"--peer", "Pixel", "takeover"}, "did you mean --takeover?"},
 		{[]string{"--peer", "Pixel", "8", "takeover"}, "did you mean --takeover?"},
+		// But not a one-letter word, which is more likely part of the name
+		// than -s, -n, -b or -m.
+		{[]string{"--peer", "Pixel", "s"}, `quote a value with spaces, as --peer "Pixel s"`},
+		{[]string{"--peer", "My", "b", "Phone"}, `quote a value with spaces, as --peer "My b Phone"`},
 	} {
 		words := tc.args[len(tc.args)-1:]
 		if tc.args[0] == "--peer" {
@@ -145,6 +151,77 @@ func TestValidateConfigRefusesWhatCannotWork(t *testing.T) {
 	for name, c := range bad {
 		if err := validateConfig(c); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// TestAudioDupNeedsThePlaybackSource: the server keeps the sound playing on
+// the device only for the playback source (Server.java), so, as scrcpy's
+// cli.c does, --audio-dup picks that source when none is named, and is
+// refused with any other source the server knows or without audio. Without
+// --audio-dup the source is left to the server, or is the one named. A peer
+// device is sent neither, so peer mode refuses neither combination.
+func TestAudioDupNeedsThePlaybackSource(t *testing.T) {
+	sourceParams := func(p []string) (sources []string) {
+		for _, kv := range p {
+			if strings.HasPrefix(kv, "audio_source=") {
+				sources = append(sources, kv)
+			}
+		}
+		return sources
+	}
+	for args, want := range map[string]string{
+		"--audio-dup":                         "audio_source=playback",
+		"--audio-dup --audio-source playback": "audio_source=playback",
+		"--audio-dup --window":                "audio_source=playback",
+		"":                                    "",
+		"--web":                               "",
+		"--window":                            "",
+		"--audio-source mic":                  "audio_source=mic",
+		"--audio-source playback":             "audio_source=playback",
+	} {
+		cfg, err := parse(t, strings.Fields(args)...)
+		if err == nil {
+			err = validateConfig(cfg)
+		}
+		if err != nil {
+			t.Errorf("%q refused: %v", args, err)
+			continue
+		}
+		p := serverParams(cfg.video, cfg.audio, cfg.control, cfg)
+		if got := strings.Join(sourceParams(p), " "); got != want {
+			t.Errorf("%q: the server gets %q, want %q", args, got, want)
+		}
+		if dup := slices.Contains(p, "audio_dup=true"); dup != cfg.audioDup {
+			t.Errorf("%q: audio_dup=true sent = %v", args, dup)
+		}
+	}
+	refusals := map[string]string{
+		"--audio-dup --audio-source mic --web": "--audio-source playback, not mic",
+		"--audio-dup --no-audio":               "--no-audio",
+		"--audio-dup --audio=false --web":      "--no-audio",
+	}
+	// The bundled server's sources (AudioSource.java), but playback.
+	for _, source := range []string{"output", "mic", "mic-unprocessed", "mic-camcorder", "mic-voice-recognition",
+		"mic-voice-communication", "voice-call", "voice-call-uplink", "voice-call-downlink", "voice-performance"} {
+		refusals["--audio-dup --audio-source "+source] = "--audio-source playback, not " + source
+	}
+	for args, want := range refusals {
+		cfg, err := parse(t, strings.Fields(args)...)
+		if err == nil {
+			err = validateConfig(cfg)
+		}
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v, want a refusal naming %s", args, err, want)
+		}
+	}
+	for _, args := range []string{"--peer pixel --audio-dup --audio-source mic", "--peer= --audio-dup --no-audio"} {
+		cfg, err := parse(t, strings.Fields(args)...)
+		if err == nil {
+			err = validateConfig(cfg)
+		}
+		if err != nil {
+			t.Errorf("%q refused: %v", args, err)
 		}
 	}
 }
@@ -353,6 +430,39 @@ func TestHelpIsGrouped(t *testing.T) {
 	}
 }
 
+// TestHelpShowsTheDefaults: a flag's entry in scterm -h gives its default, as
+// "(default X)", once, when that is not zero, false or empty: the defaults the
+// README lists, bit rates with scrcpy's K and M. Every other flag shows none,
+// the --no- flags included, whose default reads false.
+func TestHelpShowsTheDefaults(t *testing.T) {
+	_, _, entries := readHelp(t)
+	want := map[string]string{"max-size": "1280", "video-bit-rate": "8M", "audio-bit-rate": "128K",
+		"web-port": "6969", "web-addr": "127.0.0.1", "web-quality": "5", "repaint-interval": "300"}
+	shown := regexp.MustCompile(`\(default ([^)]*)\)`)
+	listed := map[string]bool{}
+	for _, e := range entries {
+		if !strings.HasPrefix(strings.TrimSpace(e.lines[0]), "-") {
+			continue
+		}
+		names, _ := flagNames(e)
+		name := names[len(names)-1] // the long name, as max-size for "-m, --max-size"
+		listed[name] = true
+		text := strings.Join(strings.Fields(strings.Join(e.lines, " ")), " ")
+		var got []string
+		for _, m := range shown.FindAllStringSubmatch(text, -1) {
+			got = append(got, m[1])
+		}
+		if strings.Join(got, ", ") != want[name] {
+			t.Errorf("--%s shows the defaults %q, want %q: %q", name, got, want[name], text)
+		}
+	}
+	for name := range want {
+		if !listed[name] {
+			t.Errorf("--%s has no entry in the help", name)
+		}
+	}
+}
+
 // TestHelpIsAskedForThreeWays: -h, --help and the help command ask for the
 // help, which parseFlags prints on stdout before exiting 0; nothing is
 // printed on the way.
@@ -446,6 +556,23 @@ func TestBitRatesTakeKAndM(t *testing.T) {
 	}
 }
 
+// TestBitRateIsShownWithKOrM: a bit rate is shown as scrcpy writes one, with M
+// for whole millions and K for whole thousands (so scterm -h shows 8M and
+// 128K), and what is shown reads back as the same rate.
+func TestBitRateIsShownWithKOrM(t *testing.T) {
+	for n, want := range map[int]string{8000000: "8M", 1000000: "1M", 2000000000: "2000M", 128000: "128K",
+		1000: "1K", 1500000: "1500K", 2250: "2250", 999: "999", 0: "0", 2147483647: "2147483647"} {
+		b := bitRate(n)
+		if got := b.String(); got != want {
+			t.Errorf("%d is shown as %q, want %q", n, got, want)
+		}
+		var back bitRate
+		if err := back.Set(want); err != nil || back != b {
+			t.Errorf("%q reads back as %d, %v; want %d", want, back, err, n)
+		}
+	}
+}
+
 // TestMirrorFPSOnlyWarns: --mirror-fps never did anything. Old command lines
 // still run, with one line saying so.
 func TestMirrorFPSOnlyWarns(t *testing.T) {
@@ -513,23 +640,49 @@ func TestForgetConfirmsAPartialName(t *testing.T) {
 	old := terminalInput
 	t.Cleanup(func() { terminalInput = old })
 
-	terminalInput = bufioReader("n\n")
-	captureStdout(t, func() {
-		if err := forgetCommand([]string{"pix"}); err != nil {
-			t.Fatal(err)
+	// The question goes to stderr, where it shows when stdout is redirected,
+	// and what was done to stdout.
+	const question = "Forget Pixel 8? [y/N] "
+	for _, tc := range []struct{ answer, said string }{
+		{"n\n", "Kept Pixel 8.\n"},
+		{"y\n", "Forgot Pixel 8. Its own list still names this computer until it is removed there.\n"},
+	} {
+		terminalInput = bufioReader(tc.answer)
+		var err error
+		var stderr string
+		stdout := captureStdout(t, func() {
+			stderr = captureStderr(t, func() { err = forgetCommand([]string{"pix"}) })
+		})
+		if err != nil || stdout != tc.said || stderr != question {
+			t.Errorf("answer %q: %v, stdout %q, stderr %q; want stdout %q and the question on stderr", tc.answer, err, stdout, stderr, tc.said)
 		}
-	})
-	if recs, _ := store.All(); len(recs) != 1 {
-		t.Fatal("answering no still forgot the device")
+		if recs, _ := store.All(); len(recs) != map[string]int{"n\n": 1, "y\n": 0}[tc.answer] {
+			t.Errorf("answer %q left %d pairings", tc.answer, len(recs))
+		}
 	}
-	terminalInput = bufioReader("y\n")
-	captureStdout(t, func() {
-		if err := forgetCommand([]string{"pix"}); err != nil {
-			t.Fatal(err)
-		}
+}
+
+// TestQuestionsGoToStderr: a question, and the numbered choices it is about,
+// go to stderr, as read -p puts its prompt, so with stdout redirected scterm
+// still asks instead of seeming to hang. The answer is read from the terminal.
+// Here, the --peer chooser, which asks again after an answer that is not one
+// of its numbers.
+func TestQuestionsGoToStderr(t *testing.T) {
+	withInteractive(t, true)
+	store := pairedStore(t, "Pixel 8", "Pixel 9")
+	old := terminalInput
+	t.Cleanup(func() { terminalInput = old })
+	terminalInput = bufioReader("x\n2\n")
+	var rec peer.Record
+	var err error
+	var stderr string
+	stdout := captureStdout(t, func() {
+		stderr = captureStderr(t, func() { rec, err = pickPeer(store, "pixel") })
 	})
-	if recs, _ := store.All(); len(recs) != 0 {
-		t.Error("answering yes kept the device")
+	want := "  1) Pixel 8 (192.0.2.1:27300)\n  2) Pixel 9 (192.0.2.1:27300)\n" +
+		"Connect to which device? [1-2] Connect to which device? [1-2] "
+	if err != nil || rec.Name != "Pixel 9" || stdout != "" || stderr != want {
+		t.Errorf("picked %q, %v; stdout %q, stderr %q; want Pixel 9, nothing on stdout and stderr %q", rec.Name, err, stdout, stderr, want)
 	}
 }
 

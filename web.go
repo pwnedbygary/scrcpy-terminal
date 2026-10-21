@@ -536,11 +536,7 @@ func (s *webServer) run(openWindow bool) error {
 	}
 	s.url = url
 	close(s.ready)
-	if s.audio == nil || s.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: web display on %s (video only: %s)\n", url, s.audioErrString())
-	} else {
-		fmt.Fprintf(stderrWriter(), "scterm: web display on %s\n", url)
-	}
+	fmt.Fprintf(stderrWriter(), "scterm: web display on %s\n", url)
 
 	// The PCM tap is registered before the first client connects: it fans out
 	// to whoever is listening at the time.
@@ -630,16 +626,6 @@ func (s *webServer) stopWith(reason string) {
 	// an orphan would hold the private profile lock against the next run.
 	s.killWindow()
 	s.freeEncoders()
-}
-
-func (s *webServer) audioErrString() string {
-	if s.audio == nil {
-		return "audio disabled"
-	}
-	if s.audio.err == nil {
-		return "audio ok"
-	}
-	return s.audio.errString()
 }
 
 // frame is the frameSink implementation: called from the video demux goroutine

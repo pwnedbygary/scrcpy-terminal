@@ -24,7 +24,7 @@ func printPeers(ctx context.Context, out io.Writer, client *peer.Client, store *
 	recs = append([]peer.Record(nil), recs...)
 	fmt.Fprintf(out, "This computer: %s\n", client.Identity.Fingerprint.Short())
 	if len(recs) == 0 {
-		fmt.Fprintln(out, `No paired devices. On the device choose "Invite a device…", then run: scterm pair "HOST:PORT CODE"`)
+		fmt.Fprintln(out, `No paired devices. On the device choose "Invite a device…", then run scterm pair on the same network, or type its invitation: scterm pair "HOST:PORT CODE"`)
 		return nil
 	}
 	labels := make([]string, len(recs))

@@ -130,8 +130,9 @@ shows log lines; Ctrl+C there ends scterm. Several browsers can watch at once. C
 does not end the session, but Quit on the page does.
 
 Sound plays in the browser, and the speakers of the computer that runs scterm stay silent
-(`--audio-dup` plays it in both places). When the browser holds sound back until you use the
-page, a chip on the page says *Tap for sound*: any tap, click or key starts it. Opened over
+(`--audio-dup` plays it in both places, and on the device too; on Android 11 and 12 it then
+plays on the device only, and scterm says why). When the browser holds sound back until you use
+the page, a chip on the page says *Tap for sound*: any tap, click or key starts it. Opened over
 plain http from another computer, the page plays sound through a compatibility path with a
 little more delay, and the chip says *Sound: compatibility mode*. A `localhost` address, for
 example through an SSH tunnel, gives the low-delay path.
@@ -406,7 +407,10 @@ connection it was waiting for.
 ### No sound
 
 - Devices with Android 10 or older send no sound. On Android 11, unlock the device before you
-  start scterm.
+  start scterm. When the device sends no sound, scterm says so, with the reason the device
+  gives, if any, for example
+  `scterm: no sound from Pixel 8: Audio disabled: it is not supported before Android 11`.
+  In the terminal display, the bottom line then says `audio off`.
 - In the terminal display, sound needs PulseAudio, and `pactl` unless `SCT_AUDIO_DEVICE` names a
   sink. Without them, scterm prints `scterm: audio disabled: …` before it starts, and the bottom
   line says `audio off`. The browser display still plays the sound in the browser.
@@ -494,7 +498,7 @@ Without `-s`, scterm uses `ANDROID_SERIAL` when it is set.
 | `--no-audio`, `--audio=false` | — | Mirror without sound |
 | `--audio-bit-rate RATE` | 128K | Audio bits per second |
 | `--audio-codec CODEC` | opus | `opus`, `aac`, `flac` or `raw` (uncompressed PCM) |
-| `--audio-source SOURCE` | output | What the device records (see below) |
+| `--audio-source SOURCE` | output (`--audio-dup`: playback) | What the device records (see below) |
 | `--audio-dup` | — | Keep playing the sound on the device (see below) |
 
 `--audio-source output` records everything the device plays, and mutes the device while scterm
@@ -504,10 +508,12 @@ sources also work: `mic-unprocessed`, `mic-camcorder`, `mic-voice-recognition`,
 `mic-voice-communication`, `voice-call`, `voice-call-uplink`, `voice-call-downlink` and
 `voice-performance`.
 
-`--audio-dup` keeps the sound playing on the device, but only with `--audio-source playback`:
-without `--audio-dup`, `playback` silences the recorded apps on the device. With the default
-source, `output`, the device stays muted and `--audio-dup` changes nothing there. With `--web`
-or `--window`, `--audio-dup` also plays the sound on this computer, as well as in the browser.
+`--audio-dup` keeps the sound playing on the device. Only `--audio-source playback` can do that
+(Android 13 and later), so, as in scrcpy, `--audio-dup` implies it, and scterm refuses
+`--audio-dup` with another source or with `--no-audio`, except in peer mode, where the device
+gets neither flag. On Android 11 and 12 the sound then plays on the device only, and scterm says
+why. Without `--audio-dup`, `playback` silences the recorded apps on the device. With `--web` or
+`--window`, `--audio-dup` also plays the sound on this computer, as well as in the browser.
 
 #### Display
 
@@ -539,9 +545,9 @@ or `--window`, `--audio-dup` also plays the sound on this computer, as well as i
 | `--dump-audio FILE` | — | Write the device's audio packets to FILE, each after its size |
 | `--repaint-interval FRAMES` | 300 | Redraw the whole terminal every FRAMES frames |
 
-`--dump-audio` writes nothing with `--audio-codec raw`. Two environment variables also help:
-`SCT_DEBUG_WEB=1` logs each browser's paint and decode statistics, and `SCT_DEBUG_CONTROL=1`
-logs input as it is read and sent to the device.
+With `--audio-codec raw`, the packets `--dump-audio` writes are the PCM itself. Two environment
+variables also help: `SCT_DEBUG_WEB=1` logs each browser's paint and decode statistics, and
+`SCT_DEBUG_CONTROL=1` logs input as it is read and sent to the device.
 
 ### Commands
 

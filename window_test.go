@@ -113,6 +113,24 @@ func TestBrowserEnvRecoversWayland(t *testing.T) {
 	}
 }
 
+// TestBrowserEnvNoteWithDISPLAY: with DISPLAY set but no WAYLAND_DISPLAY, the
+// user's compositor is still preferred, as the session's own path, and the
+// note says what was missing instead of claiming there is no DISPLAY.
+func TestBrowserEnvNoteWithDISPLAY(t *testing.T) {
+	rt := noDisplayEnv(t)
+	makeSocket(t, filepath.Join(rt, "wayland-0"))
+	t.Setenv("DISPLAY", ":0")
+
+	env, note := browserEnv()
+
+	if got := envValue(env, "WAYLAND_DISPLAY"); got != "wayland-0" {
+		t.Fatalf("WAYLAND_DISPLAY=%q, want wayland-0", got)
+	}
+	if strings.Contains(note, "no DISPLAY") || !strings.Contains(note, "WAYLAND_DISPLAY") || !strings.Contains(note, "wayland-0") {
+		t.Errorf("note %q: want it to name the missing WAYLAND_DISPLAY and the compositor, not to deny DISPLAY=:0", note)
+	}
+}
+
 // TestBrowserEnvKeepsACompleteSession: a session that already knows its display
 // must be passed through untouched.
 func TestBrowserEnvKeepsACompleteSession(t *testing.T) {

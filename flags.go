@@ -45,7 +45,7 @@ func newFlagSet(cfg *config, mirrorFPS *float64) *flag.FlagSet {
 	fs.Var((*bitRate)(&cfg.audioBitRate), "audio-bit-rate", "audio bit rate in bits per second")
 	fs.StringVar(&cfg.audioCodec, "audio-codec", cfg.audioCodec, "the device's audio codec: opus (the default), aac, flac or raw (uncompressed PCM)")
 	fs.StringVar(&cfg.audioSource, "audio-source", cfg.audioSource, "what the device records: output (the default; mutes the device), playback (Android 13+), mic, or another scrcpy source such as voice-call")
-	fs.BoolVar(&cfg.audioDup, "audio-dup", cfg.audioDup, "keep playing the sound on the device (needs --audio-source playback); with --web or --window, on this computer too")
+	fs.BoolVar(&cfg.audioDup, "audio-dup", cfg.audioDup, "keep playing the sound on the device (implies --audio-source playback, Android 13+); with --web or --window, on this computer too")
 
 	// ---- display: terminal, browser or window ------------------------------
 	fs.BoolVar(&cfg.noTUI, "no-tui", cfg.noTUI, "no picture, only a line of statistics (for tests)")
@@ -412,6 +412,17 @@ func validateConfig(cfg config) error {
 	}
 	if cfg.audioSource != "" && !slices.Contains(audioSources, cfg.audioSource) {
 		return fmt.Errorf("--audio-source %q is not one of %s", cfg.audioSource, strings.Join(audioSources, ", "))
+	}
+	// The server keeps the sound playing on the device only with the playback
+	// source (Server.java). As in scrcpy, --audio-dup implies that source when
+	// none is named (serverParams), and refuses any other, or no sound at all.
+	// A peer device is sent neither the source nor --audio-dup.
+	switch {
+	case cfg.usePeer:
+	case cfg.audioDup && !cfg.audio:
+		return errors.New("--audio-dup keeps the sound playing on the device, and --no-audio turns the sound off")
+	case cfg.audioDup && cfg.audioSource != "" && cfg.audioSource != "playback":
+		return fmt.Errorf("--audio-dup needs --audio-source playback, not %s: only playback capture keeps the sound playing on the device", cfg.audioSource)
 	}
 	return nil
 }

@@ -399,7 +399,7 @@ func (a *app) handleInput(b []byte) {
 				// nothing without a control socket; say so, as the old
 				// dedicated handler did.
 				if a.ctrl == nil {
-					noticef("scterm: control disabled (no -control)\n")
+					noticef("scterm: Refresh video needs control, and this session is view only\n")
 					return
 				}
 				a.applyAppOp(op)

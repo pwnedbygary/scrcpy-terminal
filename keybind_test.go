@@ -172,6 +172,17 @@ func TestAltKNoControl(t *testing.T) {
 	a.handleInput([]byte{0x1b, 'k'}) // ESC k = Alt+K (raw escape prefix)
 }
 
+// TestAltKNoControlSaysWhy: without control, Alt-K says why nothing happened,
+// in words that hold for --no-control and for a peer that allows viewing only
+// (no old flag spelling).
+func TestAltKNoControlSaysWhy(t *testing.T) {
+	a := &app{events: make(chan inputEvent, 64), kb: newKeyboard()}
+	out := captureStderr(t, func() { a.handleInput([]byte{0x1b, 'k'}) })
+	if want := "scterm: Refresh video needs control, and this session is view only\n"; out != want {
+		t.Errorf("Alt-K without control said %q, want %q", out, want)
+	}
+}
+
 // TestAltKResetVideoWire: Alt-K with a controller sends exactly one wire byte —
 // message type ctrlResetVideo(17), empty payload.
 func TestAltKResetVideoWire(t *testing.T) {

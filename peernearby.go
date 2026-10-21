@@ -50,7 +50,7 @@ func pairNearbyCommand() error {
 	if name == "" {
 		name = d.Name
 	}
-	fmt.Printf("\n    %s\n\nCheck that %s shows the same code, then accept there too.\n", peer.DisplayCode(p.Code), name)
+	fmt.Fprintf(os.Stderr, "\n    %s\n\nCheck that %s shows the same code, then accept there too.\n", peer.DisplayCode(p.Code), name)
 	answer := make(chan string, 1)
 	go func() {
 		a, _ := ask("Does it match? [y/N] ")
@@ -59,7 +59,7 @@ func pairNearbyCommand() error {
 	select {
 	case r := <-p.Result():
 		// The device answered first: its user declined, or it went away.
-		fmt.Println()
+		fmt.Fprintln(os.Stderr) // end the question's line
 		return nearbyFailure(name, r.Err)
 	case a := <-answer:
 		if a = strings.ToLower(a); a != "y" && a != "yes" {
@@ -146,9 +146,11 @@ func pickPeer(store *peer.Store, query string) (peer.Record, error) {
 
 var terminalInput = bufio.NewReader(os.Stdin)
 
-// ask shows a prompt and reads one line of the answer.
+// ask shows a prompt and reads one line of the answer. The prompt goes to
+// stderr, as read -p puts it, so it shows when stdout is redirected; what a
+// question is about goes there with it.
 func ask(prompt string) (string, error) {
-	fmt.Print(prompt)
+	fmt.Fprint(os.Stderr, prompt)
 	line, err := terminalInput.ReadString('\n')
 	if err != nil && line == "" {
 		return "", err
@@ -159,7 +161,7 @@ func ask(prompt string) (string, error) {
 // choose lists labelled options, numbered from 1, and returns the index picked.
 func choose(question string, labels []string) (int, error) {
 	for i, l := range labels {
-		fmt.Printf("  %d) %s\n", i+1, l)
+		fmt.Fprintf(os.Stderr, "  %d) %s\n", i+1, l)
 	}
 	for {
 		a, err := ask(fmt.Sprintf("%s [1-%d] ", question, len(labels)))

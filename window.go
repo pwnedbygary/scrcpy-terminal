@@ -150,7 +150,9 @@ func isRunnableFile(p string) bool {
 //
 // The pane is still part of the user's graphical session, so the compositor is
 // reachable by socket even when nobody exported the variables: recover the
-// display from the sockets, and let an already-complete environment win.
+// display from the sockets. In order: a WAYLAND_DISPLAY that works, the user's
+// Wayland compositor (even when DISPLAY works), a DISPLAY that works, and any
+// X server.
 func browserEnv() ([]string, string) {
 	env := os.Environ()
 
@@ -166,7 +168,7 @@ func browserEnv() ([]string, string) {
 		env = setEnvKV(env, "WAYLAND_DISPLAY", sock)
 		env = setEnvKV(env, "XDG_SESSION_TYPE", "wayland")
 		env = setEnvKV(env, "XDG_RUNTIME_DIR", runtimeDir())
-		return env, fmt.Sprintf("no DISPLAY/WAYLAND_DISPLAY in this session; using the Wayland compositor %s", sock)
+		return env, fmt.Sprintf("no usable WAYLAND_DISPLAY in this session; using the Wayland compositor %s", sock)
 	}
 	if d := os.Getenv("DISPLAY"); d != "" {
 		if n, ok := x11SocketName(d); ok && isSocket(filepath.Join("/tmp/.X11-unix", "X"+n)) {
