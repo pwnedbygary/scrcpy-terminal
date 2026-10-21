@@ -7,6 +7,91 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 20: Android follow-ups)
+
+- Contrast, computed by sRGB alpha compositing over a white picture: the
+  viewer's statistics text is white (`#FFFFFFFF`, as the handle on the same
+  background), 4.35:1 before, 5.74:1 now. A held bar button keeps the resting
+  fill and lights a 1 dp `#80FFFFFF` outline instead of a lighter fill: a
+  pressed fill of about 20% white or more falls under 4.5:1, and anything
+  fainter hardly differs from the resting fill (about 1.1:1). Its label
+  goes from 3.18:1 to 5.07:1 in the blurred panel, from 4.14:1 to 7.52:1 in
+  the unblurred one, and from 5.77:1 to 11.98:1 on the opaque portrait bar;
+  the outline stands out from the panel at 3.22:1 blurred and 4.32:1
+  unblurred.
+- The other settings launches (accessibility twice, Wi-Fi, installing
+  unknown apps) go through `openSettings()`, which shows a toast where no
+  screen answers. The nearby-pairing progress and confirm dialogs are
+  dismissed in `onDestroy`.
+- `android:textAllCaps="false"` is on `Widget.ScTerm.Button`, so the viewer
+  overlay's Retry and Close no longer show in capitals; `MainActivity`'s own
+  `isAllCaps = false` went, as the style's value wins over the text
+  appearance. The bar buttons keep theirs (they use the framework's style).
+- For voice control a bar button's name is its label when the label contains
+  the shown text (ignoring case), otherwise "shown text, label": "Vol-,
+  Volume down", "Vol+, Volume up" and "Redraw, Refresh video"; "Shade" stays
+  "Settings shade". A test pins the bar's local actions to the two the viewer
+  performs (Keyboard and Screenshot).
+- From part 11's review: the restricted-settings line reads "If the switch is
+  greyed out, tap it once, then open App info, tap the three-dot menu and
+  Allow restricted settings, and turn the switch on." App info offers that
+  menu item only after the switch has been tried: on Android 13 once the
+  restricted-settings app-op is ignored, on Android 15 and later once the
+  "Restricted setting" dialog has been shown (framework sources, read in
+  review). The main screen's session lines use
+  whole format strings ("%1$s (%2$s) controlling" and "… viewing") instead of
+  joining the name and address in code; `PairingGrantsTest` asserts exactly
+  view, audio and control; both busy rejects take their message from
+  `Readiness.TOO_MANY_SESSIONS_REASON` (the wire text is unchanged);
+  `ProbeTest` covers a target at `maxSessions` (not ready, "too many
+  sessions", while full; a second session refused as busy; ready again
+  after); a manual refresh with paired devices shows "Checking paired
+  devices…".
+- The subtitle says "paired devices", and "Copied" shows only below Android
+  13, which confirms copies itself. The helper's build comment says the
+  server is upstream plus the one change marked "scterm patch"
+  (`AudioPlaybackCapture.java`, commit afcd41b) and names `HelperMain`, not a
+  `HelperActivation` that never existed; `app/lint.xml`,
+  `settings.gradle.kts` and `HelperMain`'s comment called the server
+  unchanged too and are corrected (`HelperMain` now says its socket code is
+  unchanged).
+- Correction to the part-15 entry: its "Verification (rerun after the
+  review's fixes)" also lists the `:protocol`/`:peer` tests, the bar-test
+  mutations and the Gradle 9.8.0 check, which ran in its first round on
+  inputs the fixes did not change.
+- Verification, on HEAD plus part 14's catalog and its three renamed labels:
+  aapt2 compiles and links the resources; kotlinc compiles `:protocol` and
+  `:peer` with `-Werror` and 25 of the 26 app sources without warnings
+  (`ShizukuActivation.kt` needs the uncached Shizuku; stand-ins as in part
+  15); `:protocol`/`:peer` 95/95 (94 before, plus the new probe
+  case); the app's unit tests 19/19 (17/17 before). The SDK's standalone lint
+  reports the same as on the base: one `MissingClass` error for the uncached
+  Shizuku and three warnings. The new bar-name test does not compile against
+  the old bar. Mutations, each caught: names that are the label only, a
+  case-sensitive match, Grab added to the bar, an extra grant (the old
+  `PairingGrantsTest` missed it), a probe that ignores capacity, and a busy
+  reject with another message; the new probe case also passes on the old
+  `TargetServer.kt`, so reusing the constant kept the bytes. The contrast,
+  settings, dialog, capitals, text and comment changes are Activity or
+  resource code with no Android runtime here: compiled, checked in the linked
+  resources, and read. Not run: this project's Gradle build with its pinned
+  toolchain and AGP lint, a device (the outline, blur, capitals on API 27 to
+  37, toasts, dialogs during destroy, the settings pages), TalkBack or Voice
+  Access.
+- Left alone: inline text not moved to resources; the debug build's package
+  name; Gradle test-input paths; the device status dialog's inline
+  "controlling" and "viewing"; "peer" in "peer may…" and "Status
+  unavailable—update the peer"; `docs/ANDROID_CLIENT_PLAN.md:184` still says
+  "without edits"; the busy check inside the lock (`TargetServer.kt` line
+  574) needs a race to reach and has no test.
+- Review round 1 found that the restricted-settings line sent the user
+  straight to App info, where the menu item is missing until the switch has
+  been tried, that the pressed-fill limit is about 20% white, not 18%, that
+  `settings.gradle.kts` and `HelperMain` still called the server unchanged,
+  and that the source count was overstated; round 2 fixes those as described
+  above, and reruns aapt2, kotlinc, the app tests, the `:protocol`/`:peer`
+  tests and the standalone lint with the same results.
+
 ## Update (2026-10-20: QoL overhaul, part 14: browser toolbar and controls sheet from the catalog)
 
 - The browser's toolbar and controls sheet are built from the shared action

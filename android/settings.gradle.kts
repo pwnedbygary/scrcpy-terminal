@@ -24,6 +24,7 @@ rootProject.name = "scterm-android"
 
 // :protocol and :peer are plain JVM modules so the wire formats, session
 // logic and TLS pairing run under host unit tests; :scrcpy-server compiles the
-// vendored server source unchanged so the APK carries its own helper;
+// vendored server source (upstream scrcpy v4.1 plus the one change marked
+// "scterm patch") so the APK carries its own helper;
 // :peerctl is a desktop controller for exercising real devices.
 include(":protocol", ":peer", ":scrcpy-server", ":app", ":peerctl")

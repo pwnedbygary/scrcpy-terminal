@@ -67,6 +67,37 @@ class ViewerBarTest {
         assertEquals(emptySet(), actions("device").keys - ids.toSet(), "device actions missing from the bar")
     }
 
+    /** ViewerActivity.perform() runs these two local actions; any other on the bar would do nothing. */
+    @Test
+    fun everyLocalActionOnTheBarIsOneTheViewerPerforms() {
+        val performed = setOf("keyboard", "screenshot")
+        val local = actions("local").keys
+        assertEquals(emptyList(), VIEWER_BAR.map { it.id }.filter { it in local && it !in performed }, "local actions on the bar that perform() does not run")
+    }
+
+    /** What TalkBack reads and voice control matches: it contains what the button shows. */
+    @Test
+    fun everyButtonIsNamedWithTheTextItShows() {
+        val expected = mapOf(
+            "back" to "Back",
+            "home" to "Home",
+            "appswitch" to "Recents",
+            "keyboard" to "Keyboard",
+            "voldown" to "Vol-, Volume down",
+            "volup" to "Vol+, Volume up",
+            "mute" to "Mute device",
+            "power" to "Power",
+            "menu" to "Menu key",
+            "rotate" to "Rotate",
+            "notif" to "Notifications",
+            "settings" to "Settings shade",
+            "collapse" to "Collapse panels",
+            "screenshot" to "Screenshot",
+            "resetvideo" to "Redraw, Refresh video",
+        )
+        assertEquals(expected, VIEWER_BAR.associate { it.id to it.name(::string) })
+    }
+
     private fun JsonObject.field(key: String): String = getValue(key).jsonPrimitive.content
 
     /** A plain string resource as aapt2 compiles it: whitespace collapsed, backslash escapes resolved. */

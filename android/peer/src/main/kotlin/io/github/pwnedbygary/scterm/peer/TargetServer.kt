@@ -552,7 +552,7 @@ class TargetServer(
         }
         if (effective.isEmpty()) return reject(output, RejectCodes.FORBIDDEN, "nothing requested is granted to this device")
         if (synchronized(lock) { sessions.size } >= config.maxSessions) {
-            return reject(output, RejectCodes.BUSY, "too many sessions")
+            return reject(output, RejectCodes.BUSY, Readiness.TOO_MANY_SESSIONS_REASON)
         }
         val backend = obtainBackend() ?: return reject(output, RejectCodes.UNAVAILABLE, backends.notReadyReason())
         val caps = backend.capabilities
@@ -571,7 +571,7 @@ class TargetServer(
             output = output,
         )
         synchronized(lock) {
-            if (sessions.size >= config.maxSessions) return reject(output, RejectCodes.BUSY, "too many sessions")
+            if (sessions.size >= config.maxSessions) return reject(output, RejectCodes.BUSY, Readiness.TOO_MANY_SESSIONS_REASON)
             sessions[session.id] = session
             updateDemandLocked()
         }

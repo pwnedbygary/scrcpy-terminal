@@ -118,6 +118,8 @@ class MainActivity : ComponentActivity() {
     private var requestShown: TargetServer.PairingRequest? = null
     private var nearbyPairing: NearbyPairing? = null
     private var pairDialog: AlertDialog? = null
+    private var nearbyProgressDialog: AlertDialog? = null
+    private var nearbyConfirmDialog: AlertDialog? = null
     private var nearbyBrowser: Nearby.Browser? = null
 
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -169,6 +171,8 @@ class MainActivity : ComponentActivity() {
         invitationDialog?.dismiss()
         requestDialog?.dismiss()
         pairDialog?.dismiss()
+        nearbyProgressDialog?.dismiss()
+        nearbyConfirmDialog?.dismiss()
         super.onDestroy()
     }
 
@@ -222,7 +226,7 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
         column.addView(text(getString(R.string.app_name), 26f, Typeface.BOLD).apply { ViewCompat.setAccessibilityHeading(this, true) })
-        column.addView(text("Serve this device to paired peers, or control theirs.", 14f, color = R.color.muted).apply {
+        column.addView(text("Serve this device to paired devices, or control theirs.", 14f, color = R.color.muted).apply {
             setPadding(0, 0, 0, dp(16))
         })
 
@@ -258,7 +262,7 @@ class MainActivity : ComponentActivity() {
         serveButton = button(getString(R.string.serve_start), primary = true) { toggleServing() }
         inviteButton = button(getString(R.string.serve_invite)) { showInviteDialog() }
         kickButton = button(getString(R.string.serve_kick)) { TargetService.disconnectAll(this) }
-        inputButton = button(getString(R.string.serve_enable_input)) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        inputButton = button(getString(R.string.serve_enable_input)) { openSettings(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         inputHelp = settingsHelp(text(getString(R.string.serve_input_restricted), 13f, color = R.color.muted), getString(R.string.open_app_info)) {
             openAppInfo()
         }
@@ -384,8 +388,7 @@ class MainActivity : ComponentActivity() {
                         append("\nNo one is connected.")
                     } else {
                         for (s in state.sessions) {
-                            val peer = "${s.peerName} (${s.address})"
-                            append("\n• ").append(getString(if (s.holdsLease) R.string.serve_controlling else R.string.serve_viewing, peer))
+                            append("\n• ").append(getString(if (s.holdsLease) R.string.serve_controlling_from else R.string.serve_viewing_from, s.peerName, s.address))
                         }
                     }
                     invitationExpiresAtMs?.let {
@@ -458,7 +461,11 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
-    private fun refreshPeerStatus() = withNetworkPermissions(serving = false) { app.peerMonitor.refresh() }
+    private fun refreshPeerStatus() = withNetworkPermissions(serving = false) {
+        app.peerMonitor.refresh()
+        // A re-check keeps showing each device's last result until the new one arrives.
+        if (app.peers.all().isNotEmpty()) toast(getString(R.string.peers_checking))
+    }
 
     private fun renderPeers() {
         val peers = app.peers.all().sortedBy { it.name.lowercase() }
@@ -542,10 +549,10 @@ class MainActivity : ComponentActivity() {
             append("\nReverse network readiness is checked by the other device.")
         }
         val actions = mutableListOf<View>(text(detail, 14f))
-        actions += button("Network settings") { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
+        actions += button("Network settings") { openSettings(Intent(Settings.ACTION_WIFI_SETTINGS)) }
         if (local == null) actions += button("Start serving this device") { startServing() }
         if (local?.kind == BackendKind.HELPER && !local.ready && helperShellCommand != null && ShizukuActivation.installed(this)) actions += button("Start this device's helper with Shizuku") { startHelperWithShizuku() }
-        if (local?.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) actions += button("Enable input on this device") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        if (local?.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) actions += button("Enable input on this device") { openSettings(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         AlertDialog.Builder(this).setTitle(peer.name).setView(ScrollView(this).apply { addView(padded(column(*actions.toTypedArray()))) })
             .setPositiveButton("Refresh") { _, _ -> refreshPeerStatus() }
             .setNeutralButton("Manage…") { _, _ -> showManageDialog(peer) }
@@ -758,6 +765,7 @@ class MainActivity : ComponentActivity() {
             .setNegativeButton(R.string.cancel) { _, _ -> cancelled = true }
             .setOnCancelListener { cancelled = true }
             .show()
+        nearbyProgressDialog = progress
         val servePort = (Serving.state.value as? ServeState.Serving)?.port
         Nearby.resolve(this, service) { address ->
             if (cancelled || isDestroyed) return@resolve
@@ -799,6 +807,7 @@ class MainActivity : ComponentActivity() {
             .setNegativeButton(R.string.cancel, null)
             .setCancelable(false)
             .show()
+        nearbyConfirmDialog = dialog
         // Replaced listeners keep the dialog up while waiting for the other device.
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { button ->
             button.isEnabled = false
@@ -974,7 +983,7 @@ class MainActivity : ComponentActivity() {
                 .setTitle(R.string.update_permission_title)
                 .setMessage(R.string.update_permission_text)
                 .setPositiveButton(R.string.update_permission_open) { _, _ ->
-                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, "package:$packageName".toUri()))
+                    openSettings(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, "package:$packageName".toUri()))
                 }
                 .setNegativeButton(R.string.cancel) { _, _ -> awaitingInstallPermission = null }
                 .show()
@@ -1098,7 +1107,8 @@ class MainActivity : ComponentActivity() {
             clip.description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }
         }
         getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
-        toast("Copied")
+        // Android 13 and later confirm a copy themselves.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) toast("Copied")
     }
 
     private fun alert(title: String, message: String) {
@@ -1125,7 +1135,6 @@ class MainActivity : ComponentActivity() {
     private fun button(label: String, primary: Boolean = false, onClick: () -> Unit) =
         Button(this, null, 0, if (primary) R.style.Widget_ScTerm_Button_Primary else R.style.Widget_ScTerm_Button_Secondary).apply {
             text = label
-            isAllCaps = false
             setOnClickListener { onClick() }
         }
 

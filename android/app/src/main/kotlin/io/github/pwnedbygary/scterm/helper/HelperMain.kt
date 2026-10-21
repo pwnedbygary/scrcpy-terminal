@@ -15,10 +15,10 @@ import kotlin.system.exitProcess
  * identity: `HelperMain <app port> <token> 4.1 scid=… [scrcpy options]`.
  *
  * SELinux does not let the shell domain connect to an app's abstract socket
- * (observed on Android 16), so the vendored server, unchanged, connects to an
- * abstract socket in this same process instead, and each of its three
- * connections is relayed to the app over loopback TCP after a token
- * handshake. The raw control socket never leaves the device.
+ * (observed on Android 16), so the vendored server, its socket code
+ * unchanged, connects to an abstract socket in this same process instead,
+ * and each of its three connections is relayed to the app over loopback TCP
+ * after a token handshake. The raw control socket never leaves the device.
  */
 object HelperMain {
     @JvmStatic

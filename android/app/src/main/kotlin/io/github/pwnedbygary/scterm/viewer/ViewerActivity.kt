@@ -450,7 +450,7 @@ class ViewerActivity : ComponentActivity() {
             })
         }
 
-        for (action in VIEWER_BAR) add(getString(action.text), getString(action.description)) { perform(action.id) }
+        for (action in VIEWER_BAR) add(getString(action.text), action.name(::getString)) { perform(action.id) }
         takeControl = add(getString(R.string.viewer_take_control)) { session?.takeover() }
         add(getString(R.string.viewer_disconnect)) {
             leaving = true

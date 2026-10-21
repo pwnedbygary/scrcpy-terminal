@@ -134,14 +134,17 @@
     <string name="serve_this_device">this device</string>
     <string name="serve_controlling">%1$s controlling</string>
     <string name="serve_viewing">%1$s viewing</string>
+    <string name="serve_controlling_from">%1$s (%2$s) controlling</string>
+    <string name="serve_viewing_from">%1$s (%2$s) viewing</string>
     <string name="serve_notifications_blocked">Notifications are blocked, so the Stop button and pairing requests can\'t appear.</string>
     <string name="serve_stop_notification_blocked">Serving notifications are blocked, so the Stop button can\'t appear.</string>
     <string name="serve_pairing_notifications_blocked">Pairing request notifications are blocked, so pairing requests can\'t appear while this screen is closed.</string>
     <string name="settings_unavailable">This device can\'t open that settings page.</string>
-    <string name="serve_input_restricted">If the switch is greyed out, open App info, tap the three-dot menu, then Allow restricted settings.</string>
+    <string name="serve_input_restricted">If the switch is greyed out, tap it once, then open App info, tap the three-dot menu and Allow restricted settings, and turn the switch on.</string>
     <string name="local_network_denied">Local network access is denied, so this device can\'t reach other devices or serve them. Allow it in App info, under Permissions.</string>
     <string name="open_notification_settings">Notification settings</string>
     <string name="open_app_info">App info</string>
     <string name="pair_allow_back">Also let it see, hear and control this device</string>
+    <string name="peers_checking">Checking paired devices…</string>
     <string name="viewer_retry">Retry</string>
 </resources>

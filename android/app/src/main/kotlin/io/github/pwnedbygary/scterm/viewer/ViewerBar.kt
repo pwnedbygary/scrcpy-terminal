@@ -9,9 +9,20 @@ import io.github.pwnedbygary.scterm.protocol.LocalAction
  * A button of the viewer's action bar: the action [id] of the catalog every
  * frontend shares (protocol/fixtures/actions.json), showing its short name, or
  * its one-word label where the short name is clipped (Rec, Rot, Notif, Keys,
- * Shot), and read out by its label.
+ * Shot), and read out by its label ([name]).
  */
-class BarAction(val id: String, @StringRes val text: Int, @StringRes val description: Int)
+class BarAction(val id: String, @StringRes val text: Int, @StringRes val description: Int) {
+    /**
+     * The label, after the shown text where the label does not contain it
+     * ("Vol-, Volume down"): voice control matches what the user says, which is
+     * what the button shows (WCAG 2.5.3, label in name).
+     */
+    fun name(string: (Int) -> String): String {
+        val shown = string(text)
+        val label = string(description)
+        return if (label.contains(shown, ignoreCase = true)) label else "$shown, $label"
+    }
+}
 
 /**
  * The bar in order: the navigation keys as on the phone itself, the keyboard,
