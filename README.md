@@ -36,9 +36,10 @@ To run scterm you need:
   build from source. If it stops with `SIGILL: illegal instruction` (exit status 2), the CPU
   lacks AVX2, and a build from source stops the same way.
 - For sound in the terminal display: a PulseAudio server (PipeWire's PulseAudio service also
-  works) and `pactl`, which scterm uses to play on the output device the desktop selects and to
-  follow it. Without a server, or without `pactl` unless `SCT_AUDIO_DEVICE` names a sink, the
-  terminal display has no sound. The browser display plays sound without either.
+  works). Without one, the terminal display has no sound; the browser display plays sound
+  without it. scterm also uses `pactl`, when it is installed, to follow the output device the
+  desktop selects. Without `pactl`, it plays on the server's default output, and when you pick
+  another output, the sound moves only if the server moves it (PipeWire usually does).
 - For `--window`: a Chromium-family browser or Firefox.
 
 To build from source you also need Go 1.27 or later, a C compiler, `pkg-config`, and the
@@ -430,11 +431,11 @@ connection it was waiting for.
   gives, if any, for example
   `scterm: no sound from Pixel 8: Audio disabled: it is not supported before Android 11`.
   In the terminal display, the bottom line then says `audio off`.
-- In the terminal display, sound needs PulseAudio, and `pactl` unless `SCT_AUDIO_DEVICE` names a
-  sink. Without them, scterm prints `scterm: audio disabled: …` before it starts, and the bottom
-  line says `audio off`. The browser display still plays the sound in the browser.
-- scterm plays on the output your desktop uses, and follows it when it changes.
-  `SCT_AUDIO_DEVICE` sets a fixed sink (see `pactl list sinks short`).
+- In the terminal display, sound needs a PulseAudio server. Without one, scterm prints
+  `scterm: audio disabled: …` before it starts, and the bottom line says `audio off`. The
+  browser display still plays the sound in the browser.
+- scterm plays on the output your desktop uses, and with `pactl` installed it follows it when
+  it changes. `SCT_AUDIO_DEVICE` sets a fixed sink (see `pactl list sinks short`).
 - Only one scterm plays sound at a time. When a session starts, scterm stops the sound of any
   other scterm on this computer, running or left behind by a crash, and says how many sound
   streams it silenced.

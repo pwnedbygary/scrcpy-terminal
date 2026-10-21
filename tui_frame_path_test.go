@@ -26,6 +26,12 @@ import (
 // TestDisplaySinkIsWiredForEveryMode: every run mode must have a frame sink
 // before runVideo starts, or the display silently renders nothing.
 func TestDisplaySinkIsWiredForEveryMode(t *testing.T) {
+	// newApp opens an audio stream: keep it off the session's sound server,
+	// and skip the pauses between open's tries.
+	isolatePulse(t)
+	old := audioPause
+	audioPause = func(time.Duration) {}
+	t.Cleanup(func() { audioPause = old })
 	for _, tc := range []struct {
 		name    string
 		cfg     config

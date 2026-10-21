@@ -147,6 +147,7 @@ import "C"
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -180,54 +181,127 @@ func newAudioSink() *audioSink {
 	return a
 }
 
-// open (re)connects to PulseAudio. Retries a few times with a backoff since
-// audio servers (PipeWire) may be starting up. Reports the real PA error.
+// open connects to PulseAudio and opens the stream on the first server and
+// sink that work (see openFirst). Reports the real PA errors.
 func (a *audioSink) open() {
-	var lastErr string
-	// First try the default server (respects PULSE_SERVER / the session
-	// socket). If that fails, fall back to the explicit runtime-dir socket
-	// so terminals with a stale PULSE_SERVER still get sound.
-	servers := []string{"", pulseSocketPath()}
-	devices := audioDevices()
-	for _, server := range servers {
-		for _, device := range devices {
-			for attempt := 0; attempt < 3; attempt++ {
-				sink := C.sct_audio_open_with_server(cstr("scterm"), cstr(server), cstr(device))
-				if sink != nil && sink.valid != 0 {
-					noticef("scterm: audio sink: %s (device %q)\n",
-						serverOrDefault(server), deviceOrDefault(device))
-					a.sink = sink
-					a.err = nil
-					return
-				}
-				if sink != nil {
-					if es := C.sct_audio_last_error(sink); es != nil {
-						lastErr = C.GoString(es)
-						C.free(unsafe.Pointer(es))
-					}
-					C.sct_audio_close(sink)
-				}
-				time.Sleep(time.Duration(150*(attempt+1)) * time.Millisecond)
-			}
-			lastErr = fmt.Sprintf("server %q device %q: %s", serverOrDefault(server), deviceOrDefault(device), lastErr)
+	name := C.CString("scterm")
+	defer C.free(unsafe.Pointer(name))
+	server, device, err := openFirst(audioServers(), audioDevices(), func(server, device string) (int, string) {
+		cserver, cdevice := cstrOrNil(server), cstrOrNil(device)
+		defer C.free(unsafe.Pointer(cserver))
+		defer C.free(unsafe.Pointer(cdevice))
+		sink := C.sct_audio_open_with_server(name, cserver, cdevice)
+		if sink == nil {
+			return int(C.PA_ERR_INTERNAL), "out of memory"
 		}
+		if sink.valid != 0 {
+			a.sink = sink
+			return 0, ""
+		}
+		var msg string
+		if es := C.sct_audio_last_error(sink); es != nil {
+			msg = C.GoString(es)
+			C.free(unsafe.Pointer(es))
+		}
+		code := int(sink.err)
+		C.sct_audio_close(sink)
+		return code, msg
+	}, audioPause)
+	a.err = err
+	if err == nil {
+		noticef("scterm: audio sink: %s (device %q)\n",
+			serverOrDefault(server), deviceOrDefault(device))
 	}
-	if lastErr == "" {
-		lastErr = "pulseaudio not available"
-	}
-	a.err = fmt.Errorf("audio sink: %s", lastErr)
 }
 
-// audioDevices returns the sink device candidates, in priority order:
-//  1. SCT_AUDIO_DEVICE env override (explicit user choice)
-//  2. the sink currently receiving audio (active sink-inputs) - this is
-//     "the actively selected device" on the user's desktop
-//  3. physical ALSA sinks that are RUNNING (in use by the session)
-//  4. any physical ALSA sink
-//  5. the server default (empty string)
+// audioTries is how many times openFirst tries a server and sink.
+const audioTries = 3
+
+// audioPause waits between open's rounds of tries.
+var audioPause = time.Sleep
+
+// openFirst tries each server with each device, in that order, and returns
+// the first pair that opens. try makes one attempt and returns 0, or the
+// libpulse error code and text. Pairs that fail are tried again, in later
+// rounds 150 and 300 ms apart, since audio servers (PipeWire) may be starting
+// up; a pair whose arguments were refused is not (see paRetry). The error
+// gives the last failure of every pair.
+func openFirst(servers, devices []string, try func(server, device string) (int, string), sleep func(time.Duration)) (string, string, error) {
+	type pair struct {
+		server, device, err string
+		refused             bool
+	}
+	var pairs []pair
+	for _, server := range servers {
+		for _, device := range devices {
+			pairs = append(pairs, pair{server: server, device: device})
+		}
+	}
+	for round := 0; round < audioTries; round++ {
+		if round > 0 {
+			sleep(time.Duration(150*round) * time.Millisecond)
+		}
+		again := false
+		for i := range pairs {
+			p := &pairs[i]
+			if p.refused {
+				continue
+			}
+			code, msg := try(p.server, p.device)
+			if code == 0 {
+				return p.server, p.device, nil
+			}
+			p.err, p.refused = msg, !paRetry(code)
+			again = again || !p.refused
+		}
+		if !again {
+			break
+		}
+	}
+	var errs []string
+	for _, p := range pairs {
+		errs = append(errs, fmt.Sprintf("server %q device %q: %s",
+			serverOrDefault(p.server), deviceOrDefault(p.device), p.err))
+	}
+	if len(errs) == 0 {
+		errs = append(errs, "pulseaudio not available")
+	}
+	return "", "", fmt.Errorf("audio sink: %s", strings.Join(errs, "; "))
+}
+
+// paRetry reports whether an open that failed with the libpulse error code
+// may work when tried again: not when libpulse or the server refused the
+// server or sink it was given, which no wait changes.
+func paRetry(code int) bool {
+	return code != C.PA_ERR_INVALID && code != C.PA_ERR_INVALIDSERVER
+}
+
+// audioServers returns the servers to try, in order: libpulse's default
+// (""), which is PULSE_SERVER or client.conf's default-server when set and
+// otherwise the user's socket (in PULSE_RUNTIME_PATH or XDG_RUNTIME_DIR),
+// then the XDG_RUNTIME_DIR socket by name, so terminals with a stale
+// PULSE_SERVER still get sound. When the default is that socket, trying it
+// twice costs a failed connect, not a wait: openFirst tries every pair before
+// it pauses.
+func audioServers() []string {
+	if socket := pulseSocketPath(); socket != "" {
+		return []string{"", socket}
+	}
+	return []string{""}
+}
+
+// audioDevices returns the sink device candidates, in priority order. When
+// SCT_AUDIO_DEVICE is set it is the only one; otherwise:
+//  1. the default sink, when it is a sound card (alsa_output.*): what the
+//     desktop's volume panel selects
+//  2. the sinks other programs are playing on (they have sink-inputs)
+//  3. the sound cards that are RUNNING
+//  4. every sound card, in pactl's order
+//  5. the server default (empty string), when pactl lists no sound card or
+//     cannot run
 //
-// The default sink may be a virtual one (e.g. a game-streaming sink)
-// that silently buffers audio nobody hears, hence it is last.
+// A default sink that is not a sound card (e.g. a game-streaming sink) may
+// silently buffer audio nobody hears, so it is not taken first.
 func audioDevices() []string {
 	if d := envOr("SCT_AUDIO_DEVICE", ""); d != "" {
 		return []string{d}
@@ -279,7 +353,7 @@ func audioDevices() []string {
 		}
 	}
 
-	// 2) active sinks (have streams) - prefer the one with most inputs
+	// 2) active sinks (have streams), in pactl's order
 	var active []string
 	for _, s := range sinks {
 		if s.inputs > 0 {
@@ -352,7 +426,13 @@ func (errPulseUnavailable) Error() string {
 	return "pulseaudio not available"
 }
 
-func cstr(s string) *C.char {
+// cstrOrNil is C.CString, but NULL for "": libpulse takes NULL, not an empty
+// string, for its default server or sink, and refuses "" as an invalid
+// argument. Free the result with C.free.
+func cstrOrNil(s string) *C.char {
+	if s == "" {
+		return nil
+	}
 	return C.CString(s)
 }
 
@@ -436,13 +516,33 @@ func (a *audioSink) gainPercent() int {
 // instance is the only audio source. (pactl has no kill-sink-input;
 // the libpulse control API does.)
 func cleanupStaleStreams() {
-	// Kill both the current and the legacy application name: a stray
-	// stream from an old sct binary must not survive the rename.
-	n := int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("scterm")))
-	n += int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("sct")))
-	if n > 0 {
+	if n := killStaleStreams(audioServers(), killAppStreams); n > 0 {
 		noticef("scterm: silenced %d leftover audio stream(s)\n", n)
 	}
+}
+
+// killAppStreams kills the streams of app on server ("" is libpulse's
+// default) and returns how many, or -1 when it cannot connect.
+var killAppStreams = func(server, app string) int {
+	cserver, capp := cstrOrNil(server), C.CString(app)
+	defer C.free(unsafe.Pointer(cserver))
+	defer C.free(unsafe.Pointer(capp))
+	return int(C.sct_audio_kill_streams(cserver, capp))
+}
+
+// killStaleStreams runs kill on the first of servers that answers (open tries
+// them in the same order) and returns how many streams it killed.
+func killStaleStreams(servers []string, kill func(server, app string) int) int {
+	for _, server := range servers {
+		n := kill(server, "scterm")
+		if n < 0 {
+			continue
+		}
+		// Kill both the current and the legacy application name: a stray
+		// stream from an old sct binary must not survive the rename.
+		return n + max(kill(server, "sct"), 0)
+	}
+	return 0
 }
 
 func (a *audioSink) close() {

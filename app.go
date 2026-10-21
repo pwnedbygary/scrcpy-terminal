@@ -233,7 +233,11 @@ func (a *app) run() error {
 			a.events <- inputEvent{kind: evTickFast}
 		}
 	})
-	a.goTUI(a.followAudioSink)
+	if pactl, ok := a.audioFollower(); ok {
+		stopFollow, every := make(chan struct{}), audioFollowEvery
+		defer close(stopFollow)
+		a.goTUI(func() { followAudioSink(pactl, stopFollow, every) })
+	}
 
 	return a.loop(wake, lost)
 }
@@ -494,7 +498,9 @@ func (a *app) runWeb() error {
 			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
 		}
 	}()
-	go a.followAudioSink()
+	if pactl, ok := a.audioFollower(); ok {
+		go followAudioSink(pactl, a.web.done, audioFollowEvery)
+	}
 
 	// A 500ms tick keeps the mouse-drag coalescer fed even when no browser is
 	// connected, and lets the status line (TUI-attached runs) stay live.

@@ -7,6 +7,303 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 29: terminal sound without pactl, and on a running sound card)
+
+- The terminal display's sound now opens without `pactl`. scterm gave
+  libpulse an empty string, not NULL, for its default server and sink, and
+  libpulse refuses "" as an invalid argument: without `pactl` and without
+  `SCT_AUDIO_DEVICE`, every open failed after 1.8 s with "Invalid argument",
+  and with a sink named, the first server always failed, which cost about
+  0.9 s. Now "" reaches libpulse as NULL (`cstrOrNil`), so the stream opens
+  on the server's default sink (which `PULSE_SINK` can set), and
+  `PULSE_SERVER` and client.conf's default server are honoured. The C
+  strings each try made are now freed (three leaked per try).
+- `openFirst` tries each server (libpulse's default, then the
+  `XDG_RUNTIME_DIR` socket by name, which rescues a stale `PULSE_SERVER`)
+  with each sink, in up to three rounds 150 and 300 ms apart, for a server
+  that is still starting. A pair libpulse refuses as an invalid argument or
+  an invalid server is not tried again. A fallback opens at once (the old
+  code waited 0.9 s on each failed pair), and with no server the open gives
+  up after about 0.45 s instead of 1.8 s. The error names every server and
+  sink that failed, "default" for libpulse's own: `audio sink: server
+  "default" device "default": Connection refused; server
+  "unix:/run/user/1000/pulse/native" device "default": Connection refused`.
+  With one pair it reads as before.
+- The leftover-stream cleanup at start runs on the first server, in the same
+  order, that answers. It always used the `XDG_RUNTIME_DIR` socket, so a
+  leftover stream on a `PULSE_SERVER` server kept playing.
+- A sound card that `pactl` reports running is now preferred, as the code
+  meant: `pactl list sinks short` separates its columns with tabs, and the
+  sample spec column ("s16le 2ch 48000Hz") has spaces in it, so splitting
+  at spaces read the state from the wrong column, and no sink ever counted
+  as running (`splitFields`).
+- The README (requirements, "No sound") and `docs/ARCHITECTURE.md` (sound)
+  now say that only the server is needed: without `pactl`, scterm plays on
+  the server's default output and follows nothing itself; PipeWire moves a
+  stream opened without a sink name to a new default by itself.
+- Tests: `audio_open_test.go` covers the open's order, rounds, pauses,
+  refused pairs, error, server order and cleanup through two seams, the
+  package variables `audioPause` and `killAppStreams`.
+  `audio_libpulse_test.go` runs real libpulse under `isolatePulse` (its own
+  `PULSE_SERVER` nobody listens on, an empty `XDG_RUNTIME_DIR`, autospawn
+  off, a `PATH` without `pactl`). `TestSinkSelectionLogic` checked a local
+  slice, not `audioDevices`; `TestAudioDevicesFollowTheirOrder` replaces
+  it, with a fake `pactl` that prints the short listings in their real
+  format. `TestDisplaySinkIsWiredForEveryMode` built three apps whose audio
+  streams opened on a developer's live sound server and stayed open; it
+  now runs under `isolatePulse`, without open's pauses.
+- Owner's calls, as built: a server that refuses connections while it
+  starts now gets about 0.45 s instead of up to 1.35 s (with socket
+  activation, a starting PipeWire accepts the connection instead); like any
+  libpulse program, scterm may now start PulseAudio itself where it is
+  installed with autospawn on (the old code never reached the default
+  server; not tested).
+- Verification, by the builder, with every run cut off from the session's
+  sound server (`iso.env`): a private PipeWire 1.6.9 with WirePlumber
+  0.5.18 (its own configs and runtime directory, null sinks only, no
+  hardware and no D-Bus; checked to hold no sound device or session
+  handle). Without `pactl`, the open took 5–7 ms on the default sink (it
+  failed after 1.8 s); with `SCT_AUDIO_DEVICE`, 5–6 ms (906–907 ms); with
+  `pactl` and no sound card, 13–14 ms on the default (failed); with a
+  stale `PULSE_SERVER`, 5–7 ms through the socket (failed); `PULSE_SINK`
+  without `pactl` chose the sink; scterm's follower moved the stream as
+  before; the cleanup silenced a leftover stream on a `PULSE_SERVER`
+  server (it kept playing). With nothing listening: 0.45 s, "Connection
+  refused" at both servers (1.8 s, "Invalid argument"). The two libpulse
+  tests fail on the old `audio.go` on behaviour; the seam tests do not
+  build there. Of the builder's 26 mutations, 24 are caught: one is
+  equivalent (the cleanup's C side already maps "" to NULL), and one, a
+  stream that opens and is not kept, needs a server, which the private
+  server's run caught. At intake: on the old `splitFields`, only the
+  running-card case of `TestAudioDevicesFollowTheirOrder` fails, and 9 of
+  9 mutations of `audioDevices` and `splitFields` are caught. On
+  `f1c25f3` with this part, all with `iso.env`: gofmt, vet, the build,
+  `go test ./...` (315 top-level tests pass and 3 skip), `-race -count=3`
+  on the audio tests (48 passes over 16 tests, no races), the new and
+  changed tests 20 times each and 5 times under `-race`, and the docs
+  checker on the README and `docs/ARCHITECTURE.md`.
+  Not run: a real PulseAudio daemon (not installed here), client.conf's
+  default server, the X11 property, TCP servers, autospawn, a desktop
+  session, Bluetooth, real hardware, and the scterm binary end to end.
+- Review round 1 found a cleanup test that set `XDG_RUNTIME_DIR` to
+  `/run/user/1000`, where this host's live sound server listens, kept off it
+  only by the `killAppStreams` seam: a regression that went around the seam
+  would have killed a developer's `scterm` streams. It also found that
+  `TestAudioSinkConnectsToTheDefaultServer` claimed more than it checked: its
+  expected text was built from Go's own strings, so passing NULL for the
+  socket server, or for a named sink, went unseen. Round 2: that cleanup test
+  runs under `isolatePulse` and expects the socket in its directory; the
+  tests that only compare server names use a runtime directory that cannot
+  exist (`/nonexistent/scterm-test/xdg`); `isolatePulse` also gives libpulse
+  its own `XDG_CONFIG_HOME` and no `PULSE_COOKIE`. The libpulse test now
+  listens on the isolated socket (and hangs up), requires a connection there
+  in each case, skips open's pauses, and says that a named sink reaching
+  libpulse needs a real server, which only the builder's PipeWire probe
+  checked. Two new tests pin that a missing sink ("No such entity") is tried
+  in every round, and that another round follows when any pair may still
+  work, even when the last pair tried was refused. The comments of
+  `audioDevices` now give its real order.
+- The audio follower (`followAudioSink`) ran until the process exited, so a
+  test that ran `runWeb` with a working sink left one running. It asked
+  `pactl` for the default sink once a second until the test binary exited,
+  with the session's environment back once the test had ended; on a desktop
+  with an scterm stream playing, it would also have moved that stream. Part
+  26's tests left four this way: a run of the whole root package in a
+  sandbox set up like a desktop session (bwrap, `/run/user` and `/run/dbus`
+  hidden, a decoy socket at `/run/user/1000/pulse/native`, `PULSE_SERVER`
+  unset) counted 80 connections, all `pactl get-default-sink` from the test
+  binary. The follower now takes a stop channel and its interval: `runWeb`
+  passes `a.web.done`, which every way out of it closes, and the terminal's
+  `run` passes one it closes when it returns (checked by reading only, since
+  `run` needs a terminal). The runs read `audioFollowEvery` before the
+  follower's goroutine starts. `TestAudioFollowerStopsWithItsRun` and
+  `TestWebRunStopsItsAudioFollower` pin the follower's stop and `runWeb`'s;
+  the terminal's is checked by reading only.
+- Verification of round 2, in the worktree with `iso.env` and in that
+  sandbox: the changed and new tests pass, the new follower tests 5 times
+  under `-race` (a first version read the interval inside the goroutine and
+  raced with the test's cleanup). Round 1's tests with a cleanup that goes
+  around the seam connected twice to the decoy; round 2's tests, none. In
+  the sandbox these mutants are caught without a decoy connection: the
+  cleanup going around the seam, NULL for every server, "No such entity"
+  taken as final, and the last pair deciding whether another round follows.
+  `runWeb` passing a nil stop and a follower that ignores its stop are
+  caught too, but were run only with `iso.env`, which has no decoy (see
+  review round 2 below). The whole root package made no connection to the
+  decoy; that sandbox kept the session's `PATH` and `HOME`, with no network
+  but loopback. On round 2's snapshot (the branch tip with part 19, and part
+  27 as under review), with `iso.env` (no sound server reachable, a fake adb
+  first on `PATH`): gofmt, vet, the build, `go test ./...` (375 top-level
+  tests pass and 3 skip), `-race -count=3` on 25 audio tests, the new and
+  changed tests 20 times and 5 times under `-race`, the six mutants above
+  (each fails its test), and the docs checker; and the sandbox run of the
+  whole root package, as above (no connection).
+- Review round 2 found that the follower tests did not keep the regressions
+  they catch away from the session: `t.Setenv` is undone when a test ends,
+  so a follower that outlived its test (a `runWeb` that passes no stop, or a
+  follower that ignores it) went on with the session's `PATH` and
+  `XDG_RUNTIME_DIR` back. In the review's sandbox those two regressions
+  failed their tests but still made 35 and 69 connections to the decoy in
+  the audio tests, and 4,133 and 8,183 in the whole root package. It also
+  found that the follower could ask once more after its stop: select picks
+  at random between a closed stop and a tick that is due, as one always is
+  after a slow `pactl`. Round 3: the follower looks `pactl` up on `PATH` and
+  takes its environment once, when it starts (`findPactl` returns a
+  `pactlTool`, the path and the environment), and reads neither again, so a
+  follower that outlives its test runs only the `pactl` that test put on
+  `PATH`, which goes with the test's directory. Without `pactl` the follower
+  ends at once instead of looking for it every second (the README already
+  says scterm follows nothing without it); part 26's tests give `runWeb` a
+  `PATH` without `pactl`, so their followers end at once. After each tick
+  the follower checks the stop again before it asks. `pulseCmd` and
+  `pulseDefaultSink` still look `pactl` up at each call.
+- New tests: `TestAudioFollowerStopsBeforeAnotherTick` (twelve rounds; each
+  round's `pactl` waits until the test has closed the stop, and must have
+  run exactly once), `TestAudioFollowerKeepsThePactlItFound` (after a second
+  `isolatePulse` puts another `pactl` on `PATH`, the follower keeps asking
+  the first and never the second), and
+  `TestAudioFollowerWithoutPactlEndsAtOnce`. `TestWebRunStopsItsAudioFollower`
+  now waits until the follower has moved the stream during the run (a fake
+  `pactl` with another default sink and one scterm stream, and the "audio
+  -> ..." line), so it also fails when `runWeb` starts no follower at all.
+- Verification of round 3, on its snapshot (the branch tip with part 27 as
+  under review), with `iso.env`: gofmt, vet, the build, `go test ./...` (378
+  top-level tests pass and 3 skip), `-race -count=3` on 28 audio tests, and
+  the new and changed tests 20 times and 5 times under `-race`. These
+  mutants each fail their test: round 2's six, a follower that looks `pactl`
+  up at each tick, one that goes on without `pactl`, and one without the
+  second check of the stop (all 10 of 10 runs of its test fail). The whole
+  root package in a bwrap sandbox set up like a desktop session for sound
+  (`/run/user` and `/run/dbus` hidden, a decoy socket at
+  `/run/user/1000/pulse/native`, `PULSE_SERVER` and `PULSE_RUNTIME_PATH`
+  unset, no network but loopback), with `iso.env`'s fake adb first on `PATH`
+  and its scratch `HOME`: no connection to the decoy unmutated, none with
+  `runWeb` passing a nil stop, and none with a follower that ignores its
+  stop; with the nil stop and a lookup at each tick together, 4,043, all
+  `pactl get-default-sink`.
+- Review round 3 found that the waiting `pactl` of
+  `TestAudioFollowerStopsBeforeAnotherTick` had no way out but its release
+  file. When a round failed, as it does for a follower that ignores its
+  stop, the test's cleanups could remove that file before the script, and a
+  script the follower started then waited forever: in 85 runs under that
+  regression, two left one running after `go test` had exited. It also
+  found that the tests kept one fault away from the session but not two: a
+  follower that looked `pactl` up again when the one it had was gone, or
+  that looked it up at its first tick instead of before it started, passed
+  every test, and either one with a `runWeb` that passes no stop reached
+  the decoy (4,257 and 80 connections; the first made 23,200 with a
+  follower that ignores its stop). And `TestAudioFollowerKeepsThePactlItFound`
+  said that it checked the environment, which it did not.
+- Round 4: the runs look `pactl` up, and take the environment, before they
+  start the follower (`audioFollower`, which also checks the sink and
+  `SCT_AUDIO_DEVICE`), and hand both to it; without `pactl` they start no
+  follower. A lookup can still be written inside the follower, though: one
+  at each tick, or when the `pactl` it has is gone, fails
+  `TestAudioFollowerKeepsThePactlItFound`, but one every 100 ticks, or only
+  at the first tick, passes every test (review round 4). The waiting script
+  also ends when the script itself is gone, or after 2,000 waits (about
+  11 s).
+  `TestAudioFollowerKeepsThePactlItFound` now records the `XDG_RUNTIME_DIR`
+  each `pactl` ran with, then removes the first `pactl` and lets 50 ticks
+  pass, after which the second must still not have run.
+  `TestAudioFollowerNeedsASinkAndPactl` replaces
+  `TestAudioFollowerWithoutPactlEndsAtOnce`: no sink, a sink that did not
+  open, `SCT_AUDIO_DEVICE`, or no `pactl` start no follower, and a sink
+  with `pactl` hands the follower that `pactl`.
+- Verification of round 4, on its snapshot (`141cd3e`, the branch tip with
+  part 27), with `iso.env`: gofmt, vet, the build, `go test ./...` (378
+  top-level tests pass and 3 skip), `-race -count=3` on 28 audio tests, and
+  the new and changed tests 20 times and 5 times under `-race`. Thirteen
+  mutants each fail their test: round 3's nine (the one that went on
+  without `pactl` is now the runs starting a follower without it; its first
+  file did not build, and rebuilt, it fails), a follower that finds `pactl`
+  again when it is gone (10 of 10 runs of its test fail), `pactl` reading
+  the environment at each call, and the runs starting a follower for a sink
+  that did not open, or with `SCT_AUDIO_DEVICE` set. The waiting script on
+  its own waits while there is no release, ends at once when it is removed,
+  and ends after 11.19 s with neither. Eighty runs of
+  `TestAudioFollowerStopsBeforeAnotherTick` with a follower that ignores its
+  stop, eight at a time in a pid namespace: all 80 fail, and a second later
+  no `pactl` script was still running and no test directory was left (the
+  review found one left in 160 such runs; see its bullet below). The
+  whole root package in the decoy sandbox, as in round 3: no connection
+  unmutated, with a nil stop, or with a follower that ignores its stop;
+  4,052 with the nil stop and a lookup at each tick together. The docs
+  checker, on docs this round did not change.
+- Review round 4 found that no test checked that the runs ask
+  `audioFollower`: a `runWeb` that looked `pactl` up itself passed every
+  test, and with a nil stop, or a follower that ignores its stop, reached
+  the decoy (47 connections each, from the two tests that run `runWeb`
+  without `isolatePulse`). It found false round 4's claim that a lookup
+  inside the follower could no longer be written without changing what it
+  takes, and wrong the left-alone item that only two faults that each fail
+  a test remained: a lookup every 100 ticks fails none, and with a nil stop
+  it made 3,992 connections (both are corrected in place). It found that
+  `TestAudioFollowerKeepsThePactlItFound` recorded `XDG_RUNTIME_DIR` but not
+  `PULSE_SERVER`, the variable that points `pactl` at a server (a `pactl`
+  that derived `PULSE_SERVER` again at each call passed). And under a
+  follower that ignores its stop, one in 160 runs of
+  `TestAudioFollowerStopsBeforeAnotherTick` left its test directory: a
+  script the follower starts during the cleanup can write its log file
+  again after the directory was emptied (nothing keeps running).
+- Round 5 changes only `audiofollow_test.go` and this entry.
+  `TestWebRunStartsTheFollowerOnlyWhenItShould` runs `runWeb` three times,
+  with no sink, with a sink that did not open, and with `SCT_AUDIO_DEVICE`
+  set, each with a counting `pactl` on `PATH` and the follower asking every
+  5 ms; in the 20 ticks after the server listens, `pactl` must not run.
+  `TestAudioFollowerKeepsThePactlItFound` also records `PULSE_SERVER`, which
+  must be the socket under the runtime directory `pactl` was found with.
+- Verification of round 5, on its snapshot (`141cd3e`), with `iso.env`:
+  gofmt, vet, the build, `go test ./...` (379 top-level tests pass and 3
+  skip), `-race -count=3` on 29 audio tests, and the new and changed tests
+  20 times and 5 times under `-race`. Fifteen mutants each fail their test:
+  round 4's thirteen, a `runWeb` that looks `pactl` up itself (10 of 10
+  runs of the new test fail), and a `pactl` that derives `PULSE_SERVER`
+  again at each call (10 of 10). As the review found, three pass: a
+  `runWeb` that ignores `audioFollower`'s answer (harmless: the empty path
+  it then hands over never runs), and lookups every 100 ticks and only at
+  the first tick. Eighty runs of `TestAudioFollowerStopsBeforeAnotherTick`
+  under a follower that ignores its stop: all 80 fail, and a second later
+  no `pactl` script runs and no test directory is left. The whole root
+  package in the decoy sandbox: no connection unmutated, with a nil stop,
+  or with a follower that ignores its stop. With two faults, each run fails
+  a test and still reaches the decoy, from followers that outlive their
+  tests: 4,053 connections with a nil stop and a lookup at each tick, 47
+  with a nil stop and a `runWeb` that looks `pactl` up itself, and 4,015
+  with a nil stop and a lookup every 100 ticks.
+- Resolved from part 21's left-alone list: the empty strings, the wasted
+  first try, the `PULSE_SERVER` comment, and the wrong column. Not tested:
+  whether a session without `XDG_RUNTIME_DIR` now gets sound (libpulse then
+  looks for its socket itself).
+- Left alone: `pactl` always talks to the `XDG_RUNTIME_DIR` socket
+  (`pulseEnv`), while the stream tries libpulse's default first, so with a
+  `PULSE_SERVER` naming another reachable server, the sinks `pactl` found
+  may not exist there (the stream then falls back to the socket, as
+  before); `audioDevices` never adds the server's default after named
+  sinks, so on real PulseAudio a named sink that fails everywhere leaves no
+  sound (PipeWire falls back itself); the cleanup pumps libpulse for 300 ms
+  twice whenever a server answers, 606 ms at every start; the unused C
+  function `sct_audio_open`; the success notice says `device "default"`
+  when `PULSE_SINK` chose the sink; the README's environment table does not
+  list `PULSE_SERVER` and `PULSE_SINK`, which now take effect; on PipeWire,
+  `SCT_AUDIO_DEVICE` naming the sink that was the default at start does not
+  keep the stream there when the default changes (the builder's probe P8b,
+  before and after this part); without `pactl` no follower starts, and none
+  starts when `pactl` is installed during the run; nothing pins that the
+  terminal display's `run` starts the follower, or closes its stop (mutants
+  that do neither pass; `run` needs a terminal); a lookup inside the
+  follower that the tests do not see (one every 100 ticks) passes every
+  test, and with a stop that never comes it reaches a desktop's sound server
+  (4,015 connections in round 5's sandbox with a nil stop; review round 4
+  counted 24,806 with a follower that ignores its stop, which fails a test);
+  `TestWebExitsTwoWhenTheDeviceIsLost` and `TestWebStreamEndSaysBye` run
+  `runWeb` without `isolatePulse`, so `audioFollower`'s check of the sink is
+  what keeps the session's `pactl` from them; under a follower that ignores
+  its stop, `TestAudioFollowerStopsBeforeAnotherTick` can leave its test
+  directory (one in 160 runs in review round 4, none in 80 in round 5);
+  `audioFollower` reads the sink's error without a lock while `writePCM16`
+  can set it (`audio.go:464`, as before this part).
+
 ## Update (2026-10-21: QoL overhaul, part 27: a way out of a paste, and true paste notices)
 
 - Notices are quoted here as the status row shows them, without the

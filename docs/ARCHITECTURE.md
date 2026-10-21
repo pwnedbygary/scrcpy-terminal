@@ -91,14 +91,22 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
 - The terminal display plays it through a PulseAudio stream named `scterm`, with a 20 ms
   buffer target and a software gain for Alt+M, Alt+- and Alt+= (`audio.go`).
 - scterm plays on the sink set by `SCT_AUDIO_DEVICE`. Without it, scterm opens its stream on
-  the desktop's default sink when that is a sound card, and otherwise on a sink that other
-  programs play on, or else the first sound card `pactl` lists, in that order; it asks `pactl`
-  for these. When none qualifies, and always without `pactl`, the open fails and the terminal
-  display has no sound: the last step, the server's default, passes an empty sink name, which
-  libpulse rejects (`audio.go`). About a second after its stream appears, and again whenever
-  the default changes, it moves the stream to the desktop's default sink, whatever kind of
-  sink that is (`audiofollow.go`): with a Bluetooth or virtual default, the order above holds
-  only for that first second.
+  the desktop's default sink when that is a sound card, and otherwise on the sinks other
+  programs play on, then the sound cards `pactl` reports running, then every sound card it
+  lists, in that order; it asks `pactl` for these (`audio.go`). When none qualifies, and
+  always without `pactl`, scterm names no sink, and the server plays the sound on its default
+  sink (libpulse applies `PULSE_SINK` there). About a second after its stream appears, and
+  again whenever the default changes, it moves the stream to the desktop's default sink,
+  whatever kind of sink that is (`audiofollow.go`, which needs `pactl`): with a Bluetooth or
+  virtual default, the order above holds only for that first second. PipeWire also moves a
+  stream opened without a sink name to a new default by itself (seen with PipeWire 1.6 and
+  WirePlumber 0.5).
+- scterm tries libpulse's default server first (`PULSE_SERVER`, or client.conf's default
+  server, or else the user's socket), then the socket in `XDG_RUNTIME_DIR` by name. It tries
+  every server and sink once per round, in up to three rounds 150 and 300 ms apart, for a
+  server that is still starting; a server or sink that libpulse refuses as invalid is not
+  tried again, and with no server the open gives up after about 0.45 s. The leftover streams
+  of another scterm are stopped on the first server, in the same order, that answers.
 - In the browser display, the browser plays the sound, and the PulseAudio stream stays silent
   unless `--audio-dup` is given (`app.go`).
 
