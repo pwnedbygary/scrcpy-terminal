@@ -71,6 +71,13 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   frame is wrapped in the terminal's synchronized-update mode (`tui.go`).
 - Decoded frames reach the terminal through a mailbox with one slot. A newer frame replaces an
   older one that is not drawn yet, so a slow terminal drops frames and never slows the decoder.
+- A screenshot (Alt+S) is scaled by the video goroutine, which owns the decoder. A still screen
+  sends no frames, so the request also sets a past read deadline on the video socket: a read
+  that waits for the device returns, and the frame the decoder holds is scaled at its own size
+  into a new buffer. Another goroutine encodes and writes the PNG. One screenshot is taken at a
+  time: a press while one is still being taken or saved takes none of its own. When no picture
+  comes within a second, scterm saves the canvas instead, without its letterbox bars
+  (`stream.go`, `input.go`).
 - The action bar, the Controls menu and the on-screen keyboard are overlays. They repaint at
   once, without waiting for a video frame, because a still screen may send none.
 - While scterm runs, the bottom line shows messages ("notices") instead of printing them,

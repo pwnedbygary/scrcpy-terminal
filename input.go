@@ -669,38 +669,133 @@ func (a *app) adjustLocalVolume(delta int) {
 	a.refreshStatus()
 }
 
-// screenshot saves the most recent rendered canvas as PPM (Alt+S).
-func (a *app) screenshot() {
+// shotWait bounds how long a screenshot waits for the video goroutine before
+// it saves the terminal's picture instead. The answer normally comes at once,
+// from the frame the decoder holds. Where a read cannot be cut short, it
+// comes with the next frame: the server's encoder repeats a frame 100 ms
+// after it (ten times at most, so a still screen soon sends none), and ten
+// such intervals leave room for a slow link.
+var shotWait = time.Second
+
+// screenshot saves the device's picture at the stream's resolution as a PNG
+// (Alt+S). The video goroutine scales the frame; the PNG is encoded and written
+// on a goroutine of its own, so neither the decoder nor the run loop waits.
+func (a *app) screenshot() { a.takeShot(time.Now()) }
+
+// takeShot is screenshot, with the time that names the file. The channel is
+// closed once the shot is saved or dropped. One shot is taken at a time: a
+// press while one is in flight, from its press until it is saved or dropped,
+// takes none of its own and gets that shot's channel. So Alt+S held down
+// (the terminal repeats the key) holds the memory of one shot, not of one
+// per repeat, and the shot's own notice is the only one. Called on the run
+// loop.
+func (a *app) takeShot(at time.Time) <-chan struct{} {
+	done := make(chan struct{})
 	if a.tui == nil {
-		return // headless mode: nothing to capture
+		close(done)
+		return done // headless mode: nothing to capture
+	}
+	if a.stream != nil && a.stream.shotDone != nil {
+		select {
+		case <-a.stream.shotDone:
+		default:
+			return a.stream.shotDone // the shot in flight answers this press
+		}
 	}
 	a.tui.mu.Lock()
 	if !a.tui.running {
 		a.tui.mu.Unlock()
-		return // before shell init, or after the terminal was given back
+		close(done)
+		return done // before shell init, or after the terminal was given back
 	}
-	pw, ph := a.tui.cols, a.tui.rows*2
-	n := pw * ph * 4
-	var rgb []byte
-	// The length check alone is not enough: a resize can keep the same cell
-	// count, and a differently-shaped snapshot would be written as a sheared
-	// PPM. lastW/lastH record the geometry the snapshot was taken at.
-	if n > 0 && len(a.tui.lastRGB) == n && a.tui.lastW == pw && a.tui.lastH == ph {
-		rgb = make([]byte, n)
-		copy(rgb, a.tui.lastRGB[:n])
-	}
+	canvas := a.canvasShot()
 	a.tui.mu.Unlock()
-	if rgb == nil {
+	switch {
+	case a.sess != nil && a.sess.video == nil:
+		noticef("scterm: screenshot: the video is off\n")
+		close(done)
+		return done
+	case a.stream == nil || a.stream.frameCount.Load() == 0:
+		noticef("scterm: screenshot: no frame yet\n")
+		close(done)
+		return done
+	}
+	reply := a.stream.requestShot()
+	if reply == nil {
+		close(done)
+		return done // the video stream has ended, and with it the session
+	}
+	a.stream.shotDone = done
+	go func() {
+		defer close(done)
+		a.saveShot(at, reply, canvas)
+	}()
+	return done
+}
+
+// canvasShot copies the picture out of the terminal's canvas, without the
+// letterbox bars, or returns nil when there is no canvas of the current size.
+// Called with a.tui.mu held.
+func (a *app) canvasShot() *videoShot {
+	t := a.tui
+	cw, ch := t.cols, t.rows*2
+	// The length check alone is not enough: a resize can keep the same cell
+	// count, and a differently-shaped canvas would come out sheared. lastW and
+	// lastH record the geometry the canvas was drawn at.
+	if cw <= 0 || ch <= 0 || len(t.lastRGB) != cw*ch*4 || t.lastW != cw || t.lastH != ch {
+		return nil
+	}
+	w, h, x, y := fitPicture(cw, ch, a.frameW, a.frameH)
+	rgb := make([]byte, 0, w*h*4)
+	for row := y; row < y+h; row++ {
+		i := (row*cw + x) * 4
+		rgb = append(rgb, t.lastRGB[i:i+w*4]...)
+	}
+	return &videoShot{rgb: rgb, w: w, h: h}
+}
+
+// saveShot waits for the picture on reply and saves it, or after shotWait the
+// terminal's canvas. It saves nothing once the session is over: when the video
+// stream ends first, or the terminal UI has ended by the time it would save.
+func (a *app) saveShot(at time.Time, reply chan videoShot, canvas *videoShot) {
+	timer := time.NewTimer(shotWait)
+	defer timer.Stop()
+	var shot videoShot
+	late := false
+	select {
+	case got, ok := <-reply:
+		if !ok {
+			return
+		}
+		shot = got
+	case <-timer.C:
+		a.stream.cancelShot(reply)
+		late = true
+	}
+	a.tui.mu.Lock()
+	running := a.tui.running
+	a.tui.mu.Unlock()
+	switch {
+	case !running:
+		return
+	case shot.err != nil:
+		noticef("scterm: screenshot: %v\n", shot.err)
+		return
+	case late && canvas == nil:
 		noticef("scterm: screenshot: no frame yet\n")
 		return
+	case late:
+		shot = *canvas
 	}
-	fn := fmt.Sprintf("scterm-%s.ppm", time.Now().Format("20060102-150405"))
-	if err := writePPMFile(fn, rgb, pw, ph); err != nil {
+	name, err := writeShotPNG(at, shot.rgb, shot.w, shot.h)
+	switch {
+	case err != nil:
 		noticef("scterm: screenshot: %v\n", err)
-		return
+	case late:
+		noticef("scterm: saved %s (%dx%d) at the terminal's size, because no frame came from the device in time\n", name, shot.w, shot.h)
+	default:
+		noticef("scterm: saved %s (%dx%d)\n", name, shot.w, shot.h)
 	}
-	noticef("scterm: saved %s (%dx%d)\n", fn, pw, ph)
-	a.refreshStatus()
 }
 
 func (a *app) sendAndroidKey(code uint32) {

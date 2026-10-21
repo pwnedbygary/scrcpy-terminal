@@ -5,8 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
+	"unsafe"
 )
 
 // frameSink receives decoded frames from the video demux goroutine. The TUI
@@ -79,6 +84,17 @@ type streamState struct {
 	// gets, and a tap must never block the demux loop (see runAudio).
 	pcmMu   sync.Mutex
 	pcmTaps []func([]byte)
+
+	// Screenshot requests wait here for the video goroutine, which owns the
+	// decoder and so is the only one that can scale its frame (requestShot).
+	shotMu    sync.Mutex
+	shotReqs  []chan videoShot
+	shotEnded bool // runVideo has returned: no frame will come
+
+	// shotDone is the last screenshot's channel, which its goroutine closes
+	// once it is saved or dropped; until then that shot is in flight
+	// (takeShot). Only the run loop reads or sets the field.
+	shotDone chan struct{}
 }
 
 // addPCMTap registers a consumer of decoded PCM. Taps are called from the
@@ -186,16 +202,19 @@ func (s *streamState) updateGeometry() {
 	}
 	s.canvasW = cols
 	s.canvasH = 2 * rows
+	s.fitW, s.fitH, s.fitOffX, s.fitOffY = fitPicture(s.canvasW, s.canvasH, s.videoW, s.videoH)
+}
 
-	fw, fh := s.videoW, s.videoH
+// fitPicture is where a fw x fh video picture goes in a cw x ch terminal
+// canvas: its letterboxed size and offset. The screenshot fallback crops the
+// canvas with it.
+func fitPicture(cw, ch, fw, fh int) (w, h, offX, offY int) {
 	if fw <= 0 || fh <= 0 {
 		// nothing yet: fit is the full canvas
-		s.fitW, s.fitH = s.canvasW, s.canvasH
-		s.fitOffX, s.fitOffY = 0, 0
-		return
+		return cw, ch, 0, 0
 	}
-	scaleX := float64(s.canvasW) / float64(fw)
-	scaleY := float64(s.canvasH) / float64(fh)
+	scaleX := float64(cw) / float64(fw)
+	scaleY := float64(ch) / float64(fh)
 	scale := scaleX
 	if scaleY < scaleX {
 		scale = scaleY
@@ -203,22 +222,21 @@ func (s *streamState) updateGeometry() {
 	if scale > 1 {
 		scale = 1 // never upscale past source (crisper + faster)
 	}
-	s.fitW = int(float64(fw) * scale)
-	s.fitH = int(float64(fh) * scale)
-	if s.fitW%2 == 1 {
-		s.fitW--
+	w = int(float64(fw) * scale)
+	h = int(float64(fh) * scale)
+	if w%2 == 1 {
+		w--
 	}
-	if s.fitH%2 == 1 {
-		s.fitH--
+	if h%2 == 1 {
+		h--
 	}
-	if s.fitW < 2 {
-		s.fitW = 2
+	if w < 2 {
+		w = 2
 	}
-	if s.fitH < 2 {
-		s.fitH = 2
+	if h < 2 {
+		h = 2
 	}
-	s.fitOffX = (s.canvasW - s.fitW) / 2
-	s.fitOffY = (s.canvasH - s.fitH) / 2
+	return w, h, (cw - w) / 2, (ch - h) / 2
 }
 
 // canvasSize returns the RGBA canvas dimensions.
@@ -285,6 +303,7 @@ var errAudioOff = errors.New("the device turned the audio stream off")
 
 // runVideo demuxes the video socket: headers -> packets -> decoder.
 func (s *streamState) runVideo() error {
+	defer s.endShots()
 	if s.sess.video == nil {
 		return nil
 	}
@@ -300,7 +319,8 @@ func (s *streamState) runVideo() error {
 	if codecID != codecH264 {
 		return fmt.Errorf("unsupported video codec 0x%08x", codecID)
 	}
-	r := bufio.NewReaderSize(s.sess.video, 1<<20)
+	wake := func() {}
+	r := bufio.NewReaderSize(shotReader{s.sess.video, &wake}, 1<<20)
 
 	// First packet must be a session header.
 	he := make([]byte, 12)
@@ -320,6 +340,15 @@ func (s *streamState) runVideo() error {
 		return fmt.Errorf("could not open h264 decoder")
 	}
 	defer vdecFree(dec)
+
+	// A still screen sends no frames, so a screenshot request also wakes a
+	// read that waits for the device, and gets the frame the decoder holds.
+	var lastW, lastH int // its size, once scaled
+	wake = func() {
+		if lastW > 0 {
+			s.answerShots(dec, lastW, lastH)
+		}
+	}
 
 	fps := s.fpsCounter()
 
@@ -400,13 +429,122 @@ func (s *streamState) runVideo() error {
 			}
 			buf := s.takePooled(s.canvasW * s.canvasH * 4)
 			reg := buf[(s.fitOffY*s.canvasW+s.fitOffX)*4:]
-			if _, _, err := vdecScaleStride(dec, reg, s.canvasW*4, s.fitW, s.fitH); err != nil {
+			fw, fh, err := vdecScaleStride(dec, reg, s.canvasW*4, s.fitW, s.fitH)
+			if err != nil {
 				s.returnPooled(buf)
 				continue
 			}
+			lastW, lastH = fw, fh
 			s.frameCount.Add(1)
 			s.deliverFrame(&videoFrame{rgb: buf, w: s.videoW, h: s.videoH,
 				cw: s.canvasW, ch: s.canvasH, fps: fps()})
+			s.answerShots(dec, fw, fh)
+		}
+	}
+}
+
+// videoShot is the decoded frame scaled at its own size for a screenshot:
+// BGR0 pixels (see writePPMFile), w x h, or the error that stopped the scale.
+type videoShot struct {
+	rgb  []byte
+	w, h int
+	err  error
+}
+
+// requestShot asks the video goroutine for the frame its decoder holds, at the
+// frame's own size. The channel gets the picture, or is closed without one if
+// the video stream ends first; nil means it has ended already. The read
+// deadline makes a read that waits for the device return at once (see
+// shotReader), so the answer does not wait for the next frame.
+func (s *streamState) requestShot() chan videoShot {
+	s.shotMu.Lock()
+	if s.shotEnded {
+		s.shotMu.Unlock()
+		return nil
+	}
+	ch := make(chan videoShot, 1)
+	s.shotReqs = append(s.shotReqs, ch)
+	s.shotMu.Unlock()
+	// The request must be registered before the deadline is set: the wake
+	// that the deadline causes has to find it. Set first, the deadline could
+	// wake the video goroutine, which clears it and finds no request, and the
+	// request would wait for the next frame.
+	if s.sess != nil && s.sess.video != nil {
+		s.sess.video.SetReadDeadline(time.Now())
+	}
+	return ch
+}
+
+// cancelShot withdraws a request that is no longer waited for.
+func (s *streamState) cancelShot(ch chan videoShot) {
+	s.shotMu.Lock()
+	defer s.shotMu.Unlock()
+	if i := slices.Index(s.shotReqs, ch); i >= 0 {
+		s.shotReqs = slices.Delete(s.shotReqs, i, i+1)
+	}
+}
+
+// answerShots scales the decoder's frame, w x h, into a fresh buffer for the
+// waiting requests. Only the video goroutine calls it: the decoder is its own.
+func (s *streamState) answerShots(dec unsafe.Pointer, w, h int) {
+	s.shotMu.Lock()
+	reqs := s.shotReqs
+	s.shotReqs = nil
+	s.shotMu.Unlock()
+	if len(reqs) == 0 {
+		return
+	}
+	shot := videoShot{rgb: make([]byte, w*h*4), w: w, h: h}
+	fw, fh, err := vdecScaleStride(dec, shot.rgb, w*4, w, h)
+	if err == nil && (fw != w || fh != h) {
+		// The frame is not the size last scaled: scale it at its own.
+		shot = videoShot{rgb: make([]byte, fw*fh*4), w: fw, h: fh}
+		_, _, err = vdecScaleStride(dec, shot.rgb, fw*4, fw, fh)
+	}
+	if err != nil {
+		shot = videoShot{err: err}
+	}
+	for _, ch := range reqs {
+		ch <- shot // each channel has room for its one answer
+	}
+}
+
+// endShots tells the waiting requests that no frame will come.
+func (s *streamState) endShots() {
+	s.shotMu.Lock()
+	defer s.shotMu.Unlock()
+	s.shotEnded = true
+	for _, ch := range s.shotReqs {
+		close(ch)
+	}
+	s.shotReqs = nil
+}
+
+// shotReader is the video socket as runVideo reads it. A read that ends at
+// requestShot's deadline lets the video goroutine answer the request (wake),
+// and reads on; every other result passes through as it came. Every read
+// deadline that expires on the video socket is taken for such a wake and
+// cleared, so a deadline set there for another reason, such as a liveness
+// timeout, would be silently defeated.
+type shotReader struct {
+	conn net.Conn
+	wake *func()
+}
+
+func (r shotReader) Read(p []byte) (int, error) {
+	for {
+		n, err := r.conn.Read(p)
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			return n, err
+		}
+		// Cleared before the wake looks for requests: a request made after
+		// that look sets the deadline again, and the next read answers it.
+		// Cleared after the look, that request's deadline could be cleared
+		// too, and it would wait for the next frame.
+		r.conn.SetReadDeadline(time.Time{})
+		(*r.wake)()
+		if n > 0 {
+			return n, nil
 		}
 	}
 }

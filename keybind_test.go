@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // capConn captures control socket writes for assertions. Only Write is used by
@@ -29,76 +31,141 @@ func (c *capConn) Write(p []byte) (int, error) {
 func TestScreenshotHeadless(t *testing.T) {
 	t.Chdir(t.TempDir())
 	a := &app{}
-	a.screenshot()
-	files, _ := filepath.Glob("scterm-*.ppm")
-	if len(files) != 0 {
-		t.Fatalf("headless screenshot wrote files: %v", files)
+	out := stderrOf(t, func() { waitShot(t, a.takeShot(shotTime)) })
+	if files := shotFiles(t); len(files) != 0 || out != "" {
+		t.Fatalf("headless screenshot wrote files %v and said %q", files, out)
 	}
 }
 
-// TestScreenshotNoFrameYet: TUI running but draw() never rendered a frame —
-// no file, "no frame yet" on stderr.
+// TestScreenshotNoFrameYet: TUI running but no frame decoded or drawn yet —
+// no file, "no frame yet" at once.
 func TestScreenshotNoFrameYet(t *testing.T) {
 	t.Chdir(t.TempDir())
-	a := &app{tui: &tui{cols: 80, rows: 39}}
+	a := &app{tui: &tui{cols: 80, rows: 39}, stream: &streamState{}}
 	a.tui.running = true
-	a.screenshot()
-	files, _ := filepath.Glob("scterm-*.ppm")
-	if len(files) != 0 {
-		t.Fatalf("wrote PPM with no frame yet: %v", files)
+	out := stderrOf(t, func() { waitShot(t, a.takeShot(shotTime)) })
+	if want := "scterm: screenshot: no frame yet\n"; out != want {
+		t.Errorf("notice %q, want %q", out, want)
+	}
+	if files := shotFiles(t); len(files) != 0 {
+		t.Fatalf("wrote %v with no frame yet", files)
 	}
 }
 
-// TestScreenshotWritesPPM: happy path — a rendered canvas snapshot is written
-// as binary PPM at terminal-canvas resolution (cols x rows*2). The canvas is
-// FFmpeg's AV_PIX_FMT_BGR0 (bytes B, G, R, unused) and a PPM pixel is R, G, B.
-func TestScreenshotWritesPPM(t *testing.T) {
-	dir := t.TempDir()
-	t.Chdir(dir)
+// canvasApp is a terminal UI app on an 80x40 canvas (80 columns, 20 rows) that
+// has drawn a frame of frameW x frameH: black letterbox bars, and in the picture
+// at (x, y), w x h, a pattern of BGR0 pixels (bytes B, G, R, unused, FFmpeg's
+// AV_PIX_FMT_BGR0) that differ in every channel. Its stream has decoded a
+// frame, but no video goroutine answers a screenshot request.
+func canvasApp(frameW, frameH, x, y, w, h int) *app {
+	a := &app{tui: &tui{cols: 80, rows: 20, running: true}, stream: &streamState{}}
+	a.stream.frameCount.Store(1)
+	a.frameW, a.frameH = frameW, frameH
+	canvas := make([]byte, 80*40*4)
+	for py := y; py < y+h; py++ {
+		for px := x; px < x+w; px++ {
+			p := canvas[(py*80+px)*4:]
+			p[0], p[1], p[2] = byte(1+px), byte(101+py), byte(201-px-py)
+		}
+	}
+	a.tui.lastRGB = canvas
+	a.tui.lastW, a.tui.lastH = 80, 40 // as a real draw records them
+	return a
+}
 
-	pw, ph := 80, 78 // cols=80, rows=39 → canvas 80x78
-	n := pw * ph * 4
-	pattern := make([]byte, n)
-	for i := range pattern {
-		pattern[i] = byte(i % 251)
-	}
-
-	a := &app{tui: &tui{cols: 80, rows: 39}}
-	a.tui.running = true
-	a.tui.lastRGB = pattern
-	a.tui.lastW, a.tui.lastH = pw, ph // as a real draw records them
-	a.screenshot()
-
-	files, _ := filepath.Glob("scterm-*.ppm")
-	if len(files) != 1 {
-		t.Fatalf("want exactly one PPM in %s, got %v", dir, files)
-	}
-	data, err := os.ReadFile(files[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	const header = "P6\n80 78\n255\n"
-	if !strings.HasPrefix(string(data), header) {
-		t.Fatalf("bad PPM header: %q", data[:14])
-	}
-	body := data[len(header):]
-	wantBody := pw * ph * 3
-	if len(body) != wantBody {
-		t.Fatalf("body length %d, want %d", len(body), wantBody)
-	}
-	// spot-check: the first and last pixels come out as R, G, B
-	if body[0] != pattern[2] || body[1] != pattern[1] || body[2] != pattern[0] {
-		t.Fatalf("first pixel mismatch: %v", body[:3])
-	}
-	last := n - 4 // last canvas pixel
-	if body[wantBody-3] != pattern[last+2] || body[wantBody-2] != pattern[last+1] || body[wantBody-1] != pattern[last] {
-		t.Fatalf("last pixel mismatch: %v", body[wantBody-3:])
+// TestScreenshotWritesPNG: when no frame comes within shotWait, the canvas the
+// terminal shows is saved as a PNG: only the picture, without the letterbox
+// bars, each pixel's B, G, R as the PNG's R, G, B, and the notice says so.
+// A 1280x2560 frame fits the 80x40 canvas at 1/64, a 2560x640 one at 1/32.
+func TestScreenshotWritesPNG(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		frameW, frameH int
+		x, y, w, h     int // the picture on the canvas
+	}{
+		{"bars at the sides", 1280, 2560, 30, 0, 20, 40},
+		{"bars above and below", 2560, 640, 0, 10, 80, 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			withShotWait(t, 20*time.Millisecond)
+			a := canvasApp(tc.frameW, tc.frameH, tc.x, tc.y, tc.w, tc.h)
+			out := stderrOf(t, func() { waitShot(t, a.takeShot(shotTime)) })
+			want := fmt.Sprintf("scterm: saved %s (%dx%d) at the terminal's size, because no frame came from the device in time\n", shotName, tc.w, tc.h)
+			if out != want {
+				t.Errorf("notice %q, want %q", out, want)
+			}
+			img := readShot(t, shotName)
+			if b := img.Bounds(); b.Dx() != tc.w || b.Dy() != tc.h {
+				t.Fatalf("the screenshot is %dx%d, want the %dx%d picture", b.Dx(), b.Dy(), tc.w, tc.h)
+			}
+			for py := 0; py < tc.h; py++ {
+				for px := 0; px < tc.w; px++ {
+					cx, cy := tc.x+px, tc.y+py
+					want := [3]uint32{uint32(byte(201 - cx - cy)), uint32(byte(101 + cy)), uint32(byte(1 + cx))}
+					r, g, b, _ := img.At(px, py).RGBA()
+					if got := [3]uint32{r >> 8, g >> 8, b >> 8}; got != want {
+						t.Fatalf("pixel (%d,%d) is %v, want %v", px, py, got, want)
+					}
+				}
+			}
+		})
 	}
 }
 
 // TestScreenshotKeepsColours: a pure red, green and blue pixel as the scaler
-// lays them out (B, G, R, unused) are red, green and blue in the PPM.
+// lays them out (B, G, R, unused) are red, green and blue in the PNG.
 func TestScreenshotKeepsColours(t *testing.T) {
+	t.Chdir(t.TempDir())
+	canvas := []byte{
+		0, 0, 255, 0, // red
+		0, 255, 0, 0, // green
+		255, 0, 0, 0, // blue
+	}
+	name, err := writeShotPNG(shotTime, canvas, 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := readShot(t, name)
+	if b := img.Bounds(); b.Dx() != 3 || b.Dy() != 1 {
+		t.Fatalf("the PNG is %dx%d, want 3x1", b.Dx(), b.Dy())
+	}
+	for x, want := range [][4]uint32{{255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255}} {
+		r, g, b, a := img.At(x, 0).RGBA()
+		if got := [4]uint32{r >> 8, g >> 8, b >> 8, a >> 8}; got != want {
+			t.Errorf("pixel %d is %v, want %v", x, got, want)
+		}
+	}
+}
+
+// TestScreenshotNameTaken: a screenshot never replaces a file. Names that are
+// taken get -2, -3 and so on, and the files there are left as they were.
+func TestScreenshotNameTaken(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, name := range []string{shotName, "scterm-20261021-045500-2.png"} {
+		if err := os.WriteFile(name, []byte("keep"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+	}
+	name, err := writeShotPNG(shotTime, make([]byte, 4), 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "scterm-20261021-045500-3.png"; name != want {
+		t.Errorf("saved as %s, want %s", name, want)
+	}
+	readShot(t, name)
+	for _, kept := range []string{shotName, "scterm-20261021-045500-2.png"} {
+		if b, err := os.ReadFile(kept); err != nil || string(b) != "keep" {
+			t.Errorf("%s now holds %q (%v)", kept, b, err)
+		}
+	}
+}
+
+// TestDumpFrameKeepsColours: --dump-frames writes PPM. A pure red, green and
+// blue pixel as the scaler lays them out (B, G, R, unused) are red, green and
+// blue in the PPM.
+func TestDumpFrameKeepsColours(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rgb.ppm")
 	canvas := []byte{
 		0, 0, 255, 0, // red
@@ -120,11 +187,14 @@ func TestScreenshotKeepsColours(t *testing.T) {
 }
 
 // TestScreenshotStaleCanvas: a snapshot from a different geometry must not be
-// written as a sheared PPM. A resize can keep the same cell count (120x29 and
-// 116x30 are both 3480 cells), so the length check alone is not enough.
+// saved as a sheared picture. A resize can keep the same cell count (120x29
+// and 116x30 are both 3480 cells), so the length check alone is not enough.
 func TestScreenshotStaleCanvas(t *testing.T) {
 	t.Chdir(t.TempDir())
-	a := &app{tui: &tui{cols: 80, rows: 39, running: true}}
+	withShotWait(t, 20*time.Millisecond)
+	a := &app{tui: &tui{cols: 80, rows: 39, running: true}, stream: &streamState{}}
+	a.stream.frameCount.Store(1) // no video goroutine answers: the canvas would be saved
+	a.frameW, a.frameH = 1280, 720
 	// 80x39 and 120x26 are both 3120 cells, so the snapshot has exactly the
 	// length the current geometry wants -- only the dimensions differ.
 	a.tui.lastW, a.tui.lastH = 120, 52
@@ -132,9 +202,11 @@ func TestScreenshotStaleCanvas(t *testing.T) {
 	if len(a.tui.lastRGB) != 120*52*4 {
 		t.Fatalf("test setup is wrong: %d vs %d", len(a.tui.lastRGB), 120*52*4)
 	}
-	a.screenshot()
-	files, _ := filepath.Glob("scterm-*.ppm")
-	if len(files) != 0 {
+	out := stderrOf(t, func() { waitShot(t, a.takeShot(shotTime)) })
+	if want := "scterm: screenshot: no frame yet\n"; out != want {
+		t.Errorf("notice %q, want %q", out, want)
+	}
+	if files := shotFiles(t); len(files) != 0 {
 		t.Fatalf("wrote a stale screenshot: %v", files)
 	}
 }

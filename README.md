@@ -307,11 +307,16 @@ does not show it after Alt+I, tap the screen once.
 
 ### Screenshots
 
-Alt+S, or the Shot button, saves a screenshot. In the terminal, scterm saves what the terminal
-shows, at the terminal's resolution (one pixel for each half cell), as
-`scterm-YYYYMMDD-HHMMSS.ppm` in the current directory, and the bottom line names the file. In
-the browser, the page downloads the picture at the stream's resolution as
-`scterm-YYYYMMDD-HHMMSS.png`.
+Alt+S, or the Shot button, saves a screenshot: the device's picture at the stream's resolution
+(the size the device sends, which `--max-size` limits), as `scterm-YYYYMMDD-HHMMSS.png`. In the
+browser, the page downloads it. In the terminal, scterm saves it in the current directory,
+without the bars around the picture, and the bottom line names the file. A second screenshot in
+the same second is named `scterm-YYYYMMDD-HHMMSS-2.png`, the next one `-3`, and so on. In the
+terminal, a press while a screenshot is still being saved takes no new one. When the device
+sends no new frames, as when its screen does not change or is off, scterm saves the last frame
+it received. If scterm cannot get the frame within a second, it saves what the terminal shows
+instead, at the terminal's resolution (one pixel for each half cell), and the bottom line says
+so.
 
 ### Sound on this computer
 
@@ -650,7 +655,7 @@ See [Help and exit status](#help-and-exit-status).
 | `~/.config/scterm/identity.pem` | This computer's identity for peer mode: key and certificate |
 | `~/.config/scterm/peers.json` | The paired devices |
 | `~/.cache/scterm/chromium/` | The private browser profile of `--window` |
-| `scterm-YYYYMMDD-HHMMSS.ppm` | Terminal screenshots, in the current directory |
+| `scterm-YYYYMMDD-HHMMSS.png` | Terminal screenshots, in the current directory |
 | `/data/local/tmp/scrcpy-server.jar` | On the device: the server, copied there at each start |
 
 `SCTERM_HOME` replaces `~/.config/scterm`. `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` replace

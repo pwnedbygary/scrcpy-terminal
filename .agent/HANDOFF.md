@@ -7,6 +7,194 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 35: terminal screenshots at the stream's resolution)
+
+- Behaviour: Alt+S, the Shot button and the menu row save the device's
+  picture at the stream's resolution as a PNG,
+  `scterm-YYYYMMDD-HHMMSS.png` in the current directory, as the browser
+  does. A taken name gets `-2`, `-3` and so on (`O_EXCL`: a file is never
+  replaced). The run loop asks the video goroutine, which owns the
+  decoder (`requestShot`, `stream.go`). That goroutine scales the frame
+  its decoder holds, at the frame's own size, into a fresh buffer
+  (`answerShots`). The PNG is encoded at the default level and written on
+  a goroutine of its own (`saveShot`, `writeShotPNG`).
+- A still screen sends no frames: AOSP repeats the last frame at most 10
+  times, 100 ms apart (`GraphicBufferSource`, `kRepeatLastFrameCount`),
+  and the MediaFormat docs say "(once)". So the request also sets a past
+  read deadline on the video socket. The read returns; the video
+  goroutine clears the deadline, then answers from the decoded frame, and
+  reads on (`shotReader`; crypto/tls keeps a timed-out read usable, which
+  a scratch test checked). Cleared after the answer, the deadline of a
+  request made meanwhile could be cleared too, and that request would
+  wait for the next frame. Requests are also answered after each scaled
+  frame. If no answer comes within `shotWait` (1 s), the canvas shown at
+  the press is saved instead, cut to the picture (`fitPicture`, taken out
+  of `updateGeometry`). A shot still waiting when the video stream ends,
+  or answered after the terminal UI ended, is dropped silently, and no
+  goroutine is left. The brief assumed that a still screen keeps sending
+  frames; the builder found that it does not and added the wake, which
+  was kept: without it, most shots of a still screen would wait 1 s and
+  save the terminal-sized picture.
+- Messages: `scterm: saved FILE (WxH)`. The fallback adds "at the
+  terminal's size, because no frame came from the device in time".
+  `scterm: screenshot: no frame yet` stays (no frame decoded, or no
+  usable canvas at the end of the wait), as does
+  `scterm: screenshot: ERROR`. A session with no video socket
+  (`--video=false`, or a peer without video) says
+  `scterm: screenshot: the video is off`.
+- Tests: `screenshot_test.go` runs the real decoder on
+  `testdata/shot-1280x2800.h264` (1167 bytes; the ffmpeg command is in
+  the file and makes the same bytes with FFmpeg 9.0.2 and x264
+  0.165.r3222). It covers a still screen, the next frame while the saver
+  waits (the decoder reads on, no file yet), the canvas fallback pixel for
+  pixel, video off, the stream ending with a shot waiting, a quit before
+  the frame, two shots in one second, and the frame's own size against
+  the session packet. Of `keybind_test.go`'s five screenshot tests, only
+  `TestScreenshotWritesPNG` (was `TestScreenshotWritesPPM`) and
+  `TestScreenshotKeepsColours` decode a PNG; `TestScreenshotHeadless`,
+  `TestScreenshotNoFrameYet` and `TestScreenshotStaleCanvas` check that
+  no file is written and what the notice says.
+  `TestScreenshotNameTaken` and `TestDumpFrameKeepsColours` are new.
+- Verification, in the builder's tree (`184e8e4`: `141cd3e` plus parts 29,
+  30, 31 and 32 as they were then), with `iso.env`: `gofmt -l` clean, `go
+  vet ./...`, `go build`. `go test -count=1 ./...`: 412 pass, 3 skip, 0
+  fail across packages (root 385/1; the base had 402/3, root 375/1).
+  `-race -count=3`: the screenshot, restore, mnemonic and fuzz tests 57/57,
+  and `TestDisplaySink|TestAppFrameSink|TestDump|TestScreenshot` 30/30.
+  The 15 screenshot tests: `-count=20` 300/300, `-race -count=5` 75/75.
+  The docs checker reports 0 problems. On the base files (overlay plus a
+  shim), 10 of the 15 fail and the 5 that pass are unchanged behaviour.
+  Each of ten mutations fails a test: no full-size scale, PNG on the video
+  goroutine, no suffix, no fallback, a request left blocking, no wake, the
+  session size, no drop after a quit, a red/blue swap, an uncropped
+  canvas. A 1280x2800 PNG takes 74 ms (screen-like) or 241 ms (noise) on
+  a 7800X3D. A shot costs the video goroutine about 1 ms.
+- Taken into the worktree: the code, test and fixture files as built;
+  README.md and docs/ARCHITECTURE.md merged three ways onto parts 33 and
+  34's lines (each merge added exactly this part's lines).
+- Verification, snapshot (`/tmp/opencode/review-35`, on part 34's
+  snapshot), with `iso.env`: gofmt, vet, the build and `git diff --check`;
+  `go test ./...` (427 top-level tests pass and 3 skip); `-race -count=3`
+  on 19 tests: TestScreenshot Headless, NoFrameYet, WritesPNG,
+  KeepsColours, NameTaken and StaleCanvas; TestDumpFrameKeepsColours;
+  round 1's eight TestShot tests; TestDumpAudioWritesThePacketsAsSent,
+  TestInputFuzz, TestMnemonicLocalOps and
+  TestRestoreWhileAScreenshotIsTaken (the pattern named TestDisplaySink
+  and TestAppFrameSink exactly, which match no test; the reviewer ran
+  TestDisplaySinkIsWiredForEveryMode and TestAppFrameSinkNeverBlocks with
+  `-race -count=3`: 6 of 6 pass); the 15 screenshot and dump tests (11
+  new, 4 changed) 20
+  times and 5 times under `-race`; with the base's `stream.go`, `input.go`
+  and `util.go` and the builder's shim laid over, 10 of the 15 fail and
+  the same 5 as in the builder's run pass; the docs checker finds 33 links
+  and no problem in README.md and docs/ARCHITECTURE.md, and the docs tests
+  pass; and the whole module, run in a bwrap sandbox set up like a desktop
+  session (decoy sockets for the sound server, Wayland, D-Bus and X, adb's
+  port 5037, and the real `pactl` on PATH), connects to none of them.
+- Left alone: `--dump-frames` (PPM), the browser's screenshot, and Alt+S
+  in `--web`/`--window` (no TUI, so nothing happens). No change to
+  `app.go`, `decode.go` or `native.c`. Moving only the PNG encoding onto
+  the video goroutine, with the file written elsewhere, would pass every
+  test, and a process that exits during the PNG write can leave a partial
+  file.
+- Not run: the real phone, adb and a real terminal. The still-screen
+  premise comes from AOSP source, not from the phone. Over TLS the tree
+  tests only TLS 1.2's data returned with the timeout; the reviewer's
+  probes, not in the tree, checked wakes mid-record over TLS 1.2 and 1.3.
+- Review round 1 (`ses_ea21e81fbffeCdOd3ITBVnH512`, snapshot
+  `/tmp/opencode/review-35`): NEEDS CHANGES. The code held under every
+  probe: TCP mid-packet, TLS 1.2 and 1.3 mid-record, TLS 1.2 data that
+  comes with the timeout, about 9,000 staggered requests with none
+  lost, no deadline left set, the drops at session end and after a
+  quit, `O_EXCL` names and the fallback crop. LOW 1: three sentences of
+  this entry were untrue (corrected above). LOW 2: the wake's two
+  orderings and the TLS 1.2 data were not tested in the tree. The wake
+  before the clear (MA) lost 1 to 7 of 1280 requests in 4 of 5 probe
+  runs yet passed the suite, as did the deadline set before the request
+  is registered (MB) and data dropped when it comes with the timeout
+  (MD). LOW 3: Alt+S held down had no memory bound, one shot (30 MB
+  allocated) per key repeat; 30 presses 33 ms apart peaked at about 74
+  MB (flat picture), 492 MB (noise, 16 threads) and 847 MB (noise, 4
+  threads) of extra heap.
+- Round 2: one shot at a time. A press while a shot is in flight, from
+  its press until its file is written or it is dropped, takes no shot
+  of its own: `takeShot` returns that shot's channel, writes no file
+  and posts no notice, so the shot's own "saved" line is the only one.
+  The run loop keeps the last shot's channel in `streamState.shotDone`;
+  the shot's goroutine closes it, and the next press then takes a new
+  shot. The check comes before the UI lock, so a joined press costs
+  nothing. A session with no video socket now says `scterm: screenshot:
+  the video is off`. Comments: `requestShot` must register the request
+  before it sets the deadline; `shotReader` takes every read-deadline
+  expiry on the video socket for a wake, so a liveness deadline there
+  would be silently defeated; why the clear comes before the wake. New
+  tests: `TestShotPressesJoinTheShotInFlight` (presses while the shot
+  waits for its frame and while it waits to be saved: one file, one
+  notice; a press after it: a second file), and in
+  `screenshot_wake_test.go` `TestShotRequestsStaggeredWhileIdle` (60
+  pairs of requests 0 to 1.5 ms apart while the device is idle; MA),
+  `TestShotRegisteredBeforeItsDeadline` (the request is held once its
+  deadline is set, until the wake has looked and read again; MB,
+  deterministic) and `TestShotWakeKeepsTheDataThatCameWithIt` (TLS 1.2
+  on `net.Pipe`: the last record and two bytes of a close_notify in one
+  write; MD, deterministic). `TestShotsInTheSameSecond` takes its
+  second shot once the first is written (still `-2`), and
+  `TestShotWithTheVideoOff` expects the new notice. README.md and
+  docs/ARCHITECTURE.md say that a press while a shot is being taken or
+  saved takes none.
+- Verification, round 2 (builder's tree `de417ce`: `9598a59` plus parts
+  33, 34 and 35 round 1; Go 1.27.1, `iso.env`, bwrap with no network):
+  `gofmt -l` clean, `go vet ./...`, `go build`, `git diff --check`.
+  `go test -count=1 -v ./...`: 437 pass, 3 skip, 0 fail (root 409/1,
+  internal/release 5, peer 23/2; `de417ce` gave 433/3). `-race
+  -count=3`: 111 of 111 on 37 tests, by name: TestScreenshot Headless,
+  NoFrameYet, WritesPNG, KeepsColours, NameTaken and StaleCanvas;
+  TestShot OfAStillScreen, WaitsForTheNextFrame, FallsBackToTheCanvas,
+  WithTheVideoOff, DroppedWhenTheSessionEnds,
+  DroppedAfterTheTerminalIsGivenBack, PressesJoinTheShotInFlight,
+  IsTheFramesOwnSize, RequestsStaggeredWhileIdle,
+  RegisteredBeforeItsDeadline and WakeKeepsTheDataThatCameWithIt;
+  TestShotsInTheSameSecond; TestRestore EndsAnUnfinishedFrame,
+  WaitsForTheFrameBeingWritten, TakesAFreeLockAtOnce, LetsGoOfALateLock,
+  WhileThePainterRuns and WhileAScreenshotIsTaken; TestMnemonic KeyWire,
+  UppercaseIsTheSameChord, ActionWire, LocalOps, MenuOpensNotMenuKey,
+  OpsMatchTheBrowser and EntriesAreDispatchable; TestInputFuzz,
+  TestInputFuzzSplitReads, TestDumpFrameKeepsColours,
+  TestDumpAudioWritesThePacketsAsSent,
+  TestDisplaySinkIsWiredForEveryMode and TestAppFrameSinkNeverBlocks.
+  The 19 screenshot tests: `-count=20` 380 of 380, `-race -count=5` 95
+  of 95. The six new and changed tests: `-count=20` 120 of 120, `-race
+  -count=5` 30 of 30, `-cpu=1,2,4 -count=5` 90 of 90; under `-race` the
+  three wake tests take at most 0.31 s, the coalescing test 3.4 s and
+  `TestShotsInTheSameSecond` 4.2 s (a 1280x2800 PNG takes 1.5 to 2 s
+  under `-race`). With round 1's `input.go`, `stream.go` and `util.go`
+  laid over, 2 of the 19 fail (`TestShotPressesJoinTheShotInFlight`,
+  `TestShotWithTheVideoOff`); round 1's tests on round 2's code fail 2
+  of 15 (`TestShotsInTheSameSecond`, `TestShotWithTheVideoOff`).
+  Mutants, by overlay: all 17 caught. Round 1's ten, with the same
+  edits, each fail a test. MA fails the stress test in 20 of 20 runs
+  and 10 of 10 under `-race`, by pair 4 of 60; MB fails the held-request
+  test 20 of 20 and 10 of 10; MB with 1 ms between deadline and
+  registration fails 5 tests; MD fails the TLS test 20 of 20 and 10 of
+  10; no coalescing, and joining only while the answer is pending, fail
+  `TestShotPressesJoinTheShotInFlight`; the old video-off notice fails
+  `TestShotWithTheVideoOff`. Held Alt+S, the review's 30 presses 33 ms
+  apart at 1280x2800 made through `takeShot` (a stand-in answers as the
+  video goroutine does), peak extra heap over three runs: round 1 flat
+  104 MB, noise 845 to 950 MB (16 threads) and 1098 to 1288 MB (4
+  threads), 30 files each; round 2 flat 60 to 74 MB (18 to 22 files),
+  noise 147 MB at either thread count (4 files). One noise shot alone
+  peaks at 61 to 72 MB, and with `GOGC=25` the round 2 burst peaks at 76
+  to 90 MB: what is above one shot is garbage not yet collected. The
+  reviewer's probes pass on round 2 (640 staggered requests, none lost).
+- Round 2 taken into the worktree, where part 36 had been taken in
+  already: `input.go`, `screenshot_test.go` and the new
+  `screenshot_wake_test.go` as built; `stream.go`, README.md and
+  docs/ARCHITECTURE.md merged three ways (`git merge-file`), each adding
+  exactly round 2's changed lines. The worktree then passed
+  `go test ./...` (443 pass, 3 skip) with `iso.env` in bwrap, and no
+  stray PNG was left in it.
+
 ## Update (2026-10-21: QoL overhaul, part 34: the web port is checked before the device)
 
 - With `--web` or `--window`, also with `--peer`, main now listens on the

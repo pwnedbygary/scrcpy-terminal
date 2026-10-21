@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"slices"
@@ -81,6 +85,45 @@ func writePPMFile(path string, bgr0 []byte, w, h int) error {
 		out = append(out, p[2], p[1], p[0])
 	}
 	return os.WriteFile(path, out, 0o666)
+}
+
+// writeShotPNG writes a BGR0 picture (see writePPMFile) as a PNG named for at,
+// scterm-YYYYMMDD-HHMMSS.png, in the current directory, and returns the name.
+// A name that is taken gets -2, -3 and so on, so two screenshots in the same
+// second both stay.
+func writeShotPNG(at time.Time, bgr0 []byte, w, h int) (string, error) {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for i := 0; i < w*h; i++ {
+		p, q := bgr0[i*4:i*4+3], img.Pix[i*4:i*4+4]
+		q[0], q[1], q[2], q[3] = p[2], p[1], p[0], 255
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		return "", err
+	}
+	stamp := at.Format("20060102-150405")
+	for n := 1; ; n++ {
+		name := "scterm-" + stamp + ".png"
+		if n > 1 {
+			name = fmt.Sprintf("scterm-%s-%d.png", stamp, n)
+		}
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+		if errors.Is(err, fs.ErrExist) && n < 1000 {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, err = f.Write(out.Bytes())
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			os.Remove(name)
+			return "", err
+		}
+		return name, nil
+	}
 }
 
 // dumpPPM writes a canvas as a binary PPM (verification tool).
