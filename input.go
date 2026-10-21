@@ -48,7 +48,9 @@ func (a *app) inputLoop() {
 // between pasteStart and pasteEnd (shellInit turns the mode on), so a paste is
 // one event. It goes to the device as one paste, and nothing in it is read as
 // a key or a shortcut, except Ctrl+C (raw mode reads it as a byte), which
-// cancels it: the way out of a paste whose end marker never comes.
+// cancels it: the way out of a paste whose end marker never comes. What
+// follows the Ctrl+C is dropped only until input pauses (cancelQuiet), so the
+// rest of a paste that pauses that long is read as keys.
 // ---------------------------------------------------------------------------
 
 const (
@@ -653,7 +655,7 @@ func (a *app) toggleGrab() {
 // toggleLocalMute mutes the local audio stream, or brings back the volume it
 // had before the mute (Alt+M).
 func (a *app) toggleLocalMute() {
-	if a.audio == nil || a.audio.err != nil {
+	if a.audio == nil || a.audio.failure() != nil {
 		return // no sink to mute
 	}
 	a.audio.toggleMute()
@@ -662,7 +664,7 @@ func (a *app) toggleLocalMute() {
 
 // adjustLocalVolume changes local playback volume (Alt+- / Alt+=).
 func (a *app) adjustLocalVolume(delta int) {
-	if a.audio == nil || a.audio.err != nil {
+	if a.audio == nil || a.audio.failure() != nil {
 		return // no sink to adjust
 	}
 	a.audio.setGain(a.audio.gainPercent() + delta)

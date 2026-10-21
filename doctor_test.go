@@ -177,24 +177,31 @@ func TestDoctorChecksForAVX2(t *testing.T) {
 
 // TestDoctorWithoutADB: no adb on PATH fails with the hint scterm itself gives,
 // and so does no device; with a paired device, peer mode needs neither, so
-// both are warnings.
+// both are warnings. The advice gives --peer as it can be typed: --peer NAME,
+// and with one paired device --peer=, which takes it.
 func TestDoctorWithoutADB(t *testing.T) {
 	bin := doctorHost(t)
-	const hint = "install Android platform-tools (often packaged as android-tools or adb), or use --peer to reach the scterm Android app without it"
-	for paired, status := range map[bool]string{false: "FAIL", true: "warn"} {
-		want := status + "  adb     not found on PATH\n              " + hint + "\n"
+	const hint = "install Android platform-tools (often packaged as android-tools or adb), or use --peer NAME to reach the scterm Android app without it"
+	if !strings.HasSuffix(errADBNotFound.Error(), ": "+hint) {
+		t.Errorf("scterm's own error %q does not end with the hint", errADBNotFound)
+	}
+	for paired, want := range map[bool]string{
+		false: "FAIL  adb     not found on PATH\n              " + hint + "\n",
+		true: "warn  adb     not found on PATH\n" +
+			"              install Android platform-tools (often packaged as android-tools or adb), or use --peer= to reach the scterm Android app without it\n",
+	} {
 		if got := doctorText(adbAndDevices(paired)); got != want {
 			t.Errorf("paired=%v: printed\n%s\nwant\n%s", paired, got, want)
 		}
-		if !strings.HasSuffix(errADBNotFound.Error(), ": "+hint) {
-			t.Errorf("scterm's own error %q does not end with the hint", errADBNotFound)
-		}
 	}
 	fakeProgram(t, bin, "adb", adbScript(devicesHeader+"\n", nil))
-	for paired, status := range map[bool]string{false: "FAIL", true: "warn"} {
-		want := "ok    adb     " + bin + "/adb: Android Debug Bridge version 1.0.41, Version 35.0.2-12147458\n" +
-			status + "  device  no device found\n" +
-			"              connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer for the scterm Android app\n"
+	for paired, want := range map[bool]string{
+		false: "FAIL  device  no device found\n" +
+			"              connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer NAME for the scterm Android app\n",
+		true: "warn  device  no device found\n" +
+			"              connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer= for the scterm Android app\n",
+	} {
+		want = "ok    adb     " + bin + "/adb: Android Debug Bridge version 1.0.41, Version 35.0.2-12147458\n" + want
 		if got := doctorText(adbAndDevices(paired)); got != want {
 			t.Errorf("no device, paired=%v: printed\n%s\nwant\n%s", paired, got, want)
 		}
@@ -239,7 +246,7 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 			"FAIL  device  R5CT is detached from adb\n              attach it again with 'adb -s R5CT attach'\n"},
 		{"none", devicesHeader + "\n", "", nil,
 			"FAIL  device  no device found\n" +
-				"              connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer for the scterm Android app\n"},
+				"              connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer NAME for the scterm Android app\n"},
 		{"two ready", devicesHeader + "GT9" + tab + "R5CT" + pixel, "", map[string]string{"GT9": "13 33", "R5CT": "14 34"},
 			"ok    device  GT9 (Tab_S9) is ready: Android 13 (SDK 33); sound and playback capture work\n" + readyPixel + "\n" +
 				"warn  device  2 devices are connected (GT9, R5CT)\n" +
@@ -491,7 +498,8 @@ esac
 // reached or started, and one that does not answer each fail, with the cause
 // adb gives; the last within the time limit, without waiting for what it left
 // running, which holds its output open. With a paired device, peer mode needs
-// no adb, so each is a warning, whose advice offers --peer as well.
+// no adb, so each is a warning, whose advice offers --peer as well, as it is
+// typed for the only paired device.
 func TestDoctorWhenADBFails(t *testing.T) {
 	if _, err := os.Stat("/bin/sleep"); err != nil {
 		t.Skip("no /bin/sleep for an adb that hangs")
@@ -535,7 +543,7 @@ func TestDoctorWhenADBFails(t *testing.T) {
 			status, peer string
 		}{
 			{false, "FAIL", ""},
-			{true, "warn", ", or use --peer to reach the scterm Android app without it"},
+			{true, "warn", ", or use --peer= to reach the scterm Android app without it"},
 		} {
 			bin := doctorHost(t)
 			doctorTimeout = 200 * time.Millisecond
@@ -840,7 +848,9 @@ func TestDoctorReadsWebHosts(t *testing.T) {
 // read by other users too (scterm writes it with mode 0600), and how many
 // devices are paired, without creating anything or connecting anywhere. A
 // file that cannot be read for its permissions gets them fixed, which keeps
-// the pairings; a damaged one is moved aside.
+// the pairings; a damaged one is moved aside. The count runDoctor gets is of
+// the paired devices peer mode can reach: none without an identity it can
+// load, and none whose identity in peers.json does not parse.
 func TestDoctorChecksThePairings(t *testing.T) {
 	const pairTodo = "              scterm pair pairs with a device that runs the scterm app, to reach it without adb\n"
 	identity := func(t *testing.T, home string) string {
@@ -875,6 +885,12 @@ func TestDoctorChecksThePairings(t *testing.T) {
 			}
 		}
 	}
+	pairedWith := func(t *testing.T, home, fingerprint, name string) {
+		rec := peer.Record{Fingerprint: fingerprint, Name: name, Host: "192.0.2.1", Port: 27300, Grants: []string{"view"}, PairedAtMs: 1}
+		if err := peer.OpenStore(home).Put(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, tc := range []struct {
 		name  string
 		setup func(t *testing.T, home string) (fingerprint string)
@@ -898,17 +914,52 @@ func TestDoctorChecksThePairings(t *testing.T) {
 		}, "ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n" +
 			"ok    peers   2 paired devices: Pixel 8, Tab[2J S9\n" +
 			"              scterm peers --check tests whether each one is reachable\n", 2},
+		// Without an identity it can load, peer mode reaches none of them.
 		{"paired, the identity gone", func(t *testing.T, home string) string { paired(t, home, "Pixel 8"); return "" },
 			"FAIL  peers   no identity in <home> (SCTERM_HOME), so the paired devices no longer know this computer\n" +
 				"              pair each device again with scterm pair\n" +
 				"ok    peers   1 paired device: Pixel 8\n" +
-				"              scterm peers --check tests whether it is reachable\n", 1},
+				"              scterm peers --check tests whether it is reachable\n", 0},
 		{"a damaged identity", func(t *testing.T, home string) string {
 			os.WriteFile(filepath.Join(home, "identity.pem"), []byte("not a key"), 0o600)
 			return ""
 		}, "FAIL  peers   <home>/identity.pem: tls: failed to find any PEM data in certificate input\n" +
 			"              move <home>/identity.pem aside, then pair each device again (scterm pair makes a new identity)\n" +
 			"ok    peers   no paired devices\n" + pairTodo, 0},
+		{"paired, the identity damaged", func(t *testing.T, home string) string {
+			paired(t, home, "Pixel 8")
+			os.WriteFile(filepath.Join(home, "identity.pem"), []byte("not a key"), 0o600)
+			return ""
+		}, "FAIL  peers   <home>/identity.pem: tls: failed to find any PEM data in certificate input\n" +
+			"              move <home>/identity.pem aside, then pair each device again (scterm pair makes a new identity)\n" +
+			"ok    peers   1 paired device: Pixel 8\n" +
+			"              scterm peers --check tests whether it is reachable\n", 0},
+		// A pairing whose identity does not parse is left out by scterm peers
+		// and --peer, so it is not counted, and says so.
+		{"a pairing that does not parse", func(t *testing.T, home string) string {
+			pairedWith(t, home, "not-a-fingerprint", "Pixel 8")
+			return identity(t, home)
+		}, "ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n" +
+			"ok    peers   no paired devices\n" + pairTodo +
+			"warn  peers   1 pairing in <home>/peers.json has an identity that does not parse, so peer mode leaves it out: Pixel 8\n" +
+			"              pair that device again with scterm pair\n", 0},
+		{"one of two pairings does not parse", func(t *testing.T, home string) string {
+			paired(t, home, "Tab S9")
+			pairedWith(t, home, fmt.Sprintf("%063x", 2), "Pixel 8")
+			return identity(t, home)
+		}, "ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n" +
+			"ok    peers   1 paired device: Tab S9\n" +
+			"              scterm peers --check tests whether it is reachable\n" +
+			"warn  peers   1 pairing in <home>/peers.json has an identity that does not parse, so peer mode leaves it out: Pixel 8\n" +
+			"              pair that device again with scterm pair\n", 1},
+		{"two pairings do not parse", func(t *testing.T, home string) string {
+			pairedWith(t, home, "", "Pixel 8")
+			pairedWith(t, home, fmt.Sprintf("%064x", 3)+"0", "Tab S9")
+			return identity(t, home)
+		}, "ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n" +
+			"ok    peers   no paired devices\n" + pairTodo +
+			"warn  peers   2 pairings in <home>/peers.json have identities that do not parse, so peer mode leaves them out: Pixel 8, Tab S9\n" +
+			"              pair those devices again with scterm pair\n", 0},
 		{"damaged pairings", func(t *testing.T, home string) string {
 			os.WriteFile(filepath.Join(home, "peers.json"), []byte("[{"), 0o600)
 			return ""
@@ -933,7 +984,7 @@ func TestDoctorChecksThePairings(t *testing.T) {
 				t.Fatal(err)
 			}
 			return ""
-		}, "FAIL  peers   stat <home>/identity.pem: permission denied\n" +
+		}, "FAIL  peers   open <home>/identity.pem: permission denied\n" +
 			"              let your user read it again (as their owner: chmod 700 <home>; chmod 600 <home>/identity.pem); that keeps the pairings\n" +
 			"FAIL  peers   open <home>/peers.json: permission denied\n" +
 			"              let your user read it again (as their owner: chmod 700 <home>; chmod 600 <home>/peers.json); that keeps the pairings\n", 0},
@@ -1041,7 +1092,7 @@ func TestDoctorOnAHealthyAndAnUnhealthyComputer(t *testing.T) {
 	}
 	want = build +
 		"FAIL  adb     not found on PATH\n" +
-		"              install Android platform-tools (often packaged as android-tools or adb), or use --peer to reach the scterm Android app without it\n" +
+		"              install Android platform-tools (often packaged as android-tools or adb), or use --peer NAME to reach the scterm Android app without it\n" +
 		"warn  sound   pactl reaches no sound server (Connection failure: Connection refused)\n" +
 		"              start PulseAudio, or PipeWire with its PulseAudio service (pipewire-pulse); the browser display (--web, --window) plays the sound without it\n" +
 		"warn  window  no Chromium-family browser or Firefox found\n" +
@@ -1064,46 +1115,126 @@ func TestDoctorOnAHealthyAndAnUnhealthyComputer(t *testing.T) {
 
 // TestDoctorOnAPeerOnlyComputer: a computer that reaches its device through
 // the scterm app passes without adb, and with an adb that lists no device:
-// each is a warning there.
+// each is a warning there, whose advice gives --peer as it can be typed:
+// --peer= for the only paired device, --peer NAME for one of several. Only a
+// pairing peer mode can use counts: with no identity, a damaged one, or a
+// pairing whose identity does not parse, both fail. And what adb does list is
+// what plain scterm would use, so a pairing changes nothing about it: an
+// offline device, and an ANDROID_SERIAL that names no device or several,
+// still fail.
 func TestDoctorOnAPeerOnlyComputer(t *testing.T) {
-	for _, tc := range []struct{ name, adb, want string }{
-		{"no adb", "", "warn  adb     not found on PATH\n" +
-			"              install Android platform-tools (often packaged as android-tools or adb), or use --peer to reach the scterm Android app without it\n"},
-		{"an adb that lists no device", adbScript(devicesHeader+"\n", nil),
-			"ok    adb     <bin>/adb: Android Debug Bridge version 1.0.41, Version 35.0.2-12147458\n" +
-				"warn  device  no device found\n" +
-				"              connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer for the scterm Android app\n"},
+	const (
+		adbOK      = "ok    adb     <bin>/adb: Android Debug Bridge version 1.0.41, Version 35.0.2-12147458\n"
+		pixel      = "\tdevice usb:1-1 product:shiba model:Pixel_8 device:shiba transport_id:1\n"
+		pixelReady = " (Pixel_8) is ready: Android 14 (SDK 34); sound and playback capture work\n"
+		oneListed  = "ok    peers   1 paired device: Pixel 8\n              scterm peers --check tests whether it is reachable\n"
+		identityOK = "ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n"
+	)
+	pair := func(t *testing.T, home, fingerprint, name string) {
+		if err := peer.OpenStore(home).Put(peer.Record{Fingerprint: fingerprint, Name: name, Host: "192.0.2.1", Port: 27300, PairedAtMs: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity := func(t *testing.T, home string) string {
+		id, err := peer.LoadOrCreateIdentity(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id.Fingerprint.Short()
+	}
+	onePaired := func(t *testing.T, home string) string {
+		pair(t, home, fmt.Sprintf("%064x", 1), "Pixel 8")
+		return identity(t, home)
+	}
+	for _, tc := range []struct {
+		name, adb, serial string
+		pairings          func(t *testing.T, home string) (fingerprint string)
+		want, peers       string
+		failed            bool
+	}{
+		{"no adb", "", "", onePaired,
+			"warn  adb     not found on PATH\n" +
+				"              install Android platform-tools (often packaged as android-tools or adb), or use --peer= to reach the scterm Android app without it\n",
+			identityOK + oneListed, false},
+		{"an adb that lists no device", adbScript(devicesHeader+"\n", nil), "", onePaired,
+			adbOK + "warn  device  no device found\n" +
+				"              connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer= for the scterm Android app\n",
+			identityOK + oneListed, false},
+		{"no adb, two paired", "", "", func(t *testing.T, home string) string {
+			pair(t, home, fmt.Sprintf("%064x", 1), "Pixel 8")
+			pair(t, home, fmt.Sprintf("%064x", 2), "Tab S9")
+			return identity(t, home)
+		}, "warn  adb     not found on PATH\n" +
+			"              install Android platform-tools (often packaged as android-tools or adb), or use --peer NAME to reach the scterm Android app without it\n",
+			identityOK + "ok    peers   2 paired devices: Pixel 8, Tab S9\n              scterm peers --check tests whether each one is reachable\n", false},
+
+		// Pairings peer mode cannot use.
+		{"no adb, the identity gone", "", "", func(t *testing.T, home string) string {
+			pair(t, home, fmt.Sprintf("%064x", 1), "Pixel 8")
+			return ""
+		}, "FAIL  adb     not found on PATH\n" +
+			"              install Android platform-tools (often packaged as android-tools or adb), or use --peer NAME to reach the scterm Android app without it\n",
+			"FAIL  peers   no identity in <home> (SCTERM_HOME), so the paired devices no longer know this computer\n" +
+				"              pair each device again with scterm pair\n" + oneListed, true},
+		{"no adb, a pairing that does not parse", "", "", func(t *testing.T, home string) string {
+			pair(t, home, "not-a-fingerprint", "Pixel 8")
+			return identity(t, home)
+		}, "FAIL  adb     not found on PATH\n" +
+			"              install Android platform-tools (often packaged as android-tools or adb), or use --peer NAME to reach the scterm Android app without it\n",
+			identityOK + "ok    peers   no paired devices\n" +
+				"              scterm pair pairs with a device that runs the scterm app, to reach it without adb\n" +
+				"warn  peers   1 pairing in <home>/peers.json has an identity that does not parse, so peer mode leaves it out: Pixel 8\n" +
+				"              pair that device again with scterm pair\n", true},
+		{"an adb that lists no device, the identity damaged", adbScript(devicesHeader+"\n", nil), "", func(t *testing.T, home string) string {
+			pair(t, home, fmt.Sprintf("%064x", 1), "Pixel 8")
+			if err := os.WriteFile(filepath.Join(home, "identity.pem"), []byte("not a key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return ""
+		}, adbOK + "FAIL  device  no device found\n" +
+			"              connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer NAME for the scterm Android app\n",
+			"FAIL  peers   <home>/identity.pem: tls: failed to find any PEM data in certificate input\n" +
+				"              move <home>/identity.pem aside, then pair each device again (scterm pair makes a new identity)\n" + oneListed, true},
+
+		// What adb lists, with a pairing.
+		{"an offline device", adbScript(devicesHeader+"R5CT\toffline usb:1-1 transport_id:4\n", nil), "", onePaired,
+			adbOK + "FAIL  device  R5CT is offline\n" +
+				"              unplug and replug it, or restart adb with 'adb kill-server'\n",
+			identityOK + oneListed, true},
+		{"ANDROID_SERIAL names no device", adbScript(devicesHeader+"R5CT"+pixel, map[string]string{"R5CT": "14 34"}), "R5CU", onePaired,
+			adbOK + "ok    device  R5CT" + pixelReady +
+				"FAIL  device  ANDROID_SERIAL is R5CU, which names no device adb lists\n" +
+				"              connect that device, or unset ANDROID_SERIAL, or set it as adb takes it: a serial, a network device's host " +
+				"without its port (tcp: or udp: may come first), a USB path such as usb:1-1, or product:, model: or device: and a name, as adb devices -l shows them\n",
+			identityOK + oneListed, true},
+		{"ANDROID_SERIAL names two devices", adbScript(devicesHeader+"R5CT"+pixel+"R5CU"+pixel, map[string]string{"R5CT": "14 34", "R5CU": "14 34"}), "model:Pixel_8", onePaired,
+			adbOK + "ok    device  R5CT" + pixelReady + "ok    device  R5CU" + pixelReady +
+				"FAIL  device  ANDROID_SERIAL is model:Pixel_8, which names 2 devices (R5CT, R5CU), so adb takes none of them\n" +
+				"              set it to the serial of the one to use\n",
+			identityOK + oneListed, true},
 	} {
 		bin := doctorHost(t)
 		home := os.Getenv("SCTERM_HOME")
 		if tc.adb != "" {
 			fakeProgram(t, bin, "adb", tc.adb)
 		}
+		t.Setenv("ANDROID_SERIAL", tc.serial)
 		fakeProgram(t, bin, "pactl", workingPactl)
 		fakeProgram(t, bin, "chromium", "")
 		makeSocket(t, filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "wayland-0"))
 		t.Setenv("WAYLAND_DISPLAY", "wayland-0")
-		id, err := peer.LoadOrCreateIdentity(home)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := peer.OpenStore(home).Put(peer.Record{Fingerprint: fmt.Sprintf("%064x", 1), Name: "Pixel 8", Host: "192.0.2.1", Port: 27300, PairedAtMs: 1}); err != nil {
-			t.Fatal(err)
-		}
+		fp := tc.pairings(t, home)
 		cfg := defaultConfig()
 		cfg.webPort = freePort(t)
 		want := buildLine() + tc.want +
 			"ok    sound   pactl reaches PulseAudio (on PipeWire 1.4.2); the default output is alsa_output.pci-0000_0c_00.4.analog-stereo\n" +
 			"ok    window  browser <bin>/chromium\n" +
 			"ok    window  display WAYLAND_DISPLAY=wayland-0\n" +
-			"ok    web     port <port> on 127.0.0.1 is free\n" +
-			"ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n" +
-			"ok    peers   1 paired device: Pixel 8\n" +
-			"              scterm peers --check tests whether it is reachable\n"
-		want = strings.NewReplacer("<bin>", bin, "<home>", home, "<fp>", id.Fingerprint.Short(), "<port>", strconv.Itoa(cfg.webPort)).Replace(want)
+			"ok    web     port <port> on 127.0.0.1 is free\n" + tc.peers
+		want = strings.NewReplacer("<bin>", bin, "<home>", home, "<fp>", fp, "<port>", strconv.Itoa(cfg.webPort)).Replace(want)
 		var b strings.Builder
-		if failed := runDoctor(&b, cfg); b.String() != want || failed {
-			t.Errorf("%s: printed\n%s\nfailed=%v; want\n%s", tc.name, b.String(), failed, want)
+		if failed := runDoctor(&b, cfg); b.String() != want || failed != tc.failed {
+			t.Errorf("%s: printed\n%s\nfailed=%v; want\n%s\nfailed=%v", tc.name, b.String(), failed, want, tc.failed)
 		}
 	}
 }

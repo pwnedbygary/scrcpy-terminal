@@ -160,7 +160,12 @@ type audioSink struct {
 	mu   sync.Mutex
 	sink *C.sct_audio_sink
 	gain int32 // q8, 256 = 1.0, derived from pct
-	err  error
+	// err is why the sink cannot play at all, if it cannot: open's error, or
+	// errNoSound. It is set before the sink is shared and never changes after;
+	// a write that fails later, on the playback goroutine, sets writeFailed
+	// instead. Read both through failure.
+	err         error
+	writeFailed atomic.Bool
 
 	// pct is the volume in whole percent, and unmutePct the volume the last
 	// mute replaced. volMu keeps them and gain changing together.
@@ -197,7 +202,20 @@ func noAudioSink() *audioSink {
 // plays reports whether the sink plays the sound on this computer: it
 // opened, has not failed since, and is not kept silent for the browser.
 func (a *audioSink) plays() bool {
-	return a != nil && a.err == nil && !a.silent.Load()
+	return a != nil && a.failure() == nil && !a.silent.Load()
+}
+
+// failure is why the sink does not play: why it never opened, or the write
+// that failed since; nil while it works. The run loop, the status row and the
+// browser ask from other goroutines than the one that writes.
+func (a *audioSink) failure() error {
+	switch {
+	case a.err != nil:
+		return a.err
+	case a.writeFailed.Load():
+		return errPulseLagged{}
+	}
+	return nil
 }
 
 // open connects to PulseAudio and opens the stream on the first server and
@@ -429,10 +447,11 @@ func pulseSocketPath() string {
 }
 
 func (a *audioSink) errString() string {
-	if a.err == nil {
+	err := a.failure()
+	if err == nil {
 		return ""
 	}
-	return fmt.Sprintf("%v (check: pipewire or pulseaudio running? `pactl info`)", a.err)
+	return fmt.Sprintf("%v (check: pipewire or pulseaudio running? `pactl info`)", err)
 }
 
 func errNoAudio() error {
@@ -457,7 +476,7 @@ func cstrOrNil(s string) *C.char {
 
 // writePCM16 feeds interleaved s16 stereo samples to the sink (in place gain).
 func (a *audioSink) writePCM16(pcm []byte) {
-	if a.err != nil {
+	if a.failure() != nil {
 		return
 	}
 	if a.silent.Load() {
@@ -480,7 +499,7 @@ func (a *audioSink) writePCM16(pcm []byte) {
 		return
 	}
 	if C.sct_audio_write(a.sink, (*C.uint8_t)(bytePtr(pcm)), C.int(len(pcm))) != 0 {
-		a.err = errPulseLagged{}
+		a.writeFailed.Store(true)
 		logOnce("scterm: audio sink write failed; audio stopped. Check `pactl list sinks` and your audio server.\n")
 	}
 }

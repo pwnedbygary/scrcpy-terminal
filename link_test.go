@@ -254,16 +254,54 @@ func TestForwardDummyByteWaitIsBounded(t *testing.T) {
 }
 
 // TestForwardDialIsBounded: with nothing on the forwarded port, dialing
-// stops at the connect deadline too.
+// stops at the connect deadline too, and leaves nothing of connect running.
 func TestForwardDialIsBounded(t *testing.T) {
 	shortConnectTimeout(t, 200*time.Millisecond)
 	ln := listenLoopback(t)
 	port := portOf(ln)
 	ln.Close()
 	s := &session{forwardMode: true, forwardPort: port, serverOut: &tailBuffer{max: 4096}, serverDone: make(chan struct{})}
+	before := linkGoroutines()
 	err := connectWithin(t, s, []bool{true, false, true}, 3*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "dial 127.0.0.1:"+strconv.Itoa(int(port))) {
 		t.Fatalf("connect: %v", err)
+	}
+	checkNothingLeftRunning(t, before)
+}
+
+// TestStartErrorsCleanWhatTheServerSaid: the errors that end a start quote the
+// server's last lines, which are the device's text, and main prints them on
+// stderr: each line comes without the escape sequences and control characters
+// in it, a line of nothing else is left out, and clean lines read as before.
+// The note is the same in each error that quotes it: here, a server that
+// stopped, a socket adb reverse never brought, and a dial through adb forward.
+func TestStartErrorsCleanWhatTheServerSaid(t *testing.T) {
+	shortConnectTimeout(t, 100*time.Millisecond)
+	for _, tc := range terminalTricks {
+		out := &tailBuffer{max: 4096}
+		fmt.Fprintf(out, "[server] INFO: Device: %s\n\x1b\a\u009b\n[server] ERROR: %s\n", tc.text, tc.text)
+		note := "; it said:\n  [server] INFO: Device: " + tc.clean + "\n  [server] ERROR: " + tc.clean
+
+		stopped := &session{serverOut: out, serverDone: make(chan struct{})}
+		close(stopped.serverDone)
+		if got, want := stopped.serverStoppedError().Error(), "the scrcpy server on the device stopped before connecting"+note; got != want {
+			t.Errorf("%s: server stopped:\n got %q\nwant %q", tc.name, got, want)
+		}
+
+		reverse := &session{listener: listenLoopback(t), serverOut: out, serverDone: make(chan struct{})}
+		err := connectWithin(t, reverse, []bool{true, false, false}, 3*time.Second)
+		if want := "the device did not connect its video socket within 100ms" + note; err == nil || err.Error() != want {
+			t.Errorf("%s: adb reverse:\n got %q\nwant %q", tc.name, err, want)
+		}
+
+		ln := listenLoopback(t)
+		port := portOf(ln)
+		ln.Close()
+		forward := &session{forwardMode: true, forwardPort: port, serverOut: out, serverDone: make(chan struct{})}
+		err = connectWithin(t, forward, []bool{true, false, false}, 3*time.Second)
+		if dial := fmt.Sprintf("dial 127.0.0.1:%d: ", port); err == nil || !strings.HasPrefix(err.Error(), dial) || !strings.HasSuffix(err.Error(), note) {
+			t.Errorf("%s: adb forward:\n got %q\nwant %q, the dial's error, then %q", tc.name, err, dial, note)
+		}
 	}
 }
 

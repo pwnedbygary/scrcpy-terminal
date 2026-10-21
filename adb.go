@@ -57,7 +57,7 @@ func (a *adbRunner) run(args ...string) ([]byte, error) {
 var errADBNotFound = errors.New("adb not found: " + adbMissingHint)
 
 // adbMissingHint says what to do when adb is not on PATH.
-const adbMissingHint = "install Android platform-tools (often packaged as android-tools or adb), or use --peer to reach the scterm Android app without it"
+const adbMissingHint = "install Android platform-tools (often packaged as android-tools or adb), or use --peer NAME to reach the scterm Android app without it"
 
 // findDevice returns -s, else ANDROID_SERIAL, else the only device adb can use.
 // However the device is named, the session runs adb, so a missing adb is
@@ -132,9 +132,11 @@ func listedDevices(list string) []adbDevice {
 // without a USB path is taken for a network device. adb's libusb backend
 // gives every USB device a USB path (client/usb_libusb_device.cpp, line 311),
 // but its native Linux backend gives one only when it can read the device's
-// sysfs link (client/usb_linux.cpp: none at line 225, set at lines 277-290);
-// a USB device listed without one answers here to its serial with tcp: or
-// udp: before it, which adb refuses.
+// sysfs link (client/usb_linux.cpp: none at line 225, set at lines 277-290).
+// A USB device listed without one answers here as a network device would,
+// where adb takes only its serial: to that serial after tcp: or udp:, and,
+// when the serial reads as a host and a port (ABC:12), to the host alone
+// (ABC).
 func (d adbDevice) matchesTarget(target string) bool {
 	if target == d.serial {
 		return true
@@ -257,7 +259,7 @@ func pickDevice(list string) (string, error) {
 
 // What to do when no device, or more than one, is ready.
 const (
-	noDeviceHint     = "connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer for the scterm Android app"
+	noDeviceHint     = "connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer NAME for the scterm Android app"
 	chooseDeviceHint = "choose one with -s SERIAL"
 )
 

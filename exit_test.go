@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"scterm/peer"
 )
 
 // ---------------------------------------------------------------------------
@@ -231,6 +233,48 @@ func TestSessionEndExitsWithItsStatus(t *testing.T) {
 	}
 }
 
+// TestSessionEndCleansThePeersReason: a peer target says why it ended the
+// session, in its own words and under its own name, and endSession prints
+// that on stderr: both come without the escape sequences and control
+// characters in them, and clean text comes as before. A name with nothing
+// left once cleaned is "the device", as the app's own lines say.
+func TestSessionEndCleansThePeersReason(t *testing.T) {
+	me, err := peer.LoadOrCreateIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &peer.Client{Identity: me, Info: peer.ClientInfo{Name: "scterm test", App: "scterm/test"}}
+	// ended is what endSession prints once the target ends, with reason, the
+	// session of the device named name.
+	ended := func(name, reason string) string {
+		target := newTalkingTarget(t, controlWelcome)
+		s, err := client.Connect("127.0.0.1", target.port(), target.id.Fingerprint, peer.StreamRequest{Control: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Start(peer.Events{})
+		t.Cleanup(func() { s.Close(false) })
+		say(t, target.conn(t), peer.Message{Type: peer.TypeBye, Reason: reason})
+		select {
+		case <-s.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%q: the session did not end with the target's bye", name)
+		}
+		return captureStderr(t, func() { endSession(&session{peer: s, deviceName: name}, nil) })
+	}
+	for _, tc := range terminalTricks {
+		out := ended(tc.text, "revoked: "+tc.text)
+		if want := "scterm: " + tc.clean + " ended the session: revoked: " + tc.clean + "\n"; out != want {
+			t.Errorf("%s: stderr %q, want %q", tc.name, out, want)
+		}
+	}
+	for _, name := range []string{"", "\x1b\a", " \u200b\t"} {
+		if out, want := ended(name, "revoked"), "scterm: the device ended the session: revoked\n"; out != want {
+			t.Errorf("name %q: stderr %q, want %q", name, out, want)
+		}
+	}
+}
+
 // TestCommandLineExitStatus: a mistake in the command line is a failure to
 // start, status 1, with its one line on stderr, as are adb missing and a
 // device that has not allowed USB debugging; the help and the version exit 0.
@@ -273,7 +317,7 @@ func TestCommandLineExitStatus(t *testing.T) {
 		{[]string{"doctor", "extra"}, "", 1, "", "scterm: usage: scterm doctor (it takes no arguments)\n"},
 		{[]string{"--web", "doctor"}, "", 1, "", "scterm: \"doctor\" is a command, not a flag value: run it on its own, as scterm doctor\n"},
 		{nil, "", 1, "", "scterm dev\nscterm: adb not found: install Android platform-tools (often packaged as android-tools or adb), " +
-			"or use --peer to reach the scterm Android app without it\n"},
+			"or use --peer NAME to reach the scterm Android app without it\n"},
 		{nil, unauthorized, 1, "", "scterm dev\nscterm: R5CT has not allowed USB debugging from this computer: unlock it, " +
 			"accept the \"Allow USB debugging?\" prompt, and run scterm again\n"},
 		{[]string{"-h"}, "", 0, "scterm - scrcpy in your terminal", ""},
@@ -378,7 +422,7 @@ func TestWebPortIsCheckedBeforeTheDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	noDevice := "scterm dev\nscterm: no device found: connect one with USB debugging turned on " +
-		"(or over Wi-Fi with adb pair and adb connect), or use --peer for the scterm Android app\n"
+		"(or over Wi-Fi with adb pair and adb connect), or use --peer NAME for the scterm Android app\n"
 	if status := childStatus(<-ended); status != 1 || stderr.String() != noDevice {
 		t.Errorf("scterm --web --web-port %s, the port free: status %d, stderr %q; want 1, %q", port, status, stderr.String(), noDevice)
 	}

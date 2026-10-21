@@ -16,7 +16,7 @@ var audioFollowEvery = time.Second
 // PATH nor the environment, which a test that started it puts back when it
 // ends.
 func (a *app) audioFollower() (pactlTool, bool) {
-	if a.audio == nil || a.audio.err != nil {
+	if a.audio == nil || a.audio.failure() != nil {
 		return pactlTool{}, false
 	}
 	if envOr("SCT_AUDIO_DEVICE", "") != "" {

@@ -151,9 +151,15 @@ func main() {
 // while a quit returns for main to return.
 func endSession(sess *session, err error) {
 	// A peer target says why it ended a session (revoked, serving stopped, ...).
+	// The reason and the name are its own text: their control characters are
+	// taken out.
 	if sess.peer != nil {
-		if reason := sess.peer.Reason(); reason != "" && reason != "closed" {
-			fmt.Fprintf(os.Stderr, "scterm: %s ended the session: %s\n", sess.deviceName, reason)
+		if reason := cleanText(sess.peer.Reason()); reason != "" && reason != "closed" {
+			name := cleanText(sess.deviceName)
+			if name == "" {
+				name = "the device"
+			}
+			fmt.Fprintf(os.Stderr, "scterm: %s ended the session: %s\n", name, reason)
 		}
 	}
 	if err != nil {

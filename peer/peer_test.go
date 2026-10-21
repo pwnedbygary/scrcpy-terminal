@@ -202,6 +202,42 @@ func TestIdentityPersists(t *testing.T) {
 	}
 }
 
+// TestLoadIdentityNeverCreatesOne: LoadIdentity reads the identity that
+// LoadOrCreateIdentity keeps, and fails, creating nothing, when there is
+// none (in a directory that is there or not) or it is damaged.
+func TestLoadIdentityNeverCreatesOne(t *testing.T) {
+	empty := t.TempDir()
+	for _, dir := range []string{empty, filepath.Join(empty, "later")} {
+		if id, err := LoadIdentity(dir); id != nil || !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: %v, %v; want no identity and an error that it does not exist", dir, id, err)
+		}
+	}
+	if entries, err := os.ReadDir(empty); err != nil || len(entries) != 0 {
+		t.Errorf("LoadIdentity left %v in the directory (%v)", entries, err)
+	}
+
+	dir := t.TempDir()
+	made, err := LoadOrCreateIdentity(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := LoadIdentity(dir)
+	if err != nil || !read.Fingerprint.Equal(made.Fingerprint) {
+		t.Errorf("read %v, %v; want the identity made in %s", read, err, dir)
+	}
+
+	path := filepath.Join(dir, "identity.pem")
+	if err := os.WriteFile(path, []byte("not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := LoadIdentity(dir); id != nil || err == nil || !strings.HasPrefix(err.Error(), path+": ") {
+		t.Errorf("a damaged identity: %v, %v; want an error that names %s", id, err, path)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "not a key" {
+		t.Errorf("the damaged identity became %q (%v)", data, err)
+	}
+}
+
 func TestStoreFind(t *testing.T) {
 	s := OpenStore(t.TempDir())
 	if _, err := s.Find(""); err == nil {

@@ -62,6 +62,34 @@ func TestMatchesTargetAsADBDoes(t *testing.T) {
 	}
 }
 
+// TestMatchesTargetCannotTellAUSBDeviceWithoutAPath: a USB device listed
+// without a USB path (adb's native Linux backend, when it cannot read the
+// device's sysfs link) answers as a network device would, where adb takes
+// only its serial: to that serial after tcp: or udp:, and, when the serial
+// reads as a host and a port, to the host alone.
+func TestMatchesTargetCannotTellAUSBDeviceWithoutAPath(t *testing.T) {
+	colon := adbDevice{serial: "ABC:12", state: "device"}
+	plain := adbDevice{serial: "R5CT", state: "device"}
+	for _, tc := range []struct {
+		d      adbDevice
+		target string
+		want   bool
+	}{
+		{colon, "ABC:12", true},
+		{colon, "ABC", true},
+		{colon, "tcp:ABC", true},
+		{colon, "udp:ABC:12", true},
+		{colon, "ABC:13", false},
+		{plain, "R5CT", true},
+		{plain, "tcp:R5CT", true},
+		{plain, "R5CT:5555", false},
+	} {
+		if got := tc.d.matchesTarget(tc.target); got != tc.want {
+			t.Errorf("%s answers to %q: %v, want %v", tc.d.serial, tc.target, got, tc.want)
+		}
+	}
+}
+
 // TestParseNetAddressAsLibbaseDoes: network addresses read as
 // android::base::ParseNetAddress reads them (AOSP system/libbase
 // parsenetaddress.cpp, lines 27-79 at 6d19b5c6), the port with sscanf's %d.

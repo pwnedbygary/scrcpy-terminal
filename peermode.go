@@ -263,14 +263,17 @@ func newPeerSession(query string, cfg config) (*session, error) {
 	if cfg.control && canControl {
 		s.control = ps.Control()
 	}
-	name := s.deviceName
+	// The notices below carry the target's own text (its name, the holder of
+	// the lease, a refusal), which stderr and the replay at exit print as it
+	// is: their control characters are taken out.
+	name := cleanText(s.deviceName)
 	ps.Start(peer.Events{
 		Lease: func(state, holder string) {
 			switch {
 			case state == peer.LeaseHeld:
 				noticef("scterm: this computer has control of %s\n", name)
 			case holder != "":
-				noticef("scterm: %s took control of %s; this computer is viewing (--takeover takes it back)\n", holder, name)
+				noticef("scterm: %s took control of %s; this computer is viewing (--takeover takes it back)\n", cleanText(holder), name)
 			}
 		},
 		Error: func(code, message, controlType string) {
@@ -278,7 +281,7 @@ func newPeerSession(query string, cfg config) (*session, error) {
 				logOnce(fmt.Sprintf("scterm: input ignored: another device has control of %s (--takeover takes it)\n", name))
 				return
 			}
-			noticef("scterm: %s refused %s: %s\n", name, controlType, message)
+			noticef("scterm: %s refused %s: %s\n", name, cleanText(controlType), cleanText(message))
 		},
 	})
 	switch {

@@ -7,6 +7,640 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 37: terminal and command-line loose ends)
+
+- Device text no longer reaches the terminal raw in three more places, each
+  through `cleanText`: the server's last lines in start errors
+  (`serverOutputNote`; a line that cleans to nothing is left out), the
+  reason and name in `endSession`'s peer line, and peer notices (the
+  device's name, the lease holder, a refusal's type and words), which stderr
+  and the exit replay printed as they were. Text without control or format
+  characters reads as before (`cleanText` turns a format character, such as
+  a zero-width space or joiner or a soft hyphen, into a space), but it folds
+  a run of spaces into one and drops spaces at either end (see Left alone).
+- The sound sink's error has one accessor, `failure()`. `err` is now only
+  open's error or `errNoSound`, set before the sink is shared; a failed
+  write sets `writeFailed` (atomic) on the playback goroutine. Every read in
+  audio.go, app.go, input.go and audiofollow.go goes through `failure()`.
+  Two reads of `err` stay, race-free but blind to a failed write:
+  web.go:1568 (`sendStatus`, the volume the browser shows), off limits to
+  this part, and webinput.go:114 (the volume its slider sets), kept with it
+  so the two agree: with only webinput.go on `failure()`, a slider move
+  after a failed write would be dropped while the page kept showing the old
+  volume.
+- scterm doctor counts only pairings peer mode can use: none without an
+  identity it can load, and none whose fingerprint does not parse (these
+  get a warning). With no adb and only pairings whose fingerprints do not
+  parse, doctor could exit 0; now its adb line fails and it exits 1. With
+  the identity missing or damaged it already exited 1 on its peers line;
+  there only the adb line went from a warning to a failure. The `--peer`
+  advice is typable: `--peer NAME`, or `--peer=` with one usable pairing.
+  The shared hints changed, so scterm's own "adb not found" and "no device
+  found" errors also say `--peer NAME`.
+- Doctor: paired rows in `TestDoctorOnAPeerOnlyComputer` pin that an
+  offline device and an ANDROID_SERIAL naming no device or two still fail,
+  and `doctorDevices` states the rule. `doctorPeers` reads the identity once
+  with the new `peer.LoadIdentity`, which never creates one (no stat before
+  it, so an unsearchable home says "open ...", not "stat ..."). The
+  `matchesTarget` comment says a USB device listed without a path answers
+  as a network one (ABC:12 answers to ABC); a test pins it.
+- Paste: README and input.go's comment say that after a Ctrl+C, input is
+  dropped up to the paste's end or until the terminal sends nothing for a
+  quarter of a second, so a rest that pauses that long is typed as keys.
+  Reworded, not changed: no bounded wait makes the old sentence true, and a
+  longer one drops the user's own keys after every Ctrl+C (part 27).
+- README: `PULSE_SERVER` and `PULSE_SINK` rows. `readmeFlags` leaves out
+  most of what GitHub shows as code or hides in an HTML comment: it skips
+  fenced code, of backticks or tildes, which only a fence of the same
+  character ends (at least as long, indented three columns at most, with
+  only white space after it, where GitHub takes only spaces and tabs before
+  the line ending); a line indented four columns or more is never a row
+  (outside lists and block quotes, code or more of a paragraph); a line that
+  starts with `<!--` hides itself and the lines after it through the one
+  holding `-->` (to the end if none); a row is split into cells first, as
+  GFM does, and in its first cell only a comment closed in the cell is taken
+  out, while a `<!--` left open or in a code span is plain text (round 3);
+  `<!-->` and `<!--->` are whole comments (round 4). Its doc comment lists
+  ways it still differs from GitHub, which the reference does not use, and
+  what a missed or an extra row does (rounds 4 to 7). The rules this part
+  added have tests, every input checked in md4c and markdown-it-py (rounds 2
+  to 8). Of the mutants of those rules tried in rounds 4 to 8, round 4's own
+  and the ones the reviews of rounds 4 to 7 sent, each fails a README test
+  but one, which cannot change what is read (a tab counted as four columns
+  anywhere, the same at the threshold). Two rules kept from the old reader
+  have tests too: a backtick fence with an info string such as `sh` opens
+  code (round 6), and a comment block hides headings (round 6), the
+  section's `### Flags` included (round 7). The old reader's other rules have
+  none of their own: a name counted once per row, commas between names, a
+  bare dash, a row needing two pipes, and the headings' forms.
+- Tests: `TestForwardDialIsBounded` checks nothing is left running; the
+  default wait for the server's reason is pinned at 0.9 to 2 s, and a
+  reason half a second late is given; a restore behind a lock never let go
+  takes 90 to 300 ms. New: `TestStartErrorsCleanWhatTheServerSaid`,
+  `TestSessionEndCleansThePeersReason`, `TestPeerNoticesAreCleaned` (OSC,
+  CSI, U+009B, bare Esc, clean), `TestSinkThatFailsWhilePlaying` (a zero C
+  sink fails in the C write while other goroutines read),
+  `TestLoadIdentityNeverCreatesOne`, `TestMatchesTargetCannotTell...`, three
+  `TestReadmeFlagsLeaveOut...`, `TestNoSoundWaitsAboutASecondForTheReason`.
+- Intake: merged three ways into the worktree over parts 33 to 36 (the
+  builder's base was `40cb1a0`, with part 36's first round). `README.md`
+  merged cleanly. `app.go` conflicted twice with part 36's second round,
+  which moved the start-up line into `sayAudioDisabled`: that function is
+  kept, and its check is now `a.audio.failure() != nil` (the same as
+  reading `err` there, before any write). The other 20 files are the
+  builder's. At intake the two new README rows, 260 columns wide where no
+  other README line is over 100 (lines 540, 575 and 600 are exactly 100),
+  were cut to a few words each, with the rest of their text in a paragraph
+  under the table.
+- Verification (builder's tree, base `40cb1a0`, iso.env, bwrap, go1.27.1):
+  gofmt, vet, build and `git diff --check` clean. `go test -count=1 -v
+  ./...`: 453 pass, 3 skip, 0 fail (base: 443, 3, 0; +10 new). `-race` on
+  the module: 453, 3, 0, no race. `-race -count=3` on 156 tests of the
+  touched and related files: 468/468. New tests x20: 200/200; under
+  `-race` x5: 50/50. On the base code 14 changed or new tests fail, the
+  sink test reports a race under `-race` in 10 of 10 runs (0 of 10 on this
+  part), and the LoadIdentity test does not build. Mutants: 52 of 52
+  killed; 4 equivalent (reads before playback starts) survive.
+- Not run: a real terminal, adb, phone, peer target or sound server (the
+  failed write is the C check of a zero sink, not pa_simple_write);
+  GitHub's renderer for the README rules; the node suites (web/ untouched).
+- Left alone: the two `err` reads above; a pairing that does not parse
+  cannot be removed with `scterm forget` (`Store.Find` skips it); the
+  250 ms pause after a cancel; `cleanText` folds runs of spaces in clean
+  server lines into one, as the status row already did.
+- Review round 1 (NEEDS CHANGES), resolved in round 2. MEDIUM: two
+  `readmeFlags` rules contradicted rendering (md4c 0.6.0 `md2html
+  --github`, markdown-it-py 4.2.0 CommonMark with tables): a row indented
+  four spaces under a table counted where both show code, and an unclosed
+  `<!--` in a row hid the rest of the file where both show the later
+  `--peer NAME` row (and rows after `<!--` in a code span, or after a
+  comment opened in one row and closed in the next); the doc comment
+  called both CommonMark's. LOW: the backtick fence's info-string rule was
+  untested (its condition replaced by `true` passed). LOW, for a later
+  part: device text still reaches the terminal raw through `Store.Find`,
+  the peer chooser, `scterm pair` and adb's stderr. Four wording nits,
+  corrected above. The snapshot: 455 pass, 3 skip, 0 fail, also under
+  `-race`. Suggestions: read the clock before `device.Write`; "the device"
+  for a name that cleans to nothing; web.go and webinput.go on `failure()`
+  once part 38 is in.
+- Round 2: `readmeFlags` skips an indented line whatever is above it (the
+  `text` state is gone); a line starting with `<!--`, three spaces in at
+  most, hides lines through the one holding `-->`, that line's rest
+  included (`<!-->` closes at once); `uncommented` takes out only comments
+  closed on the line, steps over code spans and leaves an open `<!--` as
+  text. The doc comment states each rule, citing GFM 0.29-gfm and
+  CommonMark 0.31.2 from memory. `TestReadmeFlagsLeaveOutAnUnclosedComment`
+  has six named cases; `TestReadmeFlagsLeaveOutIndentedCode` adds a tab and
+  a paragraph's indented lines; the new
+  `TestReadmeFlagsCountRowsAfterBackticksThatAreNoFence` pins the
+  info-string rule, for tildes too. `endSession` says "the device" for a
+  name that cleans to nothing, as `deviceName()` does (tested with "", Esc
+  BEL, and a space, a zero-width space and a tab).
+  `TestNoSoundWaitsAboutASecondForTheReason` reads the clock before
+  `device.Write`.
+- Verification, round 2 (clone of the worktree with part 38 in, base
+  `462579e`, iso.env, bwrap, go1.27.1): gofmt, vet, build, `git diff
+  --check` clean. `go test -count=1 -v ./...`: 463 pass, 3 skip, 0 fail
+  (base 462, 3, 0; +1 new); `-race`: the same, no race. 17 touched tests
+  `-race -count=3`: 51/51; the 5 changed tests x20: 100/100, `-race` x5:
+  25/25. Each of the 9 `TestReadmeFlags...` inputs gives the test's rows in
+  md4c and in markdown-it-py (round 1's 3 inputs: 4 of 6 renderings
+  differed); README.md has 31 rows in both renderers and both rounds'
+  readers. On round 1's code the comment test fails 4 of 6 cases, the
+  indented test fails, the fence test passes (it pins round 1's rule) and
+  the endSession test fails its 3 nameless names. Mutants: 20 of 20 killed;
+  the clock read put back after the write survives (timing only): with the
+  test's goroutine 150 ms late after `Write`, round 1's test failed 5 of 5
+  (0.856 to 0.867 s), round 2's passed 5 of 5 (1.009 to 1.021 s).
+- Verification, snapshot round 2 (`/tmp/opencode/review-37b`: round 1
+  moved unchanged onto part 36's snapshot review-36e, with round 2's four
+  files laid over it), every Go command inside the bwrap sandbox with
+  `iso.env`: gofmt, vet, the build and `git diff --check`; `go test ./...`
+  (456 top-level tests pass and 3 skip); `-race -count=3` on 90 related
+  tests; the 11 new tests and 2 of the 10 changed ones 20 times and 5
+  times under `-race`. Round 1's `readmeFlags` under round 2's tests fails
+  the comment and indented-code tests (the two fence tests pass), and
+  round 1's `main.go` fails `TestSessionEndCleansThePeersReason`. The docs
+  checker finds 31 relative links and no problem; the whole module, in the
+  desktop-like sandbox, connects to none of its decoy sockets, while the
+  positive control reaches two. Part 38, replayed onto this `exit_test.go`,
+  gives the worktree's.
+- Not run, round 2: GitHub's renderer (cmark-gfm) and the specs' text (no
+  network); a comment holding `--`, where the spec versions disagree (a
+  comment spanning a cell's pipe is round 3's); a real terminal, device,
+  peer target or sound server; the node suites (web/ untouched).
+- Left alone, round 2: a `|` line cut off from its table (after a blank
+  line, indented code or a comment block) still counts, though both
+  renderers show it as text; `readmeFlags` does not track a table's header
+  and delimiter rows, and the README's 31 rows all sit in tables. A comment
+  block right under a row: md4c keeps it in the table, markdown-it-py does
+  not, so no test puts one there.
+- Review round 2 (NEEDS CHANGES): LOW, comments were taken out of a whole
+  row before its split into cells, which GFM does not do (it splits a row
+  at its pipes before it reads the cells), so a flag after a `-->` in a
+  later cell counted and a first-cell flag before such a comment was
+  missed; the reader followed md4c, which reads a comment across the
+  pipes, for comments, but markdown-it-py for code spans. LOW, the rule
+  that a comment block runs through the line holding `-->` was tested only
+  with a closing line that starts with `-->` (a mutant ending the block
+  only there passed). Nits: the README bullet said `readmeFlags` counts
+  only lines GitHub shows as rows, and the first bullet said text without
+  control characters reads as before (format characters turn into a space
+  too); both are corrected above. In its words, round 1's MEDIUM and its
+  untested-rule LOW were found fixed (the cross-pipe case above was its own
+  first LOW, and round 1's LOW for a later part stays open); it found the
+  `endSession` and clock fixes right, and every figure reproduced.
+- Round 3: `uncommented` runs on a row's first cell, after the split, and
+  on a line that is no row, such as a heading; the doc comment says so and
+  names two ways the reader still differs from GitHub (it splits at escaped
+  pipes, and counts a row cut off from its table); rounds 4 and 5 list more.
+  `TestReadmeFlagsEndACommentWithItsCell` pins the cell rule:
+  markdown-it-py shows its rows, md4c does not, as its comment says. The
+  comment block in the "a block" case closes on a line that starts with
+  text (`soon -->`). A row holding `<!--` in a code span, a flag, and a
+  bare `-->` in the same cell pins that the code span opens nothing; round
+  2's row for that closed in a later cell, so with each cell read alone it
+  no longer did (the mutant that stops skipping code spans passed).
+- Verification, round 3 (the worktree, iso.env, bwrap, go1.27.1): gofmt
+  and vet clean; the six README tests pass. Each of the 10
+  `TestReadmeFlags...` inputs gives the test's rows in markdown-it-py
+  4.2.0, and in md4c 0.6.0 all but the cell test's. Mutants (`go test
+  -overlay`): the builder's 17 (four adapted to the cell rule), the
+  review's two survivors and a variant, and a heading that keeps its
+  comment each fail a README test, as do round 1's and round 2's readers
+  under round 3's tests (round 2's fails only the cell test); the review's
+  closing-line mutant passes round 2's tests.
+- Verification, snapshot round 3 (`/tmp/opencode/review-37c`: round 2
+  moved unchanged onto part 36's snapshot review-36f, on part 33 as
+  committed, with round 3's `readme_test.go` laid over it), every Go
+  command inside the bwrap sandbox with `iso.env`: gofmt, vet, the build
+  and `git diff --check`; `go test ./...` (458 top-level tests pass, 3
+  skip, 0 fail); `-race -count=3` on 91 related tests; the 12 new tests
+  and 2 of the 10 changed ones 20 times and 5 times under `-race` (the
+  review ran the other 8 too: 160 of 160, and 40 of 40 under `-race`).
+  Round 1's `readmeFlags` under round 3's tests fails the comment, cell and
+  indented-code tests; round 2's fails only the cell test. The docs checker
+  finds 31 relative links and no problem; the whole module, in the
+  desktop-like sandbox, connects to none of its decoy sockets, while the
+  positive control reaches two.
+- Left alone, round 3: flag tables inside a block quote or a list item
+  whose content starts four or more columns in, and code spans of two
+  backticks, are missed (a flag listed only there fails the test as
+  unlisted); "it is code, or more of a paragraph" holds only at the top
+  level; `opensFence`'s own indentation check is now redundant.
+- Review round 3 (NEEDS CHANGES): LOW, `uncommented` looked for `-->`
+  only after the whole `<!--`, so an inline `<!-->` or `<!--->`, a whole
+  comment in CommonMark 0.31.2 (and no comment in 0.29), hid the text up
+  to a later `-->`: a first-cell flag after one was missed, and a heading
+  holding one was read under a name GitHub does not show. Nits: "two ways"
+  the reader differs from GitHub (the review found others: other HTML
+  blocks, setext headings, rows without a leading pipe, a fence opened on
+  a list item's line); the Review round 2 bullet's "apart from the first
+  LOW"; the snapshot bullets' "new and changed" counts (12 tests are new
+  and 10 changed); and "a list item", which holds only for a nested one.
+  All four are corrected above, the first only in part until round 5. It
+  found round 2's findings resolved, the cell rule agreeing with
+  markdown-it-py on 32 probes but for escaped pipes and the LOW, and every
+  figure reproduced.
+- Round 4: `uncommented` looks for `-->` from two bytes into the `<!--`,
+  so `<!-->` and `<!--->` are whole comments, as the block rule reads them;
+  two rows pin that. The doc comment lists more ways the reader still
+  differs from GitHub, and says what a miss does (round 5 adds to the list
+  and corrects what a miss does). From the review's suggestions, three
+  more rows pin rules no test held: a comment in the section's own heading
+  (a missing TrimSpace), a comment opened in the first cell that closes in
+  the second, and a flag inside a closed comment before an unclosed `<!--`
+  (the first `<!--` must be read first).
+- Verification, round 4 (the worktree, iso.env, bwrap, go1.27.1): gofmt
+  and vet clean; the six README tests pass. Each of the 11
+  `TestReadmeFlags...` inputs gives the test's rows in markdown-it-py, and
+  in md4c all but the cell test's, as its comment says. Mutants: round 3's
+  21, round 4's fix undone, and the review's three (a comment closing in
+  the second cell, no TrimSpace, the last `<!--` first) each fail a README
+  test, as do round 1's, round 2's and round 3's readers under round 4's
+  tests; round 3's reader passes round 3's own tests (the review's gap).
+- Verification, snapshot round 4 (`/tmp/opencode/review-37d`: round 2
+  moved unchanged onto part 36's snapshot review-36f, on part 33 as
+  committed, with round 4's `readme_test.go` laid over it), every Go
+  command inside the bwrap sandbox with `iso.env`: gofmt, vet, the build
+  and `git diff --check`; `go test ./...` (458 top-level tests pass, 3
+  skip, 0 fail); `-race -count=3` on 93 related tests; the 12 new and 10
+  changed tests 20 times and 5 times under `-race`. Round 1's
+  `readmeFlags` under round 4's tests fails the comment, cell and
+  indented-code tests; round 2's fails the comment and cell tests; round
+  3's fails the comment test. The docs checker finds 31 relative links and
+  no problem; the whole module, in the desktop-like sandbox, connects to
+  none of its decoy sockets, while the positive control reaches two.
+- Review round 4 (NEEDS CHANGES): LOW, seven rules of the reader had no
+  test, though this entry said each had one: backtick fences open code,
+  two fence characters do not, a closing fence with text after it or one
+  indented four columns closes nothing, a blank line does not end fenced
+  code, a second comment closed in a cell is taken out too, and a fence
+  line inside a comment block opens nothing (a mutant of each passed every
+  README test). Nits: what a missed row does held only for a flag's only
+  row, and an extra row could fail the test too; the list of differences,
+  called complete, left out a fence or
+  `<!--` on a list item's line, single-pipe rows, tables in a top-level
+  list item four columns in, and the headings' forms; round 3's mutants
+  were 21, not 23. It found round 3's findings resolved (the search from
+  two bytes in matches only a `-->` that overlaps the `<!--`; 800 fuzzed
+  cells and headings never disagreed with both renderers) and every
+  figure reproduced. Suggestions taken: round 2's words quoted; the old
+  reader's rules named as untested, above.
+- Round 5 changes only `readme_test.go`'s tests and comments, and this
+  entry: the reader's code is round 4's.
+  `TestReadmeFlagsLeaveOutTildeFences` becomes
+  `TestReadmeFlagsLeaveOutFencedCode`, with backtick fences, a blank line
+  inside one, a closing fence with text after it and one indented four
+  columns, and `~~struck~~` text, which opens nothing; the comment test
+  gains a cell with two closed comments, the second holding a flag, and a
+  fence line inside a comment block. The doc comment adds the differences
+  the review found, as some among others, and says what a missed or an
+  extra row does (two of an extra row's six outcomes; rounds 6 and 7 name
+  the others); the sentences above that said otherwise are corrected.
+  Left as it was: a row with one pipe is still missed (the review's
+  mutant reading it, as GitHub does, changes no test's outcome).
+- Verification, round 5 (the worktree, iso.env, bwrap, go1.27.1): gofmt
+  and vet clean; the six README tests pass. Each of the 11
+  `TestReadmeFlags...` inputs gives the test's rows in markdown-it-py, and
+  in md4c all but the cell test's, as its comment says. The reader's code,
+  comment lines aside, is round 4's. Mutants (`go test -overlay`): round
+  4's 25, and 19 of the round-4 review's 27, each fail a README test. The
+  8 that pass: six change the old reader's rules (a "#####" line read as a
+  "####" heading, any heading that starts with "### Flags", an untrimmed
+  heading name, a name twice in a row, a comma between names, a bare
+  dash), one reads a row with one pipe, and one counts a tab as four
+  columns anywhere, which comes to the same at the threshold. The review's
+  seven survivors pass under round 4's file and fail under round 5's;
+  round 1's, round 2's and round 3's readers fail round 5's tests.
+- Verification, snapshot round 5 (`/tmp/opencode/review-37e`: round 4's
+  snapshot with round 5's `readme_test.go`, on the same base, whose tree
+  is now the branch tip's), every Go command inside the bwrap sandbox with
+  `iso.env`: gofmt, vet, the build and `git diff --check`; `go test ./...`
+  (458 top-level tests pass, 3 skip, 0 fail); `-race -count=3` on 93
+  related tests; the 12 new and 10 changed tests 20 times and 5 times
+  under `-race`. Under round 5's tests, round 1's reader fails the comment,
+  cell and indented-code tests, round 2's the comment and cell tests, and
+  round 3's the comment test; each of the round-4 review's seven survivors
+  fails a README test, and the first of them passes round 4's file. The
+  docs checker finds 31 relative links and no problem; the whole module,
+  in the desktop-like sandbox, connects to none of its decoy sockets, while
+  the positive control reaches two. These checks ran before this bullet
+  was written; the snapshot was then re-packed with it, which changed only
+  the handoff.
+- Review round 5 (NEEDS CHANGES): LOW, "each rule this part added has a
+  test" was still untrue: 11 of the review's mutants passed all six README
+  tests. They changed rules this part added (a closing fence three columns
+  in closes; an opening fence indented one to three columns opens; inside
+  fenced code, a `<!--` line starts no comment and a `#` line is no heading
+  and ends nothing; `~~~x` closes nothing; a comment block runs through an
+  indented line that holds `-->`) and two kept from the old reader (a
+  backtick fence with an info string opens code; a comment block hides
+  headings). NIT: the doc comment named only two outcomes of an extra row,
+  a hidden flag and a second row (the review counted four; there are six,
+  round 7 below). It found round 4's findings resolved and every figure
+  reproduced. Suggestions taken: "four or more columns in", and the Review
+  round 4 bullet's summary of that review's first nit.
+- Round 6 changes only `readme_test.go`'s tests and comments, and this
+  entry. The review's fix, which it checked in both renderers, adds to the
+  comment test's block case a comment holding `## Not the end` and
+  `#### Hidden` that closes on a line indented four columns, and to the
+  fenced-code test a `sh` fence holding a shell comment, a `<!--` line and
+  a `####` line; a tilde fence that `~~~x` does not close, holding the
+  same; and a fence opened and closed three columns in, before a last
+  table. The tests' comments say so, the doc comment names four outcomes
+  of an extra row (round 7 adds two), and the sentences above that said
+  otherwise are corrected.
+- Verification, round 6 (the worktree, iso.env, bwrap, go1.27.1): gofmt
+  and vet clean; the six README tests pass. Each of the 11
+  `TestReadmeFlags...` inputs gives the test's rows in markdown-it-py, and
+  in md4c all but the cell test's, as its comment says. The reader's code,
+  comment lines aside, is round 4's. Mutants (`go test -overlay`): round
+  4's 25, 19 of the round-4 review's 27 (the same 8 pass as in round 5),
+  and all 23 of the round-5 review's each fail a README test; under round
+  5's file, 11 of those 23 pass, the review's gap. Round 1's, round 2's
+  and round 3's readers fail round 6's tests as they failed round 5's.
+- Verification, snapshot round 6 (`/tmp/opencode/review-37f`: round 5's
+  snapshot with round 6's `readme_test.go`, on the same base, whose tree
+  is the branch tip's), every Go command inside the bwrap sandbox with
+  `iso.env`: gofmt, vet, the build and `git diff --check`; `go test ./...`
+  (458 top-level tests pass, 3 skip, 0 fail); `-race -count=3` on 93
+  related tests; the 12 new and 10 changed tests 20 times and 5 times
+  under `-race`. Under round 6's tests, round 1's reader fails the
+  comment, cell and indented-code tests, round 2's the comment and cell
+  tests, and round 3's the comment test; each of the round-5 review's 11
+  survivors fails a README test, and the first of them passes round 5's
+  file. The docs checker finds 31 relative links and no problem; the
+  whole module, in the desktop-like sandbox, connects to none of its decoy
+  sockets, while the positive control reaches two. These checks ran
+  before this bullet was written; the snapshot was then re-packed with it,
+  which changed only the handoff.
+- Review round 6 (NEEDS CHANGES): LOW, "each rule this part added has a
+  test" was still untrue. Seven of the review's mutants, one of them three
+  of the others at once, passed all six README tests, each on a probe both
+  renderers show as the reader reads it: a `### Flags` in a comment block,
+  in fenced code or on an indented line started the reference (no test had
+  text before the section); a code span kept a `<!--` from opening a comment
+  only when it was the first span in the cell; a closing fence's indentation
+  counted bytes, so " \t~~~" closed; and a tilde fence's info string could
+  not hold a tilde. Three weaker mutants passed too: a line holding "->"
+  ended a comment block, an indented closing line ended one only if it
+  started with "-->", and a heading's comments were taken out by a pattern
+  that does not read "<!-->" as a whole comment. NIT: an extra row has more
+  outcomes than the four the doc comment named, and than the Review round 5
+  bullet counted: it also fails the test written with the wrong number of
+  dashes, or for `--mirror-fps`. It found round 5's findings resolved and
+  every figure reproduced. Suggestions taken: its fix, which it checked in
+  both renderers, its new inputs described in the tests' comments, and pins
+  for the three weaker mutants.
+- Round 7 changes only `readme_test.go`'s tests and comments, and this
+  entry. The review's fix adds a `### Flags` before the section in a
+  comment block (the comment test), in a tilde and a backtick fence (the
+  fenced-code test) and on an indented line (the indented-code test), each
+  followed by a table whose row must not count; a row whose `<!--` sits in
+  its second code span; a tilde fence that " \t~~~", indented four
+  columns, does not close; and a tilde fence with "a~b" after it. Round 7
+  adds a line holding "->" inside a comment block, a block that closes on
+  a line indented four columns with text before the "-->", and the
+  heading "#### Peer <!-->x -->", read as "Peer x -->". The tests'
+  comments describe the new inputs, the doc comment also names the two
+  outcomes the review found, and the sentences above that said otherwise
+  are corrected.
+- Verification, round 7 (the worktree, iso.env, bwrap, go1.27.1): gofmt
+  and vet clean; the six README tests pass. Each of the 12
+  `TestReadmeFlags...` inputs gives the test's rows in markdown-it-py, and
+  in md4c all but the cell test's, as its comment says. The reader's code,
+  comment lines aside, is round 4's. Mutants (`go test -overlay`): round
+  4's 25, 19 of the round-4 review's 27 (the same 8 pass), all 23 of the
+  round-5 review's and 10 of the round-6 review's 11 each fail a README
+  test. The one that passes opens a comment at a line that starts with
+  `<!-`; md4c disagrees with markdown-it-py on the review's probe for it,
+  though the two agree on others (round 7's review, below). Under round
+  6's file all 11 pass, the review's gap. Round 1's, round 2's and round
+  3's readers fail round 7's tests as they failed round 6's.
+- Verification, snapshot round 7 (`/tmp/opencode/review-37g`: round 6's
+  snapshot with round 7's `readme_test.go`, on the same base, whose tree
+  is the branch tip's), every Go command inside the bwrap sandbox with
+  `iso.env`: gofmt, vet, the build and `git diff --check`; `go test ./...`
+  (458 top-level tests pass, 3 skip, 0 fail); `-race -count=3` on 93
+  related tests; the 12 new and 10 changed tests 20 times and 5 times
+  under `-race`. Under round 7's tests, round 1's reader fails the
+  comment, cell and indented-code tests, round 2's the comment and cell
+  tests, and round 3's the comment test; each of the round-6 review's
+  mutants fails a README test but the one that opens a comment at a `<!-`
+  line, which passes, as expected, and the first of them passes round 6's
+  file. The docs checker finds 31 relative links and no problem; the
+  whole module, in the desktop-like sandbox, connects to none of its decoy
+  sockets, while the positive control reaches two. These checks ran
+  before this bullet was written; the snapshot was then re-packed with it,
+  which changed only the handoff.
+- Review round 7 (NEEDS CHANGES): LOW, the reason the Verification round 7
+  bullet gave for the one mutant left, the one that opens a comment at a
+  `<!-` line, was untrue: md4c and markdown-it-py disagree only on the
+  round-6 review's probe for it, which has no ">" on the line. On `<!- note
+  >`, `<!-x>`, or `<!- a` with the ">" on the next line, both show the table
+  after it, as the reader reads it, while the mutant hides that table. The
+  README bullet's second exception rested on the same reason. NIT: the
+  Review round 6 bullet counted six of that review's mutants, where it had
+  seven. Both are corrected above. It found round 6's findings resolved and
+  every figure it re-ran reproduced, though it ran fewer repeats than this
+  entry's (10 runs instead of 20, 3 under `-race` instead of 5, and the
+  related tests once instead of 3 times). Suggestions taken: its fix,
+  checked in both renderers, which pins that mutant and a block opened by
+  "<!--" with no space after it; pins for its other mutants, each on a probe
+  both renderers show as the reader reads it; the review rounds the README
+  bullet's claim covers, named; and the mutants run on the snapshot's tree.
+- Round 8 changes only `readme_test.go`'s tests and comments, and this
+  entry. The review's fix adds to the comment test's "a block" case a
+  block opened by "<!--old:" and a line "<!- no comment >", each followed
+  by a table whose row must count. Round 8 adds to the same case a block
+  that closes on a line indented four columns with text after the "-->",
+  a line that starts with "<!-->" and holds a row, which must not count,
+  and a block that closes on a line indented eight columns, each followed
+  by a table whose row must count; to the fenced-code test, a tilde fence
+  closed by "~~~" and a tab; and to the test of backticks that are no
+  fence, the line "``` sh x`y", whose backtick is in the info string's
+  second word. The tests' comments describe the new inputs, and
+  `closesFence`'s comment says white space may follow a closing fence. The
+  reader's code is round 4's, comment lines aside.
+- Verification, round 8, on the snapshot's tree (`/tmp/opencode/review-37h`,
+  as the review suggested; iso.env, bwrap, go1.27.1): gofmt and vet clean;
+  the six README tests pass. Each of the 12 `TestReadmeFlags...` inputs
+  gives the test's rows in markdown-it-py, and in md4c all but the cell
+  test's, as its comment says. The reader's code, comment lines aside, is
+  round 4's. Mutants (`go test -overlay`): round 4's 25, 19 of the round-4
+  review's 27 (the same 8 pass), and all 23 of the round-5 review's, all
+  11 of the round-6 review's and all 7 of the round-7 review's each fail a
+  README test. Under their own rounds' files the round-6 review's 11 and
+  the round-7 review's 7 all pass, the reviews' gaps. Round 1's, round 2's
+  and round 3's readers fail round 8's tests as they failed round 7's.
+- Verification, snapshot round 8 (`/tmp/opencode/review-37h`: round 7's
+  snapshot with round 8's `readme_test.go`, on the same base, whose tree
+  is the branch tip's), every Go command inside the bwrap sandbox with
+  `iso.env`: gofmt, vet, the build and `git diff --check`; `go test ./...`
+  (458 top-level tests pass, 3 skip, 0 fail); `-race -count=3` on 93
+  related tests; the 12 new and 10 changed tests 20 times and 5 times
+  under `-race`. Under round 8's tests, round 1's reader fails the
+  comment, cell and indented-code tests, round 2's the comment and cell
+  tests, and round 3's the comment test; each of the round-7 review's
+  seven mutants fails a README test, and the first of them passes round
+  7's file. The docs checker finds 31 relative links and no problem; the
+  whole module, in the desktop-like sandbox, connects to none of its decoy
+  sockets, while the positive control reaches two. These checks ran
+  before this bullet was written; the snapshot was then re-packed with it,
+  which changed only the handoff.
+- Review round 8 (NEEDS CHANGES), on wording only. LOW: the README bullet
+  above said a closing fence has nothing after it, and the fenced-code
+  test's comment said spaces or tabs, while `closesFence` takes any white
+  space (`strings.TrimSpace`): after "~~~" and a no-break space, a vertical
+  tab, a form feed, NEL, an em space or an ideographic space, md4c and
+  markdown-it-py keep the code open and the reader closes it (the README has
+  none of these). NIT: the Review round 7 bullet said every figure
+  reproduced, where that review ran fewer repeats. Both are corrected above,
+  and `readmeFlags`' doc comment now lists the white-space case among its
+  differences from GitHub. It found round 7's findings resolved, and every
+  figure it re-ran reproduced, with fewer repeats than this entry's for the
+  22 new and changed tests (3 times, and twice under `-race`) and the 93
+  related tests (once under `-race`); it ran the README tests 50 times. Left
+  for a later change, from its suggestions: three of its own mutants pass
+  every test, outside the README bullet's claim, each on a probe both
+  renderers show as the reader reads it (a `<!-->` line also hiding the line
+  after it, the line after any comment block's last line hidden too, and a
+  line indented eight columns ending a block only if it starts with `-->`);
+  and "hides" is loose for text after a `<!-->`, or after a block's `-->` on
+  its line, which both renderers show as plain text, though not as a row.
+- Round 9 changes only comments in `readme_test.go` (the fenced-code test's,
+  and a sentence in `readmeFlags`' doc comment) and this entry. The reader's
+  code and the tests are round 8's.
+- Verification, round 9, on the snapshot's tree (`/tmp/opencode/review-37i`;
+  iso.env, bwrap, go1.27.1): gofmt and vet clean; the six README tests pass.
+  Each of the 12 `TestReadmeFlags...` inputs gives the test's rows in
+  markdown-it-py, and in md4c all but the cell test's, as its comment says.
+  The reader's code, comment lines aside, is round 4's. Mutants (`go test
+  -overlay`): round 4's 25, 19 of the round-4 review's 27 (the same 8 pass),
+  and all 23 of the round-5 review's, all 11 of the round-6 review's and all
+  7 of the round-7 review's each fail a README test; under their own rounds'
+  files the round-5 review's 11, the round-6 review's 11 and the round-7
+  review's 7 pass, the reviews' gaps. Round 1's, round 2's and round 3's
+  readers fail round 9's tests as they failed round 8's.
+- Verification, snapshot round 9 (`/tmp/opencode/review-37i`: round 8's
+  snapshot with round 9's `readme_test.go`, on the same base, whose tree is
+  the branch tip's), every Go command inside the bwrap sandbox with
+  `iso.env`: gofmt, vet, the build and `git diff --check`; `go test ./...`
+  (458 top-level tests pass, 3 skip, 0 fail); `-race -count=3` on 93 related
+  tests; the 12 new and 10 changed tests 20 times and 5 times under `-race`.
+  Under round 9's tests, round 1's reader fails the comment, cell and
+  indented-code tests, round 2's the comment and cell tests, and round 3's
+  the comment test; each of the round-7 review's seven mutants fails a
+  README test, and the first of them passes round 7's file. The docs checker
+  finds 31 relative links and no problem; the whole module, in the
+  desktop-like sandbox, connects to none of its decoy sockets, while the
+  positive control reaches two. These checks ran before this bullet was
+  written; the snapshot was then re-packed with it, which changed only the
+  handoff.
+- Review round 9 (NEEDS CHANGES), two NITs. The Review round 8 bullet
+  counted that review's 50 runs of the README tests among its fewer repeats,
+  where this entry repeated them at most 20 times in one run
+  (`TestReadmeListsEveryFlag`, not among the 22, at most 3 times, under
+  `-race` with the related tests). And the doc comment's new
+  sentence covered a carriage return too: the reader splits lines only at
+  "\n", so a closing fence with a CRLF line ending has a "\r" after it,
+  which `strings.TrimSpace` takes, as GitHub does, for which a carriage
+  return ends the line. Both are corrected above. It found round 8's
+  findings resolved and every figure it re-ran reproduced (with fewer
+  repeats than this entry's: the 22 tests 5 times and twice under `-race`,
+  the related tests once under `-race`). Its suggestions, taken: a CRLF
+  closing fence in the fenced-code test (below); the round-8 review's X2
+  (only spaces and tabs after a closing fence, its alternative fix) passed
+  every test too, and is not taken, as it keeps the code open after a CRLF
+  closing fence, where both renderers close it; and the stacked snapshots
+  above this part are now cloned with `--no-hardlinks` (a later snapshot's
+  `git clone` had refreshed the times of the object files in this one's
+  tree, which share them).
+- Round 10 changes `readme_test.go`'s fenced-code test and two of its
+  comments, and this entry. The test adds "~~~" closing code with a CRLF
+  line ending, followed by a table whose row (`--max-fps`) must count, which
+  X2 hides. The test's comment names the carriage return among the white
+  space a closing fence may have after it, and the doc comment's sentence
+  excepts it. Fed the bytes as they are, md4c and markdown-it-py both close
+  the code there and show the row. The reader's code is round 4's, comment
+  lines aside.
+- Verification, round 10, on the snapshot's tree (`/tmp/opencode/review-37j`;
+  iso.env, bwrap, go1.27.1): gofmt and vet clean; the six README tests pass.
+  Each of the 12 `TestReadmeFlags...` inputs gives the test's rows in
+  markdown-it-py, and in md4c all but the cell test's, as its comment says.
+  The reader's code, comment lines aside, is round 4's. Mutants (`go test
+  -overlay`): round 4's 25, 19 of the round-4 review's 27 (the same 8 pass),
+  and all 23 of the round-5 review's, all 11 of the round-6 review's and all
+  7 of the round-7 review's each fail a README test, as do three of the
+  round-8 review's six: X2, X6 and X11. Its other three (X1, X1b and X13)
+  pass, as the Review round 8 bullet says. Under their own rounds' files the
+  round-5 review's 11, the round-6 review's 11 and the round-7 review's 7
+  pass, the reviews' gaps, and X2 passes round 9's. Round 1's, round 2's and
+  round 3's readers fail round 10's tests as they failed round 9's.
+- Verification, snapshot round 10 (`/tmp/opencode/review-37j`: round 9's
+  snapshot with round 10's `readme_test.go`, on the same base, whose tree is
+  the branch tip's), every Go command inside the bwrap sandbox with
+  `iso.env`: gofmt, vet, the build and `git diff --check`; `go test ./...`
+  (458 top-level tests pass, 3 skip, 0 fail); `-race -count=3` on 93 related
+  tests; the 12 new and 10 changed tests 20 times and 5 times under `-race`.
+  Under round 10's tests, round 1's reader fails the comment, cell and
+  indented-code tests, round 2's the comment and cell tests, and round 3's
+  the comment test; each of the round-7 review's seven mutants fails a
+  README test, and the first of them passes round 7's file; the round-8
+  review's X2 fails the fenced-code test, and passes round 9's file. The
+  docs checker finds 31 relative links and no problem; the whole module, in
+  the desktop-like sandbox, connects to none of its decoy sockets, while the
+  positive control reaches two. These checks ran before this bullet was
+  written; the snapshot was then re-packed with it, which changed only the
+  handoff.
+- Review round 10 (NEEDS CHANGES), one NIT: the Review round 9 bullet said
+  this entry ran the README tests 20 times at most and listed
+  `TestReadmeListsEveryFlag`'s runs, leaving out two (the whole-module run
+  in the decoy sandbox and the round's own README run); across round 9's
+  runs the five README tests among the 22 ran 32 times, and 20 was one
+  run's repeat count (corrected above). It found round 9's findings
+  resolved, the new comments true for every character `strings.TrimSpace`
+  takes (in 57 probes a space, a tab or a CRLF's carriage return closes the
+  code in the reader and both renderers, the other 21 only in the reader),
+  and every figure it re-ran reproduced, with fewer repeats than this
+  entry's. Its suggestions, taken: the README bullet says GitHub takes only
+  spaces and tabs before the line ending; the renderer run reads its inputs
+  as bytes, so the CRLF input reaches both renderers with its carriage
+  return (round 10's run, through Python's newline translation, fed it as a
+  plain line end). Left for a later change, from its probes: a closing
+  fence followed by a lone carriage return and more text keeps the code
+  open in the reader, where both renderers close it (the README has no
+  carriage return).
+- Round 11 changes only this entry: the Review round 9 bullet's count, the
+  README bullet's words, and the bullets from here on. `readme_test.go` and
+  every other file are round 10's.
+- Verification, round 11, on the snapshot's tree (`/tmp/opencode/review-37k`;
+  iso.env, bwrap, go1.27.1): `readme_test.go` is round 10's bytes, so round
+  10's mutant runs stand; gofmt and vet clean; the six README tests pass.
+  Read as bytes (`/tmp/opencode/dev-37k/render.py`), the 12
+  `TestReadmeFlags...` inputs, the same bytes as round 10's, give the
+  test's rows in markdown-it-py, and in md4c all but the cell test's, as
+  its comment says; the fenced-code test's input, the one with a carriage
+  return, reaches both renderers with it, and each makes 13 code blocks of
+  it.
+- Verification, snapshot round 11 (`/tmp/opencode/review-37k`: round 10's
+  snapshot with round 11's entry, on the same base, whose tree is the
+  branch tip's), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (458
+  top-level tests pass, 3 skip, 0 fail); `-race -count=3` on 93 related
+  tests; the 12 new and 10 changed tests 20 times and 5 times under `-race`.
+  Under round 10's tests, round 1's reader fails the comment, cell and
+  indented-code tests, round 2's the comment and cell tests, and round 3's
+  the comment test; each of the round-7 review's seven mutants fails a
+  README test, and the first of them passes round 7's file; the round-8
+  review's X2 fails the fenced-code test, and passes round 9's file. The
+  docs checker finds 31 relative links and no problem; the whole module, in
+  the desktop-like sandbox, connects to none of its decoy sockets, while the
+  positive control reaches two. These checks ran before this bullet was
+  written; the snapshot was then re-packed with it, which changed only the
+  handoff.
+
 ## Update (2026-10-21: QoL overhaul, part 36: sound work only for sessions that play here, one account of the sound)
 
 - Behaviour: main silences other scterms' leftover sound streams

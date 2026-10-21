@@ -450,14 +450,14 @@ func playsHere(cfg config, sess *session) bool {
 // nothing to say about where it plays: with --no-audio, or with the sink a
 // session without a sound stream gets (noAudioSink).
 func (a *app) soundless() bool {
-	return !a.cfg.audio || errors.Is(a.audio.err, errNoSound)
+	return !a.cfg.audio || errors.Is(a.audio.failure(), errNoSound)
 }
 
 // sayAudioDisabled prints why this computer plays none of the session's
 // sound: the session has sound, and its sink did not open. run and
 // runHeadless print it before they start.
 func (a *app) sayAudioDisabled() {
-	if !a.soundless() && a.audio.err != nil {
+	if !a.soundless() && a.audio.failure() != nil {
 		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
 	}
 }
@@ -487,7 +487,7 @@ func (a *app) runWeb() error {
 		switch {
 		case a.soundless():
 			// No sound, so nowhere for it to play.
-		case a.audio.err != nil:
+		case a.audio.failure() != nil:
 			// The PCM tap does not go through the sink: the browser still plays.
 			fmt.Fprintf(stderrWriter(),
 				"scterm: audio: browser only; no sound on this computer: %v\n", a.audio.errString())
@@ -659,7 +659,7 @@ func (a *app) runHeadless() error {
 // turned the sound off, and when the sink did not open; muted or the volume
 // otherwise.
 func audioState(a *app) string {
-	if !a.cfg.audio || a.audio.err != nil || a.stream.audioTurnedOff() {
+	if !a.cfg.audio || a.audio.failure() != nil || a.stream.audioTurnedOff() {
 		return "off"
 	}
 	if a.audio.gainPercent() == 0 {
@@ -931,7 +931,7 @@ func (a *app) statusParts() []statusPart {
 	var vol string
 	if a.cfg.audio {
 		vol = "audio off"
-		if a.audio.err == nil && !a.stream.audioTurnedOff() {
+		if a.audio.failure() == nil && !a.stream.audioTurnedOff() {
 			vol = "vol " + strconv.Itoa(a.audio.gainPercent()) + "%"
 		}
 	}

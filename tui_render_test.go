@@ -300,12 +300,16 @@ func TestRestoreWaitsForTheFrameBeingWritten(t *testing.T) {
 	defer stuck.mu.Unlock()
 	out = captureTerminal(t, func() {
 		done := make(chan struct{})
+		start := time.Now()
 		go func() {
 			defer close(done)
 			stuck.shellClose()
 		}()
 		select {
 		case <-done:
+			if took := time.Since(start); took < 90*time.Millisecond || took > 300*time.Millisecond {
+				t.Errorf("behind a painter that keeps its lock, the restore took %v, want about 100 ms", took)
+			}
 		case <-time.After(2 * time.Second):
 			t.Error("a painter holding its lock kept the terminal from being given back")
 		}

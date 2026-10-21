@@ -276,13 +276,15 @@ scterm. Alt with a letter that has no action does nothing.
 
 A paste in the terminal goes to the device as one paste, through the device's clipboard
 (which it replaces), with its line breaks kept as line breaks; nothing in it acts as a key
-except Ctrl+C, which cancels it (so a paste holding a Ctrl+C character is not sent). A paired
-device that does not share its clipboard gets the text typed instead, up to 4,096 bytes, and
-a paired device takes a paste only while this computer has control of it (`--takeover`). A
-paste longer than 262,130 bytes is not sent; scterm says when one of these stops a paste.
-If the terminal starts a paste and never ends it, keys do nothing until Ctrl+C cancels it;
-after two seconds the bottom line says so. Over adb, the server types accented letters but
-not the euro sign, CJK characters or emoji; a paste carries them.
+except Ctrl+C, which cancels it (so a paste holding a Ctrl+C character is not sent). After a
+Ctrl+C, scterm drops what comes up to the end of the paste, or until the terminal sends nothing
+for a quarter of a second, so the rest of a paste that pauses that long after its Ctrl+C is
+typed as keys. A paired device that does not share its clipboard gets the text typed instead,
+up to 4,096 bytes, and a paired device takes a paste only while this computer has control of
+it (`--takeover`). A paste longer than 262,130 bytes is not sent; scterm says when one of
+these stops a paste. If the terminal starts a paste and never ends it, keys do nothing until
+Ctrl+C cancels it; after two seconds the bottom line says so. Over adb, the server types
+accented letters but not the euro sign, CJK characters or emoji; a paste carries them.
 
 In the browser, Ctrl with a letter also goes to the device as that key with Ctrl, except:
 
@@ -644,8 +646,17 @@ variables also help: `SCT_DEBUG_WEB=1` logs each browser's paint and decode stat
 | `SCTERM_FIREFOX_KIOSK=1` | When `--window` uses Firefox, open it full screen without toolbars |
 | `SCTERM_WEB_HOSTS` | More names to open the page by, comma-separated (see [Browser](#browser)) |
 | `SCT_AUDIO_DEVICE` | The PulseAudio sink to play on, instead of following the desktop's choice |
+| `PULSE_SERVER` | The sound server for the terminal display's sound, tried first (see below) |
+| `PULSE_SINK` | The sink for the terminal display's sound when scterm names none (see below) |
 | `SCT_DEBUG_WEB=1` | Log each browser's paint and decode statistics |
 | `SCT_DEBUG_CONTROL=1` | Log input as it is read and sent to the device |
+
+`PULSE_SERVER` and `PULSE_SINK` are libpulse's own variables. For the terminal display's sound,
+scterm tries `PULSE_SERVER` first, then the socket in `XDG_RUNTIME_DIR`, which its own `pactl`
+calls use; the clean-up of other scterms' sound at start takes the first that answers.
+`PULSE_SINK` applies when scterm names no sink: when `SCT_AUDIO_DEVICE` is not set and `pactl`
+is missing or lists no sound card and no sink in use. With `pactl`, scterm then follows the
+desktop's output.
 
 scterm also reads variables that other programs set: `ZELLIJ` (set by Zellij; scterm then
 starts without Grab), `XDG_CONFIG_HOME` and `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` (where scterm

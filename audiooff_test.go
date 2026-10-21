@@ -172,6 +172,40 @@ func TestNoSoundWaitsForTheServersReason(t *testing.T) {
 	waitNotice(t, "no sound from Pixel 8: Audio disabled: it is not supported before Android 11")
 }
 
+// TestNoSoundWaitsAboutASecondForTheReason: left as it is, the wait for the
+// server's reason is about a second (part 26's judgement): a reason that comes
+// half a second after the codec id is given, and when none comes, the line
+// comes about a second after the codec id, neither at once nor much later.
+func TestNoSoundWaitsAboutASecondForTheReason(t *testing.T) {
+	soundTurnedOff := func(out *tailBuffer) time.Time {
+		t.Helper()
+		audio, device := net.Pipe()
+		t.Cleanup(func() { device.Close() })
+		a := streamApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: audio, serverOut: out})
+		a.cfg = config{audio: true}
+		a.watchStreams()
+		// Read before the write: the demuxer starts its wait once it has the
+		// codec id, which can be before Write returns.
+		start := time.Now()
+		if _, err := device.Write([]byte{0, 0, 0, 0}); err != nil { // returns once the demuxer has it
+			t.Fatal(err)
+		}
+		return start
+	}
+	startNotices(t)
+	late := serverSaid(deviceInfo)
+	soundTurnedOff(late)
+	time.Sleep(500 * time.Millisecond)
+	late.Write([]byte(android10Warning + "\n"))
+	waitNotice(t, "no sound from Pixel 8: Audio disabled: it is not supported before Android 11")
+
+	off := soundTurnedOff(serverSaid(deviceInfo))
+	waitNotice(t, "no sound from Pixel 8")
+	if took := time.Since(off); took < 900*time.Millisecond || took > 2*time.Second {
+		t.Errorf("with no reason, the line came %v after the codec id, want about a second", took)
+	}
+}
+
 // TestNoSoundFromTheDeviceIsPrinted: with --web or --window, and with
 // --no-tui, the line goes to stderr, once; a stream that started is not said
 // to be off.

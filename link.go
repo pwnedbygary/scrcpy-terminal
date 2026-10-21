@@ -323,11 +323,18 @@ func (s *session) serverStoppedError() error {
 }
 
 // serverOutputNote is the server's last lines, indented, for an error message.
+// They are the device's text, and the error is printed on stderr as it is:
+// each line's control characters are taken out here.
 func (s *session) serverOutputNote() string {
 	if s.serverOut == nil {
 		return ""
 	}
-	lines := s.serverOut.lastLines(6)
+	var lines []string
+	for _, l := range s.serverOut.lastLines(6) {
+		if l = cleanText(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
 	if len(lines) == 0 {
 		return ""
 	}

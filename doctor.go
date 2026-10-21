@@ -76,10 +76,10 @@ func runDoctor(w io.Writer, cfg config) (failed bool) {
 	// read first, and shown last.
 	peers, paired := doctorPeers()
 	show(doctorBuild(runtime.GOARCH))
-	adb := doctorADB(paired > 0)
+	adb := doctorADB(paired)
 	show(adb)
 	if adb.status == doctorOK {
-		show(doctorDevices(paired > 0)...)
+		show(doctorDevices(paired)...)
 	}
 	show(doctorSound()...)
 	show(doctorWindow()...)
@@ -207,18 +207,28 @@ func headLines(s string, n int) []string {
 }
 
 // withoutADB is how much a problem matters that --peer avoids: a paired
-// device can be reached without adb, so with one it is a warning.
-func withoutADB(paired bool) string {
-	if paired {
+// device can be reached without adb, so with one it is a warning. paired is
+// how many paired devices peer mode can reach (doctorPeers).
+func withoutADB(paired int) string {
+	if paired > 0 {
 		return doctorWarn
 	}
 	return doctorFail
 }
 
+// peerAdvice is todo with its --peer NAME as it is typed here: --peer= takes
+// the only paired device.
+func peerAdvice(todo string, paired int) string {
+	if paired == 1 {
+		return strings.Replace(todo, "--peer NAME", "--peer=", 1)
+	}
+	return todo
+}
+
 // orPeer is todo, and with a paired device, --peer as well.
-func orPeer(todo string, paired bool) string {
-	if paired {
-		return todo + ", or use --peer to reach the scterm Android app without it"
+func orPeer(todo string, paired int) string {
+	if paired > 0 {
+		return peerAdvice(todo+", or use --peer NAME to reach the scterm Android app without it", paired)
 	}
 	return todo
 }
@@ -226,10 +236,10 @@ func orPeer(todo string, paired bool) string {
 // doctorADB checks that adb is on PATH and runs. Without it, the advice
 // offers --peer; with a paired device, so does the advice for an adb that does
 // not run.
-func doctorADB(paired bool) doctorLine {
+func doctorADB(paired int) doctorLine {
 	path, err := exec.LookPath("adb")
 	if err != nil {
-		return doctorLine{withoutADB(paired), "adb", "not found on PATH", adbMissingHint}
+		return doctorLine{withoutADB(paired), "adb", "not found on PATH", peerAdvice(adbMissingHint, paired)}
 	}
 	out, err := doctorOutput(nil, "adb", "version")
 	if err != nil {
@@ -255,7 +265,12 @@ const serialForms = "connect that device, or unset ANDROID_SERIAL, or set it as 
 // warning. No device at all offers --peer. With a paired device, no device
 // and a listing that fails are warnings, and the advice for the listing
 // offers --peer too.
-func doctorDevices(paired bool) []doctorLine {
+//
+// A pairing makes only those two warnings, as --peer needs neither adb nor a
+// device it lists. Whatever adb does list is what plain scterm would use, so
+// a device that is not ready or too old, and an ANDROID_SERIAL that names no
+// device or several, fail with a pairing as they do without one.
+func doctorDevices(paired int) []doctorLine {
 	out, err := doctorOutput(nil, "adb", "devices", "-l")
 	if err != nil {
 		return []doctorLine{{withoutADB(paired), "device", fmt.Sprintf("adb devices -l failed (%v)", err),
@@ -305,7 +320,7 @@ func doctorDevices(paired bool) []doctorLine {
 			fmt.Sprintf("ANDROID_SERIAL is %s, which names %d devices (%s), so adb takes none of them", chosen, len(picked), strings.Join(serials, ", ")),
 			"set it to the serial of the one to use"})
 	case len(devices) == 0:
-		lines = append(lines, doctorLine{withoutADB(paired), "device", "no device found", noDeviceHint})
+		lines = append(lines, doctorLine{withoutADB(paired), "device", "no device found", peerAdvice(noDeviceHint, paired)})
 	case chosen == "" && len(ready) > 1:
 		lines = append(lines, doctorLine{doctorWarn, "device", severalDevices(ready), chooseDeviceHint + ", or set ANDROID_SERIAL"})
 	}
@@ -571,7 +586,9 @@ func unreadableTodo(path string, err error, aside string) string {
 
 // doctorPeers checks peer mode's identity and pairings where scterm keeps them,
 // without creating either or connecting to any device, and returns how many
-// devices are paired.
+// paired devices peer mode can reach: none without an identity it can load,
+// and none whose identity in peers.json does not parse, which --peer and
+// scterm peers leave out.
 func doctorPeers() ([]doctorLine, int) {
 	home, err := peerHome()
 	if err != nil {
@@ -585,8 +602,8 @@ func doctorPeers() ([]doctorLine, int) {
 	const pairHint = "scterm pair pairs with a device that runs the scterm app, to reach it without adb"
 	recs, storeErr := peer.OpenStore(home).All()
 	path := filepath.Join(home, "identity.pem")
-	info, statErr := os.Stat(path)
-	noIdentity := errors.Is(statErr, fs.ErrNotExist)
+	id, idErr := peer.LoadIdentity(home)
+	noIdentity := errors.Is(idErr, fs.ErrNotExist)
 	if noIdentity && storeErr == nil && len(recs) == 0 {
 		return []doctorLine{{doctorOK, "peers", "nothing paired yet; pairings are kept in " + where, pairHint}}, 0
 	}
@@ -598,32 +615,45 @@ func doctorPeers() ([]doctorLine, int) {
 			"pair each device again with scterm pair"})
 	case noIdentity:
 		lines = append(lines, doctorLine{doctorOK, "peers", "no identity in " + where + " yet; scterm pair makes one", ""})
-	case statErr != nil:
-		lines = append(lines, doctorLine{doctorFail, "peers", statErr.Error(), unreadableTodo(path, statErr, idTodo)})
+	case idErr != nil:
+		lines = append(lines, doctorLine{doctorFail, "peers", idErr.Error(), unreadableTodo(path, idErr, idTodo)})
 	default:
-		// The file is there, so this only loads it.
-		id, err := peer.LoadOrCreateIdentity(home)
-		if err != nil {
-			lines = append(lines, doctorLine{doctorFail, "peers", err.Error(), unreadableTodo(path, err, idTodo)})
-			break
-		}
 		lines = append(lines, doctorLine{doctorOK, "peers", fmt.Sprintf("this computer is %s (identity in %s)", id.Fingerprint.Short(), where), ""})
 		// scterm writes it with mode 0600: it holds this computer's private key.
-		if perm := info.Mode().Perm(); perm&0o044 != 0 {
-			lines = append(lines, doctorLine{doctorWarn, "peers", fmt.Sprintf("other users can read %s (mode %04o), which holds this computer's private key", path, perm),
+		if info, err := os.Stat(path); err == nil && info.Mode().Perm()&0o044 != 0 {
+			lines = append(lines, doctorLine{doctorWarn, "peers", fmt.Sprintf("other users can read %s (mode %04o), which holds this computer's private key", path, info.Mode().Perm()),
 				"chmod 600 " + path})
 		}
 	}
-	switch n := len(recs); {
+	pj := filepath.Join(home, "peers.json")
+	var listed, unparsed []peer.Record
+	for _, rec := range recs {
+		if _, err := rec.ID(); err != nil {
+			unparsed = append(unparsed, rec)
+		} else {
+			listed = append(listed, rec)
+		}
+	}
+	switch n := len(listed); {
 	case storeErr != nil:
-		pj := filepath.Join(home, "peers.json")
 		lines = append(lines, doctorLine{doctorFail, "peers", storeErr.Error(), unreadableTodo(pj, storeErr, "move peers.json aside, then pair each device again")})
 	case n == 0:
 		lines = append(lines, doctorLine{doctorOK, "peers", "no paired devices", pairHint})
 	case n == 1:
-		lines = append(lines, doctorLine{doctorOK, "peers", "1 paired device: " + peer.Names(recs), "scterm peers --check tests whether it is reachable"})
+		lines = append(lines, doctorLine{doctorOK, "peers", "1 paired device: " + peer.Names(listed), "scterm peers --check tests whether it is reachable"})
 	default:
-		lines = append(lines, doctorLine{doctorOK, "peers", fmt.Sprintf("%d paired devices: %s", n, peer.Names(recs)), "scterm peers --check tests whether each one is reachable"})
+		lines = append(lines, doctorLine{doctorOK, "peers", fmt.Sprintf("%d paired devices: %s", n, peer.Names(listed)), "scterm peers --check tests whether each one is reachable"})
 	}
-	return lines, len(recs)
+	switch n := len(unparsed); {
+	case n == 1:
+		lines = append(lines, doctorLine{doctorWarn, "peers", fmt.Sprintf("1 pairing in %s has an identity that does not parse, so peer mode leaves it out: %s", pj, peer.Names(unparsed)),
+			"pair that device again with scterm pair"})
+	case n > 1:
+		lines = append(lines, doctorLine{doctorWarn, "peers", fmt.Sprintf("%d pairings in %s have identities that do not parse, so peer mode leaves them out: %s", n, pj, peer.Names(unparsed)),
+			"pair those devices again with scterm pair"})
+	}
+	if idErr != nil {
+		return lines, 0
+	}
+	return lines, len(listed)
 }

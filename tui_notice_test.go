@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"scterm/peer"
 )
 
 // ---------------------------------------------------------------------------
@@ -593,5 +596,134 @@ func TestPlaceholderFollowsAResize(t *testing.T) {
 	termSizeOverride = struct{ cols, rows int }{50, 20}
 	if out := captureStdout(t, a.onResize); strings.Contains(out, "Waiting") || strings.Contains(out, "\x1b[2J") {
 		t.Errorf("a resize after the first frame cleared the picture: %q", out)
+	}
+}
+
+// terminalTricks is text from a device that could drive the terminal it is
+// printed on: a title change (OSC ... BEL), a screen clear (CSI), the CSI
+// that is one C1 character (U+009B), and a bare Esc. Each is shown as clean
+// is; text without them stays as it was.
+var terminalTricks = []struct{ name, text, clean string }{
+	{"OSC", "Pixel\x1b]0;x\x07 8", "Pixel ]0;x 8"},
+	{"CSI", "Pixel\x1b[2J 8", "Pixel [2J 8"},
+	{"C1", "Pixel\u009b2J 8", "Pixel 2J 8"},
+	{"Esc", "Pixel\x1b 8", "Pixel 8"},
+	{"clean", "Pixel 8 (2)", "Pixel 8 (2)"},
+}
+
+// talkingTarget is a paired target on loopback that welcomes the first control
+// session as welcome says, then hands its connection to the test, which sends
+// the target's envelopes on it (docs/PEER_PROTOCOL.md).
+type talkingTarget struct {
+	id    *peer.Identity
+	ln    net.Listener
+	conns chan net.Conn
+}
+
+func newTalkingTarget(t *testing.T, welcome peer.Message) *talkingTarget {
+	t.Helper()
+	id, err := peer.LoadOrCreateIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{id.Certificate}, ClientAuth: tls.RequireAnyClientCert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	target := &talkingTarget{id: id, ln: ln, conns: make(chan net.Conn, 1)}
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			close(target.conns)
+			return
+		}
+		defer conn.Close()
+		if _, err := peer.ReadFrame(conn); err != nil || peer.WriteFrame(conn, &welcome) != nil {
+			close(target.conns)
+			return
+		}
+		target.conns <- conn
+		io.Copy(io.Discard, conn) // pings, and the bye
+	}()
+	return target
+}
+
+func (target *talkingTarget) port() int { return target.ln.Addr().(*net.TCPAddr).Port }
+
+// conn is the connection of the session the target welcomed.
+func (target *talkingTarget) conn(t *testing.T) net.Conn {
+	t.Helper()
+	select {
+	case conn, ok := <-target.conns:
+		if !ok {
+			t.Fatal("the fake target did not welcome the session")
+		}
+		return conn
+	case <-time.After(5 * time.Second):
+		t.Fatal("no session came to the fake target")
+		return nil
+	}
+}
+
+// say sends the target's envelope m: the byte 0xFE, then a frame.
+func say(t *testing.T, conn net.Conn, m peer.Message) {
+	t.Helper()
+	if _, err := conn.Write([]byte{0xfe}); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.WriteFrame(conn, &m); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPeerNoticesAreCleaned: the notices of a peer session carry the target's
+// own text: its name, the name of the device that took control, and the words
+// of a refusal. The status row always showed them cleaned; stderr and the
+// replay at exit, which print each line as it is, now get them without the
+// escape sequences and control characters in them too, and get clean text as
+// before.
+func TestPeerNoticesAreCleaned(t *testing.T) {
+	for _, tc := range terminalTricks {
+		t.Run(tc.name, func(t *testing.T) {
+			welcome := controlWelcome
+			welcome.Lease = peer.LeaseViewer
+			welcome.Device = &peer.DeviceInfo{Name: tc.text}
+			target := newTalkingTarget(t, welcome)
+			pairedAt(t, target.id.Fingerprint.Hex(), "127.0.0.1", target.port())
+			searchFinds(t)
+			name := tc.clean
+			lines := []string{
+				"another device has control of " + name + "; this computer is viewing (--takeover takes it)",
+				tc.clean + " took control of " + name + "; this computer is viewing (--takeover takes it back)",
+				"this computer has control of " + name,
+				name + " refused " + tc.clean + ": " + tc.clean,
+				"input ignored: another device has control of " + name + " (--takeover takes it)",
+			}
+			forgetLogOnce(t, "scterm: "+lines[0]+"\n", "scterm: "+lines[4]+"\n")
+			startNotices(t)
+
+			s, err := newPeerSession("Pixel 8", controlOnly())
+			if err != nil {
+				t.Fatalf("connect: %v", err)
+			}
+			defer s.stop()
+			waitNotice(t, lines[0])
+			conn := target.conn(t)
+			say(t, conn, peer.Message{Type: peer.TypeLease, State: peer.LeaseViewer, Holder: tc.text})
+			waitNotice(t, lines[1])
+			say(t, conn, peer.Message{Type: peer.TypeLease, State: peer.LeaseHeld})
+			waitNotice(t, lines[2])
+			say(t, conn, peer.Message{Type: peer.TypeError, Code: "denied", Message: tc.text, ControlType: tc.text})
+			waitNotice(t, lines[3])
+			say(t, conn, peer.Message{Type: peer.TypeError, Code: "no_lease"})
+			waitNotice(t, lines[4])
+
+			var replay strings.Builder
+			notices.stop(&replay)
+			if want := "scterm: " + strings.Join(lines, "\nscterm: ") + "\n"; replay.String() != want {
+				t.Errorf("replay:\n%q\nwant\n%q", replay.String(), want)
+			}
+		})
 	}
 }
