@@ -81,6 +81,9 @@ func main() {
 	if cfg.web && cfg.noTUI {
 		fatal(fmt.Errorf("--web/--window and --no-tui are mutually exclusive"))
 	}
+	if err := validateConfig(cfg); err != nil {
+		usageError(err.Error())
+	}
 
 	// Show the version in the status line (useful for bug reports).
 	logOnce(fmt.Sprintf("scterm %s\n", version))

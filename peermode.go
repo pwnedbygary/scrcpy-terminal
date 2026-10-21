@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -52,6 +53,10 @@ func runPeerCommand(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
+	if help, ok := peerCommandHelp[args[0]]; ok && len(args) > 1 && isHelpArg(args[1]) {
+		fmt.Print(help)
+		return true
+	}
 	var err error
 	switch args[0] {
 	case "pair":
@@ -63,11 +68,44 @@ func runPeerCommand(args []string) bool {
 	default:
 		return false
 	}
+	var usage usageErr
+	if errors.As(err, &usage) {
+		usageError(string(usage))
+	}
 	if err != nil {
 		fatal(err)
 	}
 	return true
 }
+
+var peerCommandHelp = map[string]string{
+	"pair": `usage: scterm pair
+       scterm pair "HOST:PORT CODE"
+
+Without an invitation, scterm finds a device inviting on this network and
+pairs once both screens show the same six-digit code and it is accepted on
+both. With the invitation an scterm device shows, it pairs from anywhere the
+device is reachable.
+`,
+	"peers": `usage: scterm peers [--check]
+
+Lists the paired devices and what each allows this computer to do. --check
+also connects to each one, authenticated, without starting a stream, and
+says whether it is ready.
+`,
+	"forget": `usage: scterm forget NAME
+
+Forgets a paired device. NAME is its whole name, in any case, or its
+identity; anything less is confirmed first, and refused when there is no
+terminal to ask on.
+`,
+}
+
+// usageErr is a command run the wrong way; it exits with status 2, as a bad
+// flag does, rather than 1.
+type usageErr string
+
+func (e usageErr) Error() string { return string(e) }
 
 func pairCommand(args []string) error {
 	if len(args) == 0 {
@@ -106,7 +144,7 @@ func peersCommand(args ...string) error {
 	check := false
 	if len(args) != 0 {
 		if len(args) != 1 || args[0] != "--check" {
-			return fmt.Errorf("usage: scterm peers [--check]")
+			return usageErr("usage: scterm peers [--check]")
 		}
 		check = true
 	}
@@ -121,20 +159,54 @@ func peersCommand(args ...string) error {
 	return printPeers(context.Background(), os.Stdout, client, store, recs, check, peer.DiscoverPresence, client.Probe)
 }
 
+// forgetCommand removes a pairing. It needs a name: unlike --peer=, an empty
+// query must not mean "the only paired device". A name that only matches
+// part of one is confirmed first.
 func forgetCommand(args []string) error {
+	query := strings.TrimSpace(strings.Join(args, " "))
+	if query == "" {
+		return usageErr("usage: scterm forget NAME (scterm peers lists the names)")
+	}
 	_, store, err := openPeerClient()
 	if err != nil {
 		return err
 	}
-	rec, err := store.Find(strings.Join(args, " "))
+	rec, err := store.Find(query)
 	if err != nil {
 		return err
+	}
+	if !namesExactly(rec, query) {
+		if !interactive() {
+			return fmt.Errorf("%q is only part of %q: give the whole name to forget it", query, rec.Name)
+		}
+		answer, err := ask(fmt.Sprintf("Forget %s? [y/N] ", rec.Name))
+		if err != nil {
+			return err
+		}
+		if a := strings.ToLower(answer); a != "y" && a != "yes" {
+			fmt.Printf("Kept %s.\n", rec.Name)
+			return nil
+		}
 	}
 	if _, err := store.Remove(rec.Fingerprint); err != nil {
 		return err
 	}
 	fmt.Printf("Forgot %s. Its own list still names this computer until it is removed there.\n", rec.Name)
 	return nil
+}
+
+// namesExactly reports whether query is a paired device's whole name
+// (ignoring case) or its whole identity, rather than the start of either.
+func namesExactly(rec peer.Record, query string) bool {
+	if strings.EqualFold(rec.Name, query) {
+		return true
+	}
+	compact := strings.ToLower(strings.ReplaceAll(query, "-", ""))
+	if strings.EqualFold(rec.Fingerprint, compact) {
+		return true
+	}
+	fp, err := rec.ID()
+	return err == nil && strings.EqualFold(strings.ReplaceAll(fp.Short(), "-", ""), compact)
 }
 
 func describeGrants(grants []string) string {

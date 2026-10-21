@@ -2,11 +2,13 @@ package main
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"os/exec"
+	"strings"
 	"time"
 
 	"scterm/peer"
@@ -31,6 +33,8 @@ type session struct {
 	deviceName string
 
 	serverCmd   *exec.Cmd
+	serverOut   *tailBuffer   // the server's last output, for errors
+	serverDone  chan struct{} // closed once the server process has exited
 	listener    net.Listener
 	forwardMode bool
 	forwardPort uint16
@@ -73,12 +77,19 @@ func (s *session) start(video, audio, control bool, params []string) error {
 		fmt.Sprintf("scid=%08x", s.scid),
 		"log_level=info",
 	}, params...)
-	cmd, err := s.adb.startServer(serverParams)
+	s.serverOut = &tailBuffer{max: 4096}
+	cmd, err := s.adb.startServer(serverParams, s.serverOut)
 	if err != nil {
 		s.closeTunnel()
 		return fmt.Errorf("start server: %w", err)
 	}
 	s.serverCmd = cmd
+	done := make(chan struct{})
+	s.serverDone = done
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
 
 	// Connect the sockets.
 	if err := s.connect(video, audio, control); err != nil {
@@ -123,18 +134,39 @@ func (s *session) connect(video, audio, control bool) error {
 	// In reverse mode the device connects to us: accept in order.
 	// In forward mode we connect to the device socket via the adb tunnel.
 	if !s.forwardMode {
-		deadline := time.Now().Add(15 * time.Second)
+		// Accept blocks until the device connects, so it needs its own
+		// deadline, and a server that exits (it refuses a bad option before
+		// connecting) must end the wait too.
+		ln := s.listener
+		if tl, ok := ln.(*net.TCPListener); ok {
+			_ = tl.SetDeadline(time.Now().Add(connectTimeout))
+		}
+		accepted := make(chan struct{})
+		defer close(accepted)
+		serverDone := s.serverDone
+		go func() {
+			select {
+			case <-serverDone:
+				ln.Close()
+			case <-accepted:
+			}
+		}()
 		conns := []*net.Conn{&s.video, &s.audio, &s.control}
 		enabled := []bool{video, audio, control}
 		for i := range conns {
 			if !enabled[i] {
 				continue
 			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("timeout waiting for %s socket", socketName(i))
-			}
-			conn, err := s.listener.Accept()
+			conn, err := ln.Accept()
 			if err != nil {
+				if s.serverExited() {
+					return s.serverStoppedError()
+				}
+				var ne net.Error
+				if errors.As(err, &ne) && ne.Timeout() {
+					return fmt.Errorf("the device did not connect its %s socket within %s%s",
+						socketName(i), connectTimeout, s.serverOutputNote())
+				}
 				return fmt.Errorf("accept %s: %w", socketName(i), err)
 			}
 			*conns[i] = conn
@@ -156,10 +188,13 @@ func (s *session) connect(video, audio, control bool) error {
 				if err == nil {
 					break
 				}
+				if s.serverExited() {
+					return s.serverStoppedError()
+				}
 				time.Sleep(50 * time.Millisecond)
 			}
 			if err != nil {
-				return fmt.Errorf("dial %s: %w", addr, err)
+				return fmt.Errorf("dial %s: %w%s", addr, err, s.serverOutputNote())
 			}
 			if first {
 				var b [1]byte
@@ -195,11 +230,49 @@ func (s *session) connect(video, audio, control bool) error {
 		first = s.control
 	}
 	var meta [64]byte
+	_ = first.SetReadDeadline(time.Now().Add(connectTimeout))
 	if _, err := io.ReadFull(first, meta[:]); err != nil {
-		return fmt.Errorf("device meta: %w", err)
+		if s.serverExited() {
+			return s.serverStoppedError()
+		}
+		return fmt.Errorf("device meta: %w%s", err, s.serverOutputNote())
 	}
+	_ = first.SetReadDeadline(time.Time{})
 	s.deviceName = cstring(meta[:])
 	return nil
+}
+
+// connectTimeout bounds each wait for the device side to connect or speak.
+var connectTimeout = 15 * time.Second
+
+// serverExited reports whether the device-side server process has exited.
+func (s *session) serverExited() bool {
+	if s.serverDone == nil {
+		return false
+	}
+	select {
+	case <-s.serverDone:
+		return true
+	default:
+		return false
+	}
+}
+
+// serverStoppedError explains a server that exited before it connected.
+func (s *session) serverStoppedError() error {
+	return fmt.Errorf("the scrcpy server on the device stopped before connecting%s", s.serverOutputNote())
+}
+
+// serverOutputNote is the server's last lines, indented, for an error message.
+func (s *session) serverOutputNote() string {
+	if s.serverOut == nil {
+		return ""
+	}
+	lines := s.serverOut.lastLines(6)
+	if len(lines) == 0 {
+		return ""
+	}
+	return "; it said:\n  " + strings.Join(lines, "\n  ")
 }
 
 func socketName(i int) string {
@@ -252,7 +325,7 @@ func (s *session) stop() {
 	if s.serverCmd != nil && s.serverCmd.Process != nil {
 		time.Sleep(200 * time.Millisecond)
 		s.serverCmd.Process.Kill()
-		s.serverCmd.Wait()
+		<-s.serverDone // reaped by the goroutine start runs Wait on
 		s.serverCmd = nil
 	}
 }

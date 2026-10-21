@@ -7,6 +7,37 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 4: the command line fails fast)
+
+- Startup no longer hangs (a bad `--audio-codec` used to hang silently): the
+  server process exiting ends the wait at once and its last output is shown,
+  error and exception lines rather than stack frames; a server that never
+  connects is given up after 15 s, counted across all the sockets (the first
+  accept had no limit). Once adb has exited, waiting for anything it left
+  holding the output pipe stops after 1 s. `--audio-codec`/`--audio-source`
+  are checked against the bundled server's lists, with `--peer` too, and all
+  three streams off is refused before any device work (it panicked).
+- adb: a missing adb, unauthorized, no permissions (with or without adb's
+  udev hint), offline and transient or mode states are each named with the
+  next step.
+- Words left after the flags are refused (exit 2) instead of starting a
+  mirror: a command given after flags, a typo of one (with a suggestion),
+  `--audio false` (the hint says `--audio=false`; it used to mirror with
+  audio on) and an unquoted `--peer Pixel 8` (the hint says to quote it).
+  `scterm help` prints the help on stdout, every command answers `-h` or
+  `--help` with its usage, and `update` and `version` take no other
+  arguments (`update --help` used to update). Usage errors exit 2, `peers`
+  with a bad argument included (it exited 1).
+- `forget` needs a name (a bare `forget` removed the only pairing) and
+  confirms a partial one, refusing when stdin is not a terminal.
+  `interactive()` checks for a terminal (`/dev/null` used to pass), so
+  `--peer=` with several pairings and no terminal asks for a name instead of
+  prompting.
+- Verification: unit tests, the command-line ones with the race detector,
+  and the built binary run with no adb on PATH and with a fake adb: each case
+  ends with its reason, at once except the 15 s no-connection timeout.
+  Reverting the permissions, wait or stack-frame fix fails its new test.
+
 ## Update (2026-10-20: QoL overhaul, part 3: terminal keyboard, screenshots, crash restore)
 
 - On-screen keyboard: K, L and M sent L, M and R (now checked against

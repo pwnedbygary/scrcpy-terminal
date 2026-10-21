@@ -29,8 +29,22 @@ func runUpdateCommand(args []string) bool {
 	}
 	switch args[0] {
 	case "version":
+		if len(args) > 1 {
+			if isHelpArg(args[1]) {
+				fmt.Print(versionHelp)
+				return true
+			}
+			usageError("usage: scterm version (it takes no arguments)")
+		}
 		fmt.Println("scterm " + version)
 	case "update":
+		if len(args) > 1 {
+			if isHelpArg(args[1]) {
+				fmt.Print(updateHelp)
+				return true
+			}
+			usageError("usage: scterm update (it takes no arguments)")
+		}
 		if err := updateCommand(); err != nil {
 			fatal(err)
 		}
@@ -38,6 +52,29 @@ func runUpdateCommand(args []string) bool {
 		return false
 	}
 	return true
+}
+
+const updateHelp = `usage: scterm update
+
+A release binary downloads the latest GitHub release, checks it against the
+SHA-256 digest GitHub publishes for it (when there is one), and replaces
+itself once the new binary has started on this system. A build from a source
+checkout pulls and rebuilds it instead.
+`
+
+const versionHelp = `usage: scterm version
+
+Prints this binary's version: scterm X.Y.Z for a release, scterm dev for a
+build from source.
+`
+
+// isHelpArg reports whether arg asks a command for its help.
+func isHelpArg(arg string) bool {
+	switch arg {
+	case "-h", "-help", "--help", "help":
+		return true
+	}
+	return false
 }
 
 // updateCommand brings this scterm up to date: a release build replaces

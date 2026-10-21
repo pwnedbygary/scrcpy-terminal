@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"scterm/peer"
@@ -171,8 +172,7 @@ func choose(question string, labels []string) (int, error) {
 	}
 }
 
-// interactive reports whether stdin is a terminal someone can answer from.
-func interactive() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
+// interactive reports whether stdin is a terminal someone can answer from. A
+// character device is not enough: /dev/null is one, and a prompt read from it
+// ends in EOF.
+var interactive = func() bool { return isTerminal(syscall.Stdin) }
