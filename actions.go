@@ -13,18 +13,19 @@ import (
 //
 // protocol/fixtures/actions.json defines the app-level action surface: the
 // Alt+letter chords, the F1..F12 row, what each action puts on the wire, each
-// action's labels, and the order the TUI menu and the TUI action bar list them
-// in. Its webBar view records the web toolbar's order, but web/index.html still
-// carries its own copy of that list and its labels.
+// action's labels, and the order the TUI menu, the TUI action bar and the web
+// toolbar list them in.
 //
 // The Go tables (appMnemonicOps, appKeyOps, appActionOps, appFKeyOps,
 // menuItems, barItems) are derived from it at init, so adding an action is a
 // catalog edit plus one dispatch case rather than another copy of a table. The
-// catalog is pinned from the other side by independent golden expectations
+// web page gets the same file in index.html (webui.go) and builds its key
+// tables, toolbar and controls sheet from it. The catalog is pinned from the
+// other side by independent golden expectations
 // (TestActionDispatchIsTheGoldenWire: published Android keycodes plus the
 // hand-derived scrcpy wire fixture), by the Kotlin enum test in
-// android/protocol, and by the player.js and index.html pins in
-// web_keymap_test.go. CI runs all three.
+// android/protocol, and by web_keymap_test.go, which runs the page's own
+// derivation in node and compares it with the Go tables. CI runs all three.
 // ---------------------------------------------------------------------------
 
 //go:embed protocol/fixtures/actions.json

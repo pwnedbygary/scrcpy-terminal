@@ -3,12 +3,15 @@
 // Runs the whole of web/player.js against a small stand-in DOM and socket, and
 // drives the page's connection wiring end to end: the status card and the
 // dimmed canvas, the HUD readouts, the title, the Reconnect button, and where
-// keys go once the session has ended. The elements are the ones web/index.html
-// declares, so a lookup of an element the page lacks fails here as it would in
-// a browser.
+// keys go once the session has ended; then the action bar and the controls
+// sheet the page builds from the action catalog. The elements are the ones
+// web/index.html declares, as the server serves it (with the catalog in it),
+// so a lookup of an element the page lacks fails here as it would in a
+// browser.
 
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { catalog, servedIndex } from "./page_fixture.mjs";
 
 const read = (name) => readFileSync(new URL("./" + name, import.meta.url), "utf8");
 
@@ -20,24 +23,38 @@ function check(name, got, want) {
 }
 
 const E = {};
+const docListeners = {};
 const doc = {
   title: "scterm", hidden: false, activeElement: null,
   getElementById: (id) => E[id] || null,
   querySelectorAll: () => [],
-  addEventListener() {},
-  createElement: () => el("x"),
-  body: { appendChild() {} },
+  addEventListener(t, fn) { (docListeners[t] ||= []).push(fn); },
+  createElement: (tag) => el("", tag),
+  body: { tagName: "BODY", appendChild() {} },
 };
 
+// inside tells whether x is box or sits in it, and inertOf whether x or
+// anything it sits in is inert.
+const inside = (x, box) => { for (; x; x = x.parentNode) if (x === box) return true; return false; };
+const inertOf = (x) => { for (; x; x = x.parentNode) if (x.inert) return true; return false; };
+
 // el is a stand-in element. Writes to textContent are counted, so a live
-// region rewritten with what it already says shows up.
-function el(id) {
+// region rewritten with what it already says shows up. Focus works as in a
+// browser: an element that is inert, or sits in one, cannot take it, and
+// making the element that has it inert sends it to the page.
+function el(id, tag) {
   const cls = new Set();
   const listeners = {};
   let text = "";
+  let inert = false;
   const e = {
-    id, value: "", hidden: false, inert: false, style: {}, className: "", writes: 0,
+    id, value: "", hidden: false, style: {}, className: "", writes: 0,
     width: 480, height: 1080,
+    tagName: (tag || "div").toUpperCase(), type: "", title: "", dataset: {}, attrs: {}, children: [],
+    appendChild(c) { e.children.push(c); c.parentNode = e; return c; },
+    setAttribute(k, v) { e.attrs[k] = String(v); },
+    getAttribute(k) { return k in e.attrs ? e.attrs[k] : null; },
+    toBlob() { e.blobs = (e.blobs || 0) + 1; },
     classList: {
       add: (...c) => c.forEach((x) => cls.add(x)),
       remove: (...c) => c.forEach((x) => cls.delete(x)),
@@ -50,23 +67,49 @@ function el(id) {
     getContext: () => ({ drawImage() {}, putImageData() {} }),
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 40 }),
     setPointerCapture() {},
-    focus() { doc.activeElement = e; },
+    focus() { if (!inertOf(e)) doc.activeElement = e; },
     blur() { if (doc.activeElement === e) doc.activeElement = null; },
   };
   Object.defineProperty(e, "textContent", {
     get: () => text,
     set: (v) => { e.writes++; text = String(v); },
   });
+  Object.defineProperty(e, "inert", {
+    get: () => inert,
+    set: (v) => {
+      inert = !!v;
+      if (inert && inside(doc.activeElement, e)) doc.activeElement = doc.body;
+    },
+  });
   return e;
 }
 
-// The page's elements, hidden and with the text index.html gives them.
-for (const m of read("index.html").matchAll(/<(\w+)([^>]*?)\sid="([^"]+)"([^>]*)>([^<]*)/g)) {
-  const e = el(m[3]);
+// The page's elements, hidden, with the classes and the text index.html gives them.
+for (const m of servedIndex().matchAll(/<(\w+)([^>]*?)\sid="([^"]+)"([^>]*)>([^<]*)/g)) {
+  const e = el(m[3], m[1]);
   e.hidden = /(^|\s)hidden(\s|\/|$)/.test(m[2] + m[4]);
+  const cls = /\sclass="([^"]*)"/.exec(m[2] + m[4]);
+  if (cls) e.classList.add(...cls[1].split(/\s+/).filter(Boolean));
   e.textContent = m[5].trim();
   e.writes = 0;
   E[m[3]] = e;
+}
+// Where each of them sits: in the nearest element with an id that holds it
+// in the markup, or in the page's body.
+{
+  const open = [];
+  const page = servedIndex().replace(/<!--[\s\S]*?-->/g, "");
+  for (const [, end, tag, attrs] of page.matchAll(/<(\/?)(\w+)([^>]*)>/g)) {
+    if (end) {
+      const at = open.map((o) => o.tag).lastIndexOf(tag);
+      if (at >= 0) open.length = at;
+      continue;
+    }
+    const id = /\sid="([^"]+)"/.exec(attrs);
+    const e = id ? E[id[1]] : null;
+    if (e) e.parentNode = open.map((o) => o.e).filter(Boolean).pop() || doc.body;
+    if (!["meta", "link", "input", "br", "img"].includes(tag)) open.push({ tag, e });
+  }
 }
 
 let now = 1000;
@@ -92,7 +135,7 @@ const ctx = {
   WebSocket: FakeWS,
   performance: { now: () => now },
   setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
-  clearTimeout() {},
+  clearTimeout: (id) => { if (timers[id - 1]) timers[id - 1].cleared = true; },
   setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
   requestAnimationFrame: () => 0,
   ImageData: class { constructor(d, w, h) { this.data = d; this.width = w; this.height = h; } },
@@ -103,6 +146,9 @@ const ctx = {
 };
 vm.createContext(ctx);
 vm.runInContext(read("player.js"), ctx);
+// The bar's Controls button as the page builds it, before anything opens the sheet.
+const barSheetAtLoad = ["aria-haspopup", "aria-controls", "aria-expanded"]
+  .map((k) => (E.bar.children.find((c) => c.dataset.act === "toolbar") || el("", "button")).getAttribute(k));
 
 const ws = () => FakeWS.all[FakeWS.all.length - 1];
 const open = (w) => { w.readyState = 1; w.onopen(); };
@@ -126,6 +172,10 @@ const card = () => ({
 });
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const tick = () => intervals.forEach((i) => i.fn());
+// due runs the timers set since `from` with a delay of `ms` that are still
+// pending, as that much time passing would.
+const due = (ms, from = 0) => timers.slice(from).filter((t) => t.ms === ms && !t.cleared)
+  .forEach((t) => { t.cleared = true; t.fn(); });
 const retryAfter = (n) => timers.slice(n).find((t) => t.ms === 250);
 const keydown = (key, target) => {
   const ev = {
@@ -278,6 +328,535 @@ say(w, { op: "hello", device: "Pixel 7" });
 check("the new socket waits for video", card().text, "Waiting for video from Pixel 7…");
 frame(w, 1, 1);
 check("and its first frame hides the card", card(), HIDDEN);
+
+// ---------------------------------------------------------------------------
+// the action bar and the controls sheet, built from the action catalog
+// ---------------------------------------------------------------------------
+
+const live = ws();
+const sent = (from) => live.sent.slice(from).map((m) => m.op);
+const key = (o) => {
+  const ev = Object.assign({
+    type: "keydown", key: "", code: "", target: null, repeat: false, isComposing: false,
+    altKey: false, ctrlKey: false, metaKey: false, shiftKey: false,
+    prevented: false, preventDefault() { this.prevented = true; },
+    getModifierState: () => false,
+  }, o);
+  (winListeners[ev.type] || []).forEach((fn) => fn(ev));
+  return ev;
+};
+const CAT = catalog();
+const byId = new Map(CAT.device.concat(CAT.local).map((a) => [a.id, a]));
+const bar = CAT.views.webBar;
+// The tooltip form, derived here from the catalog: the label, then
+// Alt+<mnemonic> and F<fkey>, as in "Volume up (Alt+U, F6)".
+const keysOf = (a) => [].concat(a.mnemonic ? ["Alt+" + a.mnemonic.toUpperCase()] : [], a.fkey ? ["F" + a.fkey] : []);
+const named = (a) => (keysOf(a).length ? a.label + " (" + keysOf(a).join(", ") + ")" : a.label);
+// The bar, written out by hand from protocol/fixtures/actions.json: each
+// button's action, the short name it shows, its tooltip (the label, then
+// Alt+<mnemonic> and F<fkey>) and its aria-keyshortcuts (the same chords, in
+// that attribute's syntax).
+const BAR = [
+  ["back", "Back", "Back (Alt+B)", "Alt+B"],
+  ["home", "Home", "Home (Alt+H, F1)", "Alt+H F1"],
+  ["appswitch", "Rec", "Recents (Alt+T, F3)", "Alt+T F3"],
+  ["menu", "Menu", "Menu key (F2)", "F2"],
+  ["toolbar", "Controls", "Controls (Alt+/)", "Alt+/"],
+  ["volup", "Vol+", "Volume up (Alt+U, F6)", "Alt+U F6"],
+  ["voldown", "Vol-", "Volume down (Alt+D, F5)", "Alt+D F5"],
+  ["mute", "Mute", "Mute device (F7)", "F7"],
+  ["rotate", "Rot", "Rotate (Alt+R, F8)", "Alt+R F8"],
+  ["notif", "Notif", "Notifications (Alt+N, F9)", "Alt+N F9"],
+  ["settings", "Shade", "Settings shade (Alt+E, F10)", "Alt+E F10"],
+  ["collapse", "Collapse", "Collapse panels (Alt+C, F11)", "Alt+C F11"],
+  ["power", "Power", "Power (Alt+P, F4)", "Alt+P F4"],
+  ["keyboard", "Keys", "Keyboard (Alt+I)", "Alt+I"],
+  ["screenshot", "Shot", "Screenshot (Alt+S)", "Alt+S"],
+  ["resetvideo", "Redraw", "Refresh video (Alt+K)", "Alt+K"],
+  ["grab", "Grab", "Grab (Alt+G, F12)", "Alt+G F12"],
+  ["quit", "Quit", "Quit (Alt+Q)", "Alt+Q"],
+];
+
+console.log("the action bar");
+const kids = E.bar.children;
+const buttons = kids.filter((c) => c.tagName === "BUTTON");
+// A control the page did not build is a blank element, so its checks fail
+// rather than stop the suite.
+const button = (id) => buttons.find((b) => b.dataset.act === id) || el("", "button");
+check("one button per webBar entry, in its order", buttons.map((b) => b.dataset.act), bar);
+check("each shows its action's short label", buttons.map((b) => b.textContent), bar.map((id) => byId.get(id).short));
+check("each tooltip is the label and the chords", buttons.map((b) => b.title), bar.map((id) => named(byId.get(id))));
+check("text, tooltip and keyshortcuts, button by button",
+  buttons.map((b) => [b.dataset.act, b.textContent, b.title, b.getAttribute("aria-keyshortcuts")]), BAR);
+check("each is named by the text it shows: no aria-label, or one that starts with that text",
+  buttons.filter((b) => b.getAttribute("aria-label") !== null && !b.getAttribute("aria-label").startsWith(b.textContent))
+    .map((b) => b.dataset.act), []);
+check("Volume up names both of its keys", button("volup").title, "Volume up (Alt+U, F6)");
+check("Menu names its F-key", button("menu").title, "Menu key (F2)");
+check("Mute says whose mute it is", button("mute").title, "Mute device (F7)");
+check("the keyframe button says what it does", [button("resetvideo").textContent, button("resetvideo").title],
+  ["Redraw", "Refresh video (Alt+K)"]);
+check("the buttons submit nothing", buttons.every((b) => b.type === "button"), true);
+check("a separator stands before Vol+, Rot and Power, and nowhere else",
+  kids.flatMap((c, i) => (c.className === "bar-sep" ? [(kids[i + 1] || { dataset: {} }).dataset.act] : [])),
+  ["volup", "rotate", "power"]);
+
+console.log("the controls sheet");
+const html = servedIndex();
+const sheetTag = /<div id="sheet"([^>]*)>/.exec(html);
+check("the sheet is a modal dialog named by its title", !!sheetTag && /role="dialog"/.test(sheetTag[1]) &&
+  /aria-modal="true"/.test(sheetTag[1]) && /aria-labelledby="sheet-title"/.test(sheetTag[1]), true);
+check("which says Controls, beside its chord", [E["sheet-title"].textContent, E["sheet-keys"].children.map((k) => k.textContent)],
+  ["Controls", ["Alt+/"]]);
+check("the ☰ button is named Controls, with its chord in the tooltip and as its keyshortcut",
+  [E["menu-btn"].getAttribute("aria-label"), E["menu-btn"].title, E["menu-btn"].getAttribute("aria-keyshortcuts")],
+  ["Controls", "Controls (Alt+/)", "Alt+/"]);
+const menuTag = /<button id="menu-btn"([^>]*)>/.exec(html);
+check("and it controls the sheet, a dialog, which starts closed", !!menuTag && /aria-haspopup="dialog"/.test(menuTag[1]) &&
+  /aria-controls="sheet"/.test(menuTag[1]) && /aria-expanded="false"/.test(menuTag[1]), true);
+const barSheet = button("toolbar");
+check("as does the bar's Controls button, which opens the same dialog", barSheetAtLoad, ["dialog", "sheet", "false"]);
+const rows = E["sheet-actions"].children;
+const row = (id) => rows.find((r) => r.dataset.act === id) || el("", "button");
+const labelOf = (r) => (r.children[0] || {}).textContent;
+const rowIds = bar.concat([...byId.keys()].filter((id) => !bar.includes(id))).filter((id) => id !== "toolbar");
+check("a row for every action but the sheet's own, in the bar's order", rows.map((r) => r.dataset.act), rowIds);
+check("each row is a button named by what it shows: no aria-label, and no tooltip to read twice",
+  rows.map((r) => [r.tagName, r.type, r.getAttribute("aria-label"), r.title]), rowIds.map(() => ["BUTTON", "button", null, ""]));
+check("showing the label", rows.map(labelOf), rowIds.map((id) => byId.get(id).label));
+check("and the chords, as keys", rows.map((r) => r.children[1].children.map((k) => k.tagName + " " + k.textContent)),
+  rowIds.map((id) => keysOf(byId.get(id)).map((k) => "KBD " + k)));
+check("which are its keyshortcuts", rows.map((r) => [r.dataset.act, r.getAttribute("aria-keyshortcuts")]),
+  BAR.filter(([id]) => id !== "toolbar").map(([id, , , keys]) => [id, keys]));
+// nameOf is a control's name from its content, as a browser computes it: the
+// text it shows, less anything hidden from assistive technology.
+const nameOf = (e) => (e.getAttribute("aria-hidden") === "true" ? "" :
+  e.children.length ? e.children.map(nameOf).filter(Boolean).join(" ") : e.textContent);
+check("so a row is named by its label alone: the chords beside it are hidden from assistive technology, " +
+  "which has them as its keyshortcuts instead of twice", rows.map(nameOf), rowIds.map((id) => byId.get(id).label));
+check("no control of the bar or the sheet has an aria-label that is also its title",
+  buttons.concat(rows, [E["menu-btn"], E["sheet-close"]])
+    .filter((c) => c.getAttribute("aria-label") !== null && c.getAttribute("aria-label") === c.title)
+    .map((c) => c.dataset.act || c.id), []);
+check("then the gestures and this browser's keys",
+  ["right click", "middle click", "3-finger tap", "<kbd>Esc</kbd>", "<kbd>Alt+M</kbd>", "<kbd>Alt+-</kbd>", "<kbd>Alt+=</kbd>"]
+    .filter((s) => !html.includes(s)), []);
+
+const isOpen = () => !E.sheet.classList.contains("idle");
+const menuBtn = E["menu-btn"];
+const closeBtn = E["sheet-close"];
+menuBtn.focus();
+menuBtn.fire("click");
+check("☰ opens it", [isOpen(), E.sheet.inert], [true, false]);
+check("and says it is open", menuBtn.getAttribute("aria-expanded"), "true");
+check("and so does the bar's Controls button", barSheet.getAttribute("aria-expanded"), "true");
+check("and the focus moves to its first row", doc.activeElement === rows[0], true);
+let n = live.sent.length;
+ev = key({ key: "Tab", code: "Tab", target: rows[0] });
+check("Tab moves to the next row", [doc.activeElement === rows[1], ev.prevented], [true, true]);
+ev = key({ type: "keyup", key: "Tab", code: "Tab", target: rows[1] });
+check("on its keydown only: its keyup leaves the focus where it is", [doc.activeElement === rows[1], ev.prevented], [true, true]);
+closeBtn.focus();
+key({ key: "Tab", code: "Tab", target: closeBtn });
+check("and from Close, the last button, round to the first", doc.activeElement === rows[0], true);
+key({ key: "Tab", code: "Tab", shiftKey: true, target: rows[0] });
+check("Shift+Tab goes back round to Close", doc.activeElement === closeBtn, true);
+for (const k of [{ key: "Enter", code: "Enter" }, { key: " ", code: "Space" }]) {
+  const down = key(Object.assign({ target: rows[2] }, k));
+  const up = key(Object.assign({ type: "keyup", target: rows[2] }, k));
+  check(`${k.code} on a row is left to the browser, which presses it`, [down.prevented, up.prevented], [false, false]);
+}
+check("and none of those keys reached the device", sent(n), []);
+ev = key({ key: "Escape", code: "Escape", target: rows[0] });
+check("Esc closes it", [isOpen(), E.sheet.inert, ev.prevented], [false, true, true]);
+check("and ☰ says it is closed", menuBtn.getAttribute("aria-expanded"), "false");
+check("as does the bar's Controls button", barSheet.getAttribute("aria-expanded"), "false");
+check("gives the focus back to ☰", doc.activeElement === menuBtn, true);
+check("and is not Back while it does", sent(n), []);
+barSheet.fire("click");
+check("opened with the bar's Controls button, both say it is open",
+  [isOpen(), menuBtn.getAttribute("aria-expanded"), barSheet.getAttribute("aria-expanded")], [true, "true", "true"]);
+row("home").fire("click");
+check("and a row closing it to run its action sets both back",
+  [isOpen(), menuBtn.getAttribute("aria-expanded"), barSheet.getAttribute("aria-expanded")], [false, "false", "false"]);
+menuBtn.fire("click");
+E.sheet.fire("click", { target: rows[3] });
+check("a click inside the card leaves it open", isOpen(), true);
+E.sheet.fire("click", { target: E.sheet });
+check("a click outside the card closes it", isOpen(), false);
+menuBtn.fire("click");
+closeBtn.fire("click");
+check("so does Close", isOpen(), false);
+key({ key: "/", code: "Slash", altKey: true, target: menuBtn });
+check("Alt+/ opens it too, and ☰ says so", [isOpen(), menuBtn.getAttribute("aria-expanded")], [true, "true"]);
+key({ key: "/", code: "Slash", altKey: true, target: rows[0] });
+check("and closes it again", [isOpen(), menuBtn.getAttribute("aria-expanded")], [false, "false"]);
+menuBtn.fire("click");
+// A click on the card's text leaves the focus on the page, outside the sheet's buttons.
+doc.activeElement = doc.body;
+n = live.sent.length;
+const elsewhere = [{ key: "Enter", code: "Enter" }, { key: " ", code: "Space" }]
+  .map((k) => key(Object.assign({ target: doc.body }, k)).prevented);
+check("Enter and Space aimed anywhere but its buttons are keys as usual: the device gets them",
+  [elsewhere, sent(n)], [[true, true], ["key", "text"]]);
+closeBtn.fire("click");
+menuBtn.focus();
+menuBtn.fire("click");
+doc.activeElement = doc.body;
+key({ key: "Escape", code: "Escape", target: doc.body });
+check("with the focus on the page like that, Esc still gives it back to ☰", [isOpen(), doc.activeElement === menuBtn],
+  [false, true]);
+
+console.log("closing the sheet once the chrome has had time to fade");
+// fade is 2.5 s with no input: the chrome (the HUD, the bar and ☰) fades out
+// and turns inert. poke is the pointer moving again, which brings it back.
+const fade = () => due(2500);
+const poke = () => (winListeners.pointermove || []).forEach((fn) => fn({}));
+// focusOn names what has the focus: an id, a bar button or row by its action,
+// or the page.
+const focusOn = () => {
+  const a = doc.activeElement;
+  if (!a) return null;
+  if (a.id) return a.id;
+  if (buttons.includes(a)) return "bar:" + a.dataset.act;
+  if (rows.includes(a)) return "row:" + a.dataset.act;
+  return a.tagName;
+};
+poke();
+menuBtn.focus();
+menuBtn.fire("click");
+fade();
+key({ key: "Escape", code: "Escape", target: doc.activeElement });
+check("open for 2.5 s with no input, then Esc: the focus goes back to ☰", [isOpen(), focusOn()], [false, "menu-btn"]);
+menuBtn.focus();
+menuBtn.fire("click");
+fade();
+key({ key: "/", code: "Slash", altKey: true, target: doc.activeElement });
+check("and so it does after Alt+/", [isOpen(), focusOn()], [false, "menu-btn"]);
+barSheet.focus();
+barSheet.fire("click");
+fade();
+key({ key: "Escape", code: "Escape", target: doc.activeElement });
+check("and to the bar's Controls button, when that opened it", [isOpen(), focusOn()], [false, "bar:toolbar"]);
+fade();
+check("once the sheet is shut, the chrome fades out after 2.5 s as before",
+  [E.hud.classList.contains("idle"), E.bar.inert, menuBtn.inert], [true, true, true]);
+poke();
+check("and comes back when the pointer moves", [E.hud.classList.contains("idle"), E.bar.inert, menuBtn.inert],
+  [false, false, false]);
+
+// outcome presses one action's button or row and returns what that did beside
+// what the catalog says it should do: a device action reaches the server as
+// its op, and the page's own actions change the page and send nothing. The
+// page's own toggles are put back afterwards.
+const player = (expr) => vm.runInContext(expr, ctx);
+function outcome(a, press) {
+  const from = live.sent.length;
+  const blobs = E.screen.blobs || 0;
+  const was = { grab: player("input.grab"), keys: player("input.softKeys"), sheet: isOpen() };
+  press();
+  let got = "no check for " + a.id, want = "a check for " + a.id;
+  if (a.kind === "keycode" || a.kind === "control") [got, want] = [sent(from), [a.id]];
+  else if (a.id === "grab") [got, want] = [[player("input.grab") !== was.grab, sent(from)], [true, []]];
+  else if (a.id === "keyboard") {
+    [got, want] = [[player("input.softKeys") !== was.keys, doc.activeElement === E.ime, sent(from)], [true, true, []]];
+  } else if (a.id === "screenshot") [got, want] = [[(E.screen.blobs || 0) - blobs, sent(from)], [1, []]];
+  else if (a.id === "toolbar") [got, want] = [[isOpen() !== was.sheet, sent(from)], [true, []]];
+  if (a.id === "grab" || a.id === "keyboard") player(`input.act("${a.id}")`);
+  return [got, want];
+}
+
+console.log("a bar button runs its action");
+for (const b of buttons) {
+  const a = byId.get(b.dataset.act);
+  if (a.id === "quit") continue; // two presses: below
+  const [got, want] = outcome(a, () => b.fire("click"));
+  check(`${a.short}: the action runs and the button flashes`, [got, b.classList.contains("done")], [want, true]);
+  if (a.id === "toolbar") closeBtn.fire("click");
+}
+
+console.log("a row runs its action");
+for (const r of rows) {
+  const a = byId.get(r.dataset.act);
+  if (a.id === "quit") continue; // two presses: below
+  menuBtn.fire("click");
+  const [got, want] = outcome(a, () => r.fire("click"));
+  check(`${a.label}: the sheet closes and the action runs`, [isOpen(), got], [false, want]);
+}
+check("and the page's own toggles are back off", [player("input.grab"), player("input.softKeys")], [false, false]);
+
+console.log("Quit needs a second press");
+const quit = button("quit");
+n = live.sent.length;
+quit.fire("click");
+check("the bar's first press only asks", [quit.textContent, quit.classList.contains("armed"), sent(n)], ["Quit?", true, []]);
+check("in place: the button keeps the width it had", [quit.style.width, quit.style.boxSizing], ["100px", "border-box"]);
+check("and it says so in its tooltip and in a toast",
+  [quit.getAttribute("aria-label"), quit.title, E.toast.textContent],
+  [null, "Quit? Press again to end the session", "press Quit again to end the session"]);
+const toastTag = /<div id="toast"([^>]*)>/.exec(html);
+check("the toast is a polite live region (role status), so it is announced as well as shown",
+  !!toastTag && /role="status"/.test(toastTag[1]) && /aria-live="polite"/.test(toastTag[1]), true);
+now += 1999;
+quit.fire("click");
+check("a second press within 2 s quits", sent(n), ["quit"]);
+check("and the button is itself again",
+  [quit.textContent, quit.classList.contains("armed"), quit.style.width, quit.title, quit.getAttribute("aria-label")],
+  ["Quit", false, "", "Quit (Alt+Q)", null]);
+n = live.sent.length;
+t0 = timers.length;
+quit.fire("click");
+const expiry = timers.slice(t0).filter((t) => t.ms === 2000);
+check("the ask lasts 2 s", expiry.length > 0, true);
+now += 2001;
+expiry.forEach((t) => t.fn());
+check("then the button is itself again", [quit.textContent, quit.classList.contains("armed")], ["Quit", false]);
+quit.fire("click");
+check("and the next press asks again", [quit.textContent, sent(n)], ["Quit?", []]);
+now += 2001;
+quit.fire("click");
+check("so does a press 2 s on, even before the page's timer has run", [quit.textContent, sent(n)], ["Quit?", []]);
+button("home").fire("click");
+check("any other action drops the ask", [quit.textContent, quit.classList.contains("armed"), sent(n)], ["Quit", false, ["home"]]);
+quit.fire("click");
+key({ key: "h", code: "KeyH", altKey: true });
+check("a chord drops it too", [quit.textContent, sent(n)], ["Quit", ["home", "home"]]);
+quit.fire("click");
+menuBtn.fire("click");
+check("and so does opening the sheet", quit.textContent, "Quit");
+closeBtn.fire("click");
+n = live.sent.length;
+key({ key: "q", code: "KeyQ", altKey: true });
+check("Alt+Q quits at once", sent(n), ["quit"]);
+quit.fire("click");
+n = live.sent.length;
+key({ key: "q", code: "KeyQ", altKey: true });
+check("also while Quit is asking, which it then stops", [sent(n), quit.textContent], [["quit"], "Quit"]);
+
+menuBtn.fire("click");
+const quitRow = row("quit");
+n = live.sent.length;
+quitRow.fire("click");
+check("the sheet's Quit row asks first, in place, and the sheet stays",
+  [labelOf(quitRow), quitRow.classList.contains("armed"), isOpen(), sent(n)], ["Quit?", true, true, []]);
+check("with a tooltip that asks too", [quitRow.title, quitRow.getAttribute("aria-label")],
+  ["Quit? Press again to end the session", null]);
+quitRow.fire("click");
+check("its second press closes the sheet and quits", [isOpen(), sent(n), labelOf(quitRow)], [false, ["quit"], "Quit"]);
+check("and the row is back to no tooltip", [quitRow.title, quitRow.getAttribute("aria-label")], ["", null]);
+menuBtn.fire("click");
+quitRow.fire("click");
+key({ key: "Escape", code: "Escape", target: quitRow });
+check("closing the sheet drops the ask", [labelOf(quitRow), quitRow.classList.contains("armed")], ["Quit", false]);
+// next is the sheet's control after the Quit row (dir 1) or before it (-1).
+const next = (dir) => {
+  const list = rows.concat([closeBtn]);
+  return list[(list.indexOf(quitRow) + dir + list.length) % list.length];
+};
+for (const [shiftKey, name] of [[false, "Tab"], [true, "Shift+Tab"]]) {
+  menuBtn.fire("click");
+  quitRow.focus();
+  quitRow.fire("click");
+  key({ key: "Tab", code: "Tab", shiftKey, target: quitRow });
+  check(`${name} moves on from an asking Quit row and drops the ask, as any other press does`,
+    [doc.activeElement === next(shiftKey ? -1 : 1), labelOf(quitRow), quitRow.classList.contains("armed")],
+    [true, "Quit", false]);
+  closeBtn.fire("click");
+}
+menuBtn.fire("click");
+quitRow.focus();
+n = live.sent.length;
+quitRow.fire("click");
+key({ key: "Tab", code: "Tab", target: quitRow });
+key({ key: "Tab", code: "Tab", shiftKey: true, target: doc.activeElement });
+quitRow.fire("click");
+check("so a press after a Tab away and back asks again rather than quitting",
+  [labelOf(quitRow), isOpen(), sent(n)], ["Quit?", true, []]);
+key({ key: "Escape", code: "Escape", target: quitRow });
+const css = read("player.css");
+const armedRule = css.indexOf("#bar button.armed, .sheet-row.armed {");
+check("an asking Quit keeps its colour under the pointer: its rule follows the hover and press rules",
+  armedRule > 0 && ["#bar button:hover", "#bar button:active", ".sheet-row:hover", ".sheet-row:active"]
+    .every((s) => css.indexOf(s) >= 0 && css.indexOf(s) < armedRule), true);
+
+console.log("any other press drops the ask, as in the terminal");
+// asks has the bar's Quit ask, does `what`, and returns whether Quit still
+// asks and what reached the device. An ask still standing is dropped after.
+const asks = (what) => {
+  quit.fire("click");
+  const from = live.sent.length;
+  what();
+  const still = quit.classList.contains("armed");
+  player("toolbar.disarmQuit()");
+  return [still, sent(from)];
+};
+const finger = { pointerId: 7, button: 0, pointerType: "touch", clientX: 5, clientY: 5, preventDefault() {} };
+check("typing drops it", asks(() => key({ key: "a", code: "KeyA", target: doc.body })), [false, ["text"]]);
+check("so does any other key the device gets", asks(() => key({ key: "Enter", code: "Enter", target: E.screen })),
+  [false, ["key"]]);
+check("a Ctrl chord the browser keeps", asks(() => key({ key: "c", code: "KeyC", ctrlKey: true, target: doc.body })),
+  [false, []]);
+check("and one the device gets", asks(() => key({ key: "a", code: "KeyA", ctrlKey: true, target: doc.body })),
+  [false, ["key"]]);
+check("a press of the picture", asks(() => E.screen.fire("pointerdown", finger)), [false, []]);
+E.screen.fire("pointerup", finger);
+check("the wheel over it", asks(() => E.screen.fire("wheel", { deltaY: -100, clientX: 5, clientY: 5, preventDefault() {} })),
+  [false, ["wheel"]]);
+const wheel = (o) => E.screen.fire("wheel", Object.assign({ deltaX: 0, deltaY: 0, clientX: 5, clientY: 5, preventDefault() {} }, o));
+check("but not wheel steps too small to send a notch", asks(() => { wheel({ deltaY: 1 }); wheel({ deltaY: -1 }); }),
+  [true, []]);
+check("or one that only goes sideways", asks(() => wheel({ deltaX: 30 })), [true, []]);
+check("nor a key let go on its own: a key-up is no press",
+  asks(() => key({ type: "keyup", key: "a", code: "KeyA", target: doc.body })), [true, []]);
+check("text from the phone's keyboard", asks(() => { E.ime.value = "é"; E.ime.fire("input"); }), [false, ["text"]]);
+check("and a paste", asks(() => (docListeners.paste || []).forEach((fn) =>
+  fn({ clipboardData: { getData: () => "pasted" }, preventDefault() {} }))), [false, ["text"]]);
+check("but not a bare modifier, or the pointer only moving over the picture", asks(() => {
+  key({ key: "Shift", code: "ShiftLeft" });
+  E.screen.fire("pointermove", { pointerId: 8, clientX: 9, clientY: 9, preventDefault() {} });
+}), [true, []]);
+
+console.log("a held key presses a button once");
+// hold presses a key as a browser does, held down for `repeats` repeats:
+// keydowns, then a keyup, each aimed at the focused element. Enter presses
+// (clicks) a focused button on each keydown the page leaves alone; Space does
+// on the keyup, if the page left its first keydown alone.
+function hold(o, repeats) {
+  const at = () => doc.activeElement || doc.body;
+  let spaceOn = null;
+  for (let i = 0; i <= repeats; i++) {
+    const t = at();
+    const down = key(Object.assign({ target: t, repeat: i > 0 }, o));
+    if (down.prevented || t.tagName !== "BUTTON") continue;
+    if (o.key === "Enter") t.fire("click");
+    else if (o.key === " " && i === 0) spaceOn = t;
+  }
+  const t = at();
+  const up = key(Object.assign({ type: "keyup", target: t }, o));
+  if (o.key === " " && !up.prevented && spaceOn === t) t.fire("click");
+}
+menuBtn.fire("click");
+quitRow.focus();
+n = live.sent.length;
+hold({ key: "Enter", code: "Enter" }, 3);
+check("a held Enter on the Quit row asks once: its repeats do not confirm it, or reach the device",
+  [labelOf(quitRow), isOpen(), sent(n)], ["Quit?", true, []]);
+hold({ key: "Enter", code: "Enter" }, 0);
+check("a second press does confirm it", [isOpen(), sent(n)], [false, ["quit"]]);
+menuBtn.fire("click");
+row("home").focus();
+n = live.sent.length;
+hold({ key: " ", code: "Space" }, 3);
+check("a held Space still presses a row, once, when it is let go", [isOpen(), sent(n)], [false, ["home"]]);
+menuBtn.focus();
+menuBtn.fire("click");
+closeBtn.focus();
+n = live.sent.length;
+hold({ key: "Enter", code: "Enter" }, 3);
+check("a held Enter on Close closes the sheet once, and its repeats stay away from the device",
+  [isOpen(), focusOn(), sent(n)], [false, "menu-btn", []]);
+menuBtn.fire("click");
+n = live.sent.length;
+hold({ key: "Escape", code: "Escape" }, 3);
+check("a held Esc closes it, and its repeats are not Back", [isOpen(), focusOn(), sent(n)], [false, "menu-btn", []]);
+menuBtn.fire("click");
+row("home").focus();
+n = live.sent.length;
+hold({ key: "Enter", code: "Enter" }, 3);
+check("a held Enter on a row runs it once, and nothing follows it", [isOpen(), sent(n)], [false, ["home"]]);
+doc.activeElement = doc.body;
+n = live.sent.length;
+hold({ key: "Enter", code: "Enter" }, 3);
+check("while a held Enter that the device gets goes on repeating there", sent(n), ["key", "key", "key", "key"]);
+menuBtn.fire("click");
+key({ key: "Escape", code: "Escape", target: doc.activeElement });
+n = live.sent.length;
+key({ key: "Escape", code: "Escape", target: doc.activeElement });
+key({ key: "Escape", code: "Escape", repeat: true, target: doc.activeElement });
+check("and a key whose key-up went elsewhere repeats as usual the next time it is pressed", sent(n), ["back", "back"]);
+doc.activeElement = doc.body;
+n = live.sent.length;
+key({ key: "Enter", code: "Enter", target: doc.body });
+menuBtn.fire("click");
+ev = key({ key: "Enter", code: "Enter", repeat: true, target: doc.activeElement });
+check("an Enter held down since before the sheet opened does not press its first row with its repeats",
+  [ev.prevented, isOpen(), sent(n)], [true, true, ["key"]]);
+key({ type: "keyup", key: "Enter", code: "Enter", target: doc.activeElement });
+closeBtn.fire("click");
+
+console.log("mouse buttons on the picture");
+n = live.sent.length;
+const at = { pointerId: 5, clientX: 10, clientY: 10, preventDefault() {} };
+E.screen.fire("pointerdown", Object.assign({ button: 1, pointerType: "mouse" }, at));
+E.screen.fire("pointerup", Object.assign({ button: 1, pointerType: "mouse" }, at));
+E.screen.fire("contextmenu", { pointerType: "touch", preventDefault() {} });
+E.screen.fire("contextmenu", { pointerType: "mouse", preventDefault() {} });
+check("middle click is Home, a finger's long press is not Back, a right click is", sent(n), ["home", "back"]);
+
+console.log("the toast");
+t0 = timers.length;
+quit.fire("click");
+check("Quit's ask shows in the toast", [E.toast.classList.contains("show"), E.toast.textContent],
+  [true, "press Quit again to end the session"]);
+due(2000, t0);
+check("which fades out after its time, still saying it as it goes",
+  [E.toast.classList.contains("show"), E.toast.textContent], [false, "press Quit again to end the session"]);
+due(200, t0);
+check("and is then emptied: a status region that kept the line would still have it for a screen reader",
+  E.toast.textContent, "");
+t0 = timers.length;
+quit.fire("click");
+due(2000, t0);
+key({ key: "g", code: "KeyG", altKey: true });
+due(200, t0);
+check("a toast shown while the last one fades keeps its words", [E.toast.classList.contains("show"), E.toast.textContent],
+  [true, "grab on: Ctrl+W/T/N/R go to the device,\nCtrl+Q ends the session"]);
+key({ key: "g", code: "KeyG", altKey: true });
+
+console.log("the session ends while the sheet is open");
+menuBtn.focus();
+menuBtn.fire("click");
+check("the sheet is open, with the focus on its first row", [isOpen(), doc.activeElement === rows[0]], [true, true]);
+say(live, { op: "bye", reason: "scterm stopped." });
+close(live);
+check("the bye moves the focus to Reconnect", doc.activeElement === E["conn-retry"], true);
+hold({ key: "Escape", code: "Escape" }, 0);
+check("Esc closes the sheet and leaves the focus on Reconnect", [isOpen(), doc.activeElement === E["conn-retry"]],
+  [false, true]);
+const sockets = FakeWS.all.length;
+hold({ key: "Enter", code: "Enter" }, 0);
+check("so Enter presses Reconnect: a new socket, and the sheet stays shut", [FakeWS.all.length, isOpen()],
+  [sockets + 1, false]);
+w = ws();
+open(w);
+say(w, { op: "hello", device: "Pixel 7" });
+frame(w, 1, 1);
+say(w, { op: "bye", reason: "scterm stopped." });
+close(w);
+const shots = E.screen.blobs || 0;
+button("screenshot").focus();
+hold({ key: "Enter", code: "Enter" }, 3);
+check("once it has ended, a held Enter presses a bar button once: one screenshot, not four",
+  (E.screen.blobs || 0) - shots, 1);
+const tabs = [false, true].map((repeat) => key({ key: "Tab", code: "Tab", repeat, target: doc.activeElement }).prevented);
+check("while a held Tab stays the browser's, repeats and all, to move the focus on", tabs, [false, false]);
+E["conn-retry"].focus();
+const socketsThen = FakeWS.all.length;
+hold({ key: "Enter", code: "Enter" }, 3);
+w = ws();
+open(w);
+check("a held Enter on Reconnect reconnects once, and its repeats do not follow the hello as keys",
+  [FakeWS.all.length, w.sent.map((m) => m.op)], [socketsThen + 1, ["hello"]]);
+say(w, { op: "hello", device: "Pixel 7" });
+frame(w, 1, 1);
+doc.activeElement = doc.body;
+key({ key: "Enter", code: "Enter", target: doc.body });
+say(w, { op: "bye", reason: "scterm stopped." });
+close(w);
+ev = key({ key: "Enter", code: "Enter", repeat: true, target: doc.activeElement });
+check("an Enter still held when the session ends does not press Reconnect, which now has the focus, with its repeats",
+  [doc.activeElement === E["conn-retry"], ev.prevented], [true, true]);
+key({ type: "keyup", key: "Enter", code: "Enter", target: doc.activeElement });
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -7,6 +7,168 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 14: browser toolbar and controls sheet from the catalog)
+
+- The browser's toolbar and controls sheet are built from the shared action
+  catalog. `webui.go` puts the catalog into the served `index.html` as a
+  JSON data block (escaped with `json.HTMLEscape`; the CSP is unchanged) and
+  panics at startup unless the placeholder line is there exactly once.
+  `player.js` reads it before anything else and derives the Alt+key, F-key
+  and Alt+F-key tables from it, the bar (`views.webBar`, gaps before Vol+,
+  Rot and Power) and the sheet. Opened as a file, the page warns on the
+  console and has no catalog actions.
+- Bar texts are the catalog's short names (Rec, Vol+/Vol-, Rot, Notif,
+  Shade, Keys, Shot, Redraw), and each button is named by that visible text;
+  its tooltip is the label plus its chords, e.g. "Home (Alt+H, F1)" or "Menu
+  key (F2)" (the Menu tooltip said "no chord"), and `aria-keyshortcuts`
+  carries the chords ("Alt+U F6"). The sheet lists all 17 actions but
+  Controls with the same label and chords as `<kbd>` chips, each row a
+  button named by what it shows (no tooltip), and runs one when clicked,
+  then static rows for the mouse, the three-finger tap, Esc, this browser's
+  mute and volume, and Alt+F1…Alt+F12. ☰ is named "Controls", with the
+  tooltip "Controls (Alt+/)"; it and the bar's Controls button both have
+  `aria-haspopup="dialog"`, `aria-controls="sheet"` and an `aria-expanded`
+  that follows the sheet. The toast is a polite status region, emptied
+  200 ms after it hides.
+- The catalog labels `mute` "Mute device" and `resetvideo` "Refresh video"
+  with the short name "Redraw" (they were "Mute", and "Keyframe" with
+  "Refresh", which read like reloading the page). The terminal's menu and
+  bar follow from the catalog, and the Android viewer bar's strings
+  (`action_mute_label`, `action_resetvideo_label`, `action_resetvideo_short`)
+  are changed to match, which part 15's bar test checks. The catalog's
+  `about` text no longer says `index.html` repeats the bar by hand.
+- The sheet is a dialog (`role=dialog`, `aria-modal`, labelled by its
+  title): focus moves into it on open; on close it goes back to what opened
+  it only while focus is still in the sheet (or nowhere), so after a session
+  ends it stays on Reconnect. While it is open the idle fade does not run,
+  so nothing turns inert and focus can always go back to ☰ or the bar's
+  Controls button. The HUD and ☰ stay visible, dimmed, behind it. Opening
+  the sheet hides the bar until the next key press, pointer move or press,
+  or wheel: Alt+/ is itself a key press, so the bar stays showing, but after
+  a click, a tap, or Enter or Space on ☰ or the bar's Controls button (the
+  keyboard's way in once a session has ended) it stays hidden. Tab and
+  Shift+Tab stay
+  inside, Esc closes it, and a row closes the sheet before running (the
+  first Quit press arms in place). After Esc closes the sheet, or Enter or
+  Space presses a button on the page, the rest of that key's auto-repeats
+  are dropped until it is released, so a held key no longer runs a row
+  again or reaches the device; keys that go to the device still repeat.
+  Each row's chord chips are hidden from assistive technology, so a row is
+  named by its label and its chords come from `aria-keyshortcuts`. The card
+  is `min(560px, 92vw)` wide: two columns in a desktop window or a phone
+  turned sideways, one on a phone held upright.
+- Quit in the bar and the sheet needs a second press within 2 s: the button
+  reads "Quit?" at the same width, its tooltip "Quit? Press again to end the
+  session", with a toast. Alt+Q still quits at once. Any other action, any
+  other key but a bare modifier (Tab and Shift+Tab in the sheet included), a
+  press on the picture, a wheel step that reaches the device, text from the
+  phone keyboard, a paste, closing the sheet, or 2 s drop the arm, as any
+  other press does in the terminal (once a session has ended, keys are left
+  to the browser and only Tab in the sheet, or Esc by closing the sheet,
+  drops it; there is nothing left to quit). Esc, the right click and the Alt aliases
+  go through the same action path.
+- Middle click is Home (documented, never wired); the context menu is Back
+  for a mouse only, so a touch long-press no longer sends Back. The grab
+  toasts say what the keys do: "grab on: Ctrl+W/T/N/R go to the device,
+  Ctrl+Q ends the session", "grab off: Ctrl+W/T/N/R/Q stay with the
+  browser".
+- Tests: the regex pins on `index.html` and `player.js` are replaced by
+  checks on the served page (`TestServedPageCarriesTheActionCatalog`,
+  `TestActionCatalogCannotBreakOutOfThePage`, `TestNodeSuitesLoadTheServedPage`,
+  `TestPlayerNamesOnlyRealOps`); the key-table parity tests run the page's
+  own table code in node on the catalog the binary embeds, mapping key codes
+  to characters through a table from the UI Events spec;
+  `TestToolbarButtonsAreRealActions` is gone with the hand-written buttons.
+  `web/page_fixture.mjs` serves the page to the node suites as the server
+  does.
+- Verification: built on part 8's second round and part 12's first, then
+  merged onto the committed part 8 and part 12's reviewed second round: one
+  conflict in `Input.key`, resolved by keeping the sheet's dialog keys and
+  dropping the old Reconnect-button return for part 8's ended-session check,
+  and one in a test header. On the merge: `gofmt`, `go vet ./...`, `go test
+  ./...`, the web tests under `-race`; node input 130/0, worklet 25/0,
+  pointer 17/0, conn 61/0, page 142/0, audio 137/0. In the builder's tree,
+  six Go tests and the input suite (11 checks) fail on the old code, the
+  page and audio suites cannot load the old page, the parity tests pass on
+  the old code but fail on it with a changed catalog, and each of 40
+  mutations is caught. Chrome keeps Ctrl+W/T/N in a normal tab, so those
+  reach the device only in `--window`.
+- Review round 1 found that the bar's aria-labels replaced the visible text
+  as the spoken name (so speech control could not press "Vol+", "Vol-",
+  "Keys" or "Redraw" by what they show), that closing the sheet after a
+  session ended moved focus off
+  Reconnect, that the sheet resolved to one 310 px column, and that the bar
+  grouping, the toolbar's own keys and Tab on keydown only were not pinned.
+  The second round fixes those as described above and takes the review's
+  suggestions (`aria-controls`, `aria-expanded`, `aria-keyshortcuts`, held
+  keys, the toast's status role, any other press dropping an armed Quit).
+  Its checks: node input 130/0, worklet 25/0, pointer 17/0, conn 61/0, page
+  169/0 (27 of them fail on the first round's files; the grouping, Enter or
+  Space reaching the device when focus is not on a sheet button, and Tab on
+  keydown only passed there too, and are held by mutations), audio 137/0;
+  `gofmt`, `go vet ./...`, `go test ./...` and the web, catalog and keymap
+  tests under `-race`; 25 mutations, each caught. Expected names, tooltips
+  and shortcuts come from a table written by hand from `actions.json`. In
+  headless Chrome 155 and Firefox 157 on the served page: every bar button
+  is named by its text in Chrome's accessibility tree, ☰ is "Controls"
+  (expanded false, then true); after a session ends, Esc leaves focus on
+  Reconnect (both browsers) and Enter reconnects (Chrome); a held Enter on
+  the Quit row now only arms it (it sent quit and seven Enter keys); the
+  sheet shows two columns at 1280×800 and 1920×1080 and one at 390×844.
+  Headless Firefox over WebDriver BiDi never presses a focused button with
+  Enter or Space, so the held-key and reconnect results are Chrome's. Not
+  run: a screen reader, a phone, Safari, what middle click does natively,
+  Gradle for the Android strings (review round 2 saw Chrome 155 and Firefox
+  157 give a mouse's context menu the pointer type "mouse").
+- Review round 2 found that Esc or Alt+/ after the chrome had faded (2.5 s
+  idle) sent focus to the page body, because the faded ☰ and bar are inert;
+  that Tab and Shift+Tab in the sheet kept an armed Quit; that a held key's
+  repeats reached the device after Esc or Close closed the sheet, and queued
+  Enters after Reconnect; a
+  stale comment in `index.html`; and some unpinned branches. Round 3 fixes
+  those as described above and takes its suggestions (repeats dropped until
+  release, a wheel dropping the arm only when it reaches the device, the
+  rows' chords left to `aria-keyshortcuts`, the bar Controls button's dialog
+  attributes, the toast emptied). Its checks: node input 130/0, worklet
+  25/0, pointer 17/0, conn 61/0, page 202/0 (19 of them fail on the second
+  round's files; the checks for focus on the body then Esc, a lone key-up,
+  Ctrl+C and Ctrl+A, and a repeated Tab after a session ended pass there too
+  and are held by mutations), audio 137/0; `gofmt`, `go vet ./...`, `go test
+  ./...` and the web tests under `-race`; 35 mutations, 34 caught (the miss
+  is the branch for no focus at all). In headless Chrome 155 and headful
+  Firefox 157 (real keys and auto-repeat under Xvfb), 21 and 8 checks that
+  failed on the second round pass: Esc after 3 s idle focuses the opener;
+  Tab drops an armed Quit; a held Enter on Close, a held Esc, and a held
+  Enter on Reconnect after a session ended send nothing more; the toast is
+  emptied about 2.2 s after it shows; Chrome's accessibility tree names a row
+  "Back" (it was "Back Alt+B") and gives the bar's Controls button a dialog
+  popup whose expanded state follows the sheet.
+- Review round 3 (Chrome 155 headless, 40 checks, and Firefox 157 headful,
+  18, all passing) found two sentences of this entry wrong, on the bar while
+  the sheet is open (a click that opens the sheet leaves the bar hidden) and
+  on which button has `aria-haspopup` (both do), and the comment above
+  `chrome()` stale (☰ never fades, it only turns inert); round 4 corrected
+  the entry and that comment and changed no code. Review round 4 found the
+  bar's state still described wrongly after a session has ended (Enter or
+  Space on ☰ opens the sheet from a click, so the bar stays hidden) and the
+  new comment calling the HUD inert; round 5 takes the review's wording for
+  both.
+- Correction to the part-15 entry: with these labels its viewer bar shows
+  "Redraw" for that button, read as "Refresh video", not "Refresh" read as
+  "Keyframe".
+- Left alone: the README still says Ctrl+Q goes to the device with grab on
+  and that the terminal menu has Mute (the docs change rewrites both); the
+  sheet still scrolls in windows shorter than about 736 px; focus on ☰ or a
+  bar button drops to the page body when the chrome fades 2.5 s later (older
+  than this change); Alt+/, Alt+G, Alt+I, Alt+M and F12 toggle again on every
+  auto-repeat (from reading the code); bar buttons give their chords twice,
+  in the tooltip and in `aria-keyshortcuts`; a screen reader that ignores
+  `aria-keyshortcuts` no longer speaks a row's chords; the bar stays hidden
+  behind the sheet after a click, a tap, or Enter or Space on ☰ or the
+  bar's Controls button, but shows after Alt+/ (the two could match);
+  `#menu-btn.idle` in the CSS is never used, and comments in `player.css`
+  and `index.html` still say ☰ fades with the chrome.
+
 ## Update (2026-10-21: QoL overhaul, part 22: adb and peer connection errors)
 
 - The adb forward fallback can now connect (shown against a fake adb

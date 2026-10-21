@@ -35,17 +35,49 @@ const VIDEO_HEADER = 16;
 const FMT_JPEG = 0;
 const FMT_RAW = 1;
 
+// TOAST_FADE_MS is the toast's fade-out in player.css. Once it has faded the
+// toast is emptied: it is a status region, and a line left in it would still
+// be there for a screen reader to come across.
+const TOAST_FADE_MS = 200;
+
 let toastTimer = 0;
 function toast(msg, ms) {
   els.toast.textContent = msg;
   els.toast.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => els.toast.classList.remove("show"), ms || 1600);
+  toastTimer = setTimeout(() => {
+    els.toast.classList.remove("show");
+    toastTimer = setTimeout(() => { els.toast.textContent = ""; }, TOAST_FADE_MS);
+  }, ms || 1600);
 }
 
 function setState(text, cls) {
   els.state.textContent = text;
   els.state.className = cls || "";
+}
+
+// ---------------------------------------------------------------------------
+// the action catalog
+//
+// protocol/fixtures/actions.json, the one definition of the app-level actions
+// (actions.go). The server puts it into index.html as a JSON block, and this
+// page builds its Alt+letter and F-key tables, its action bar and its controls
+// sheet from it, so none of them is a copy that could disagree with the
+// terminal's.
+// ---------------------------------------------------------------------------
+
+const CATALOG = readCatalog(document.getElementById("actions"));
+
+// readCatalog parses the catalog block. A page without one (index.html opened
+// as a file rather than served) gets an empty catalog: it still shows the
+// device and takes pointer and typed input, with no action bar or chords.
+function readCatalog(el) {
+  try {
+    const c = JSON.parse(el.textContent);
+    if (Array.isArray(c.device) && Array.isArray(c.local) && Array.isArray(c.views.webBar)) return c;
+  } catch (e) { /* missing or malformed: the empty catalog below */ }
+  console.warn("scterm: the page has no action catalog");
+  return { device: [], local: [], views: { webBar: [] } };
 }
 
 // ---------------------------------------------------------------------------
@@ -571,22 +603,6 @@ const BARE_MODIFIER_KEYS = new Set([
   "CapsLock", "NumLock", "ScrollLock",
 ]);
 
-// The app-level keys, identical to the terminal's (input.go fKeyMap +
-// appkeys.go mapAppFKey): F1 home, F2 menu, F3 recents, F4 power, F5 vol-,
-// F6 vol+, F7 mute, F8 rotate, F9 notifications, F10 settings, F11 collapse,
-// F12 grab. The values are the same op names the server already understands,
-// and the server turns them into the same Android keycodes for both modes.
-const APP_KEYS = {
-  F1: "home", F2: "menu", F3: "appswitch", F4: "power",
-  F5: "voldown", F6: "volup", F7: "mute",
-  F8: "rotate", F9: "notif", F10: "settings", F11: "collapse",
-  F12: "grab",
-};
-
-// Alt+F1..F12: the same actions. A bare F-key is the terminal's binding, but an
-// OS, a window manager or a phone keyboard may never deliver one.
-const ALT_FKEYS = APP_KEYS;
-
 // Ctrl+A..Z -> Android letter keycodes 29..54, as handleByte() sends them.
 const LETTER_KEYCODES = {};
 for (let i = 0; i < 26; i++) {
@@ -597,26 +613,6 @@ for (let i = 0; i < 26; i++) {
 // left alone, because closing the window ends a --window session. Grab (F12,
 // the terminal's own key) hands them to the device instead.
 const CTRL_BROWSER_KEYS = new Set(["KeyW", "KeyT", "KeyN", "KeyR", "KeyQ"]);
-
-// Alt+<letter> mnemonic device actions. This is the primary binding on a phone
-// keyboard (Unexpected Keyboard has Ctrl and Alt, but no F-key row), and the
-// TUI uses exactly the same table (actions.go appMnemonicOps) — so Alt+H is
-// Home whether you are in a terminal, a browser tab or --window. Keep the two
-// tables in step: web_keymap_test.go parses this one and compares.
-//
-// Alt+M is deliberately NOT here: it stays the LOCAL mute. The device's own
-// mute has no chord (F7 and the action bar carry it).
-//
-// Slash is a punctuation chord: a phone keyboard reports it by character and
-// codeOf() normalises it (PUNCT_CODES) before this lookup, so Alt+/ opens the
-// controls sheet there too. The ☰ button remains the always-available path.
-const MNEMONIC_ACTIONS = {
-  KeyB: "back", KeyC: "collapse", KeyD: "voldown", KeyE: "settings",
-  KeyG: "grab", KeyH: "home", KeyI: "keyboard", KeyK: "resetvideo",
-  KeyN: "notif", KeyP: "power", KeyQ: "quit", KeyR: "rotate",
-  KeyS: "screenshot", KeyT: "appswitch", KeyU: "volup",
-  Slash: "toolbar",
-};
 
 // Alt+<key> local controls (Alt is what the TUI uses, so both modes agree).
 // F-keys are handled through KEYCODES below, except F4: Alt+F4 is the browser's
@@ -658,6 +654,46 @@ function codeOf(ev) {
   return k; // "Enter", "Backspace", "ArrowLeft", ...
 }
 
+// The app-level keys come from the action catalog, as the terminal's do
+// (actions.go appMnemonicOps and appFKeyOps), so a key does the same thing in
+// a terminal, a browser tab and --window. The values are catalog action ids:
+// the server performs the device actions from the same catalog.
+//
+// MNEMONIC_ACTIONS: Alt+<key> runs the action whose mnemonic that key is. It is
+// the primary binding on a phone keyboard (Unexpected Keyboard has Ctrl and
+// Alt, but no F-key row). Keys are code names made the way codeOf() makes them
+// from a phone keyboard's bare character, so Alt+/ opens the controls sheet
+// there too; the ☰ button remains the always-available path. Alt+M is not a
+// mnemonic: it stays the LOCAL mute, and the device's own mute has no
+// Alt+letter chord (F7, the action bar and the controls sheet carry it).
+//
+// APP_KEYS: F1..F12 run the action with that F-key, as in the terminal
+// (input.go fKeyMap + appkeys.go mapAppFKey). ALT_FKEYS: Alt+F1..F12 are the
+// same actions, because a bare F-key is the terminal's binding but an OS, a
+// window manager or a phone keyboard may never deliver one.
+//
+// web_keymap_test.go runs this derivation against the catalog the binary
+// embeds and compares the result with the terminal's tables.
+function catalogActions(catalog) {
+  return catalog.device.concat(catalog.local);
+}
+
+function keyTables(catalog) {
+  const mnemonics = {};
+  const fkeys = {};
+  for (const a of catalogActions(catalog)) {
+    const code = a.mnemonic ? codeOf({ key: a.mnemonic }) : "";
+    if (code) mnemonics[code] = a.id;
+    if (a.fkey) fkeys["F" + a.fkey] = a.id;
+  }
+  return { mnemonics, fkeys };
+}
+
+const KEY_TABLES = keyTables(CATALOG);
+const MNEMONIC_ACTIONS = KEY_TABLES.mnemonics;
+const APP_KEYS = KEY_TABLES.fkeys;
+const ALT_FKEYS = APP_KEYS;
+
 // Three-finger tap tuning. A finger that stays put is held back from the device
 // for SOFTKEY_GRACE_MS (or until it moves past SOFTKEY_HOLD_SLOP_PX, or lifts),
 // so that a three-finger tap cannot also land on the device as a stray tap.
@@ -697,6 +733,25 @@ class Input {
     this.softKeys = false;
     this.kbRetry = false; // a pointerdown retry is armed for the IME
     this.printScreenDown = false;
+    // The pointer type of the last press on the canvas: older browsers send
+    // contextmenu without one.
+    this.pointerType = "";
+    // onAct, when set, hears every action before it runs: the toolbar drops a
+    // Quit that is waiting for its second press. onPress hears every press of
+    // a key or of the picture (pressed), which drops it too.
+    this.onAct = null;
+    this.onPress = null;
+    // consumed is the keys, still held down, whose press closed the sheet or
+    // pressed one of the page's buttons: key() drops their auto-repeats.
+    this.consumed = new Set();
+  }
+
+  // pressed tells onPress of a press: any key but a bare modifier, a press of
+  // the picture or a notch of the wheel over it, typed or pasted text. As any
+  // press but the Quit's own does in the terminal, it drops a Quit waiting for
+  // its second.
+  pressed() {
+    if (this.onPress) this.onPress();
   }
 
   sendPos(op, extra) {
@@ -784,6 +839,8 @@ class Input {
       c.setPointerCapture(ev.pointerId);
       // Audio can only start from a gesture; the first tap is the gesture.
       pcm.resume();
+      this.pointerType = ev.pointerType;
+      this.pressed();
 
       if (this.pointers.size === 0) {
         // First finger of a new gesture.
@@ -803,6 +860,11 @@ class Input {
         // send nothing, so extra fingers never reach the device as a stray
         // touch (they used to send a second "down" at the new position).
         this.dropHeld();
+        return;
+      }
+      // Middle click = Home, like the TUI.
+      if (ev.button === 1) {
+        this.act("home");
         return;
       }
       if (ev.button !== 0) return;
@@ -881,8 +943,10 @@ class Input {
 
     c.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
-      // Right click = Android back, like the TUI.
-      this.net.send({ op: "back" });
+      // Right click = Android back, like the TUI. A long press of a finger or
+      // a pen raises contextmenu too, and must not press Back.
+      if ((ev.pointerType || this.pointerType) !== "mouse") return;
+      this.act("back");
     });
 
     c.addEventListener("wheel", (ev) => {
@@ -893,6 +957,7 @@ class Input {
       if (Math.abs(this.wheelAcc) >= notch) {
         const notches = Math.trunc(this.wheelAcc / notch);
         this.wheelAcc -= notches * notch;
+        this.pressed();
         this.sendPos("wheel", { delta: notches });
       }
     }, { passive: false });
@@ -901,6 +966,7 @@ class Input {
       const text = (ev.clipboardData || window.clipboardData).getData("text");
       if (text) {
         ev.preventDefault();
+        this.pressed();
         this.net.send({ op: "text", text: text });
         toast("pasted " + text.length + " chars");
       }
@@ -916,6 +982,7 @@ class Input {
       const text = els.ime.value;
       if (!text) return;
       els.ime.value = "";
+      this.pressed();
       this.net.send({ op: "text", text: text });
     };
     els.ime.addEventListener("input", drain);
@@ -930,25 +997,63 @@ class Input {
   }
 
   key(ev, down) {
-    // The controls sheet is documentation, not a mode: Esc closes it, and it
-    // never swallows input aimed at the device.
-    if (down && ev.key === "Escape" && toolbar.sheetOpen) {
-      ev.preventDefault();
-      toolbar.hideSheet();
-      return;
-    }
-    // After a bye there is no device to send keys to, so the browser keeps them
-    // all: Tab moves between the page's buttons, and Enter or Space presses the
-    // focused one.
-    if (this.net.ended) return;
     // `name` is the physical key, or the nearest equivalent a phone keyboard
     // offers: soft keyboards routinely leave `code` empty, which used to make
     // every hotkey below unreachable from one.
     const name = codeOf(ev);
+    // A key whose press closed the sheet (Esc) or pressed one of the page's
+    // buttons (Enter, Space) has done its work: its auto-repeats are dropped,
+    // or they would reach the device once the sheet has closed or the session
+    // is back. Its key-up ends that, and so does a fresh press, in case the
+    // key-up went elsewhere.
+    if (ev.repeat && this.consumed.has(name)) {
+      ev.preventDefault();
+      return;
+    }
+    this.consumed.delete(name);
+    // While the controls sheet is open it takes the keys that work a dialog:
+    // Esc closes it, Tab and Shift+Tab go round its buttons (so the focus stays
+    // inside; and they are presses, which drop a Quit waiting for its second),
+    // and Enter or Space on one of them is left to the browser, which presses
+    // it once: a held key's repeats would press it again, and a held Enter
+    // would arm Quit and then confirm it. Other keys are handled below.
+    const press = ev.key === "Enter" || ev.key === " ";
+    if (toolbar.sheetOpen) {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        if (down) {
+          this.consumed.add(name);
+          toolbar.hideSheet();
+        }
+        return;
+      }
+      if (ev.key === "Tab" && !ev.altKey && !ev.ctrlKey && !ev.metaKey) {
+        ev.preventDefault();
+        if (down) {
+          this.pressed();
+          toolbar.cycle(ev.shiftKey ? -1 : 1);
+        }
+        return;
+      }
+      if (press && toolbar.owns(ev.target)) {
+        if (ev.repeat) ev.preventDefault();
+        else if (down) this.consumed.add(name);
+        return;
+      }
+    }
+    // After a bye there is no device to send keys to, so the browser keeps them
+    // all: Tab moves between the page's buttons, and Enter or Space presses the
+    // focused one, once.
+    if (this.net.ended) {
+      if (press && ev.repeat) ev.preventDefault();
+      else if (press && down) this.consumed.add(name);
+      return;
+    }
     if (BARE_MODIFIER_KEYS.has(name)) {
       ev.preventDefault();
       return;
     }
+    if (down) this.pressed();
 
     // F1..F12 mean exactly what they mean in the terminal (input.go's fKeyMap +
     // mapAppFKey). They used to be sent to Android as the F1..F12 keycodes
@@ -972,11 +1077,6 @@ class Input {
 
     // Alt combos are local controls: they mirror the TUI keys exactly.
     if (ev.altKey && !ev.ctrlKey) {
-      if (name === "KeyG") {
-        if (down) this.toggleGrab();
-        ev.preventDefault();
-        return;
-      }
       // The mnemonic table is consulted FIRST, so the aliases in ALT_ACTIONS
       // (Alt+H home, Alt+B back, Alt+R rotate...) can never disagree with it:
       // both tables name the same action and the shared one wins.
@@ -1008,7 +1108,7 @@ class Input {
         if (action === "louder") { this.localVolume(+10); return; }
         if (action === "quieter") { this.localVolume(-10); return; }
         if (action === "localmute") { this.localMute(); return; }
-        this.net.send({ op: action });
+        this.act(action);
         return;
       }
       const altCode = KEYCODES[name];
@@ -1057,7 +1157,7 @@ class Input {
     // Esc alone is Back, exactly as in the terminal (input.go: "\x1b" -> back).
     if (name === "Escape") {
       ev.preventDefault();
-      if (down) this.net.send({ op: "back" });
+      if (down) this.act("back");
       return;
     }
 
@@ -1107,11 +1207,13 @@ class Input {
     this.net.send({ op: "key", code: code, meta: meta });
   }
 
-  // act runs one app-level action. Device ops are just an op for the server,
-  // which maps them to the same Android keycode the terminal would send; the
-  // few local ones (grab, keyboard, toolbar, screenshot) are handled here.
-  // Toolbar button presses call this too, so button and chord are the same call.
+  // act runs one catalog action. Device actions are just an op for the server,
+  // which performs them from the same catalog as the terminal, and so is quit
+  // (it ends the session); the few local ones (grab, keyboard, toolbar,
+  // screenshot) are handled here. The action bar and the controls sheet call
+  // this too, so a button, a row and a chord are the same call.
   act(op) {
+    if (this.onAct) this.onAct(op);
     switch (op) {
     case "grab":
       this.toggleGrab();
@@ -1130,11 +1232,12 @@ class Input {
     this.net.send({ op: op });
   }
 
+  // The toast must say what key() does with CTRL_BROWSER_KEYS in each state.
   toggleGrab() {
     this.grab = !this.grab;
     toast(this.grab
-      ? "grab: browser keys go to the device"
-      : "grab off: Ctrl+W/T/N/R/Q stay in the browser");
+      ? "grab on: Ctrl+W/T/N/R go to the device,\nCtrl+Q ends the session"
+      : "grab off: Ctrl+W/T/N/R/Q stay with the browser");
   }
 
   // localVolume / localMute are the terminal's Alt+- Alt+= Alt+M: they change
@@ -1184,27 +1287,138 @@ function screenshot() {
 // ---------------------------------------------------------------------------
 // action bar + controls sheet
 //
-// The bar is the no-F-key, no-chord path to every action: one button per op,
-// wired through Input.act so a click and its keyboard chord are literally the
-// same call. The sheet is documentation only -- it runs nothing, so it cannot
-// disagree with the bindings it lists.
+// Both are built from the action catalog and run actions through Input.act, so
+// a click and its keyboard chord are literally the same call. The bar is the
+// no-F-key, no-chord path to every action: one button per webBar entry. The
+// sheet lists every action as a row that runs it, beside its chords.
 // ---------------------------------------------------------------------------
 
+// BAR_GROUPS are the webBar ids that start a new group of buttons in the bar.
+const BAR_GROUPS = ["volup", "rotate", "power"];
+
+// QUIT_CONFIRM_MS is how long a pressed Quit button or row waits for the
+// second press that quits.
+const QUIT_CONFIRM_MS = 2000;
+
+// chords lists the keys that run an action: Alt+<mnemonic>, then its F-key.
+function chords(a) {
+  const keys = [];
+  if (a.mnemonic) keys.push("Alt+" + a.mnemonic.toUpperCase());
+  if (a.fkey) keys.push("F" + a.fkey);
+  return keys;
+}
+
+// describe is an action's tooltip: its label, then its chords, as in
+// "Volume up (Alt+U, F6)".
+function describe(a) {
+  const keys = chords(a);
+  return keys.length ? a.label + " (" + keys.join(", ") + ")" : a.label;
+}
+
+// shortcuts gives el the action's chords as its aria-keyshortcuts, written
+// the way that attribute wants them, as in "Alt+U F6".
+function shortcuts(el, a) {
+  const keys = chords(a);
+  if (keys.length) el.setAttribute("aria-keyshortcuts", keys.join(" "));
+}
+
+function kbd(text) {
+  const k = document.createElement("kbd");
+  k.textContent = text;
+  return k;
+}
+
 class Toolbar {
-  constructor(input) {
+  constructor(input, catalog) {
     this.input = input;
     this.bar = document.getElementById("bar");
     this.sheet = document.getElementById("sheet");
+    this.close = document.getElementById("sheet-close");
+    this.menuBtn = document.getElementById("menu-btn");
     this.timers = new WeakMap();
-    this.buttons = Array.prototype.slice.call(
-      document.querySelectorAll("#bar button[data-act]"));
-    for (const btn of this.buttons) {
-      btn.addEventListener("click", () => this.press(btn));
+    this.actions = new Map(); // bar button or sheet row -> its catalog action
+    this.labels = new Map();  // bar button or sheet row -> the element with its text
+    this.buttons = [];        // the bar, in webBar order
+    this.rows = [];           // the sheet's action rows
+    this.toggles = [];        // ☰ and the bar's Controls button, which open the sheet
+    this.opener = null;       // what had the focus before the sheet opened
+    this.quitArmed = null;    // the Quit button or row waiting for its second press
+    this.quitText = "";
+    this.quitTitle = "";
+    this.quitUntil = 0;
+    this.quitTimer = 0;
+    input.onAct = input.onPress = () => this.disarmQuit();
+
+    const byId = new Map(catalogActions(catalog).map((a) => [a.id, a]));
+    const barIds = catalog.views.webBar.filter((id) => byId.has(id));
+    if (this.bar) {
+      for (const id of barIds) {
+        if (BAR_GROUPS.includes(id) && this.buttons.length) {
+          const sep = document.createElement("span");
+          sep.className = "bar-sep";
+          this.bar.appendChild(sep);
+        }
+        const btn = this.control(byId.get(id));
+        btn.textContent = byId.get(id).short;
+        btn.title = describe(byId.get(id));
+        if (id === "toolbar") {
+          // Like ☰, it opens the sheet, a dialog, and says whether it is open.
+          btn.setAttribute("aria-haspopup", "dialog");
+          btn.setAttribute("aria-controls", "sheet");
+          btn.setAttribute("aria-expanded", "false");
+          this.toggles.push(btn);
+        }
+        this.labels.set(btn, btn);
+        btn.addEventListener("click", () => this.press(btn));
+        this.bar.appendChild(btn);
+        this.buttons.push(btn);
+      }
     }
-    const close = document.getElementById("sheet-close");
-    if (close) close.addEventListener("click", () => this.hideSheet());
-    const menuBtn = document.getElementById("menu-btn");
-    if (menuBtn) menuBtn.addEventListener("click", () => this.toggleSheet());
+
+    // The sheet's rows: the bar's order, then any action the bar leaves out,
+    // except the sheet's own (its chord is shown beside the title instead). A
+    // row shows the label and the chords, so it has no tooltip repeating them,
+    // and the chords are hidden from assistive technology, which has them as
+    // the row's keyshortcuts: the row's name is its label.
+    const box = document.getElementById("sheet-actions");
+    const ids = barIds.concat([...byId.keys()].filter((id) => !barIds.includes(id)));
+    for (const id of ids) {
+      if (!box || id === "toolbar") continue;
+      const a = byId.get(id);
+      const row = this.control(a);
+      row.className = "sheet-row";
+      const label = document.createElement("span");
+      label.className = "sheet-label";
+      label.textContent = a.label;
+      const keys = document.createElement("span");
+      keys.className = "sheet-keys";
+      keys.setAttribute("aria-hidden", "true");
+      for (const k of chords(a)) keys.appendChild(kbd(k));
+      row.appendChild(label);
+      row.appendChild(keys);
+      this.labels.set(row, label);
+      row.addEventListener("click", () => this.run(row));
+      box.appendChild(row);
+      this.rows.push(row);
+    }
+
+    const self = byId.get("toolbar");
+    if (self) {
+      const title = document.getElementById("sheet-title");
+      const keys = document.getElementById("sheet-keys");
+      if (title) title.textContent = self.label;
+      if (keys) for (const k of chords(self)) keys.appendChild(kbd(k));
+      if (this.menuBtn) {
+        this.menuBtn.title = describe(self);
+        this.menuBtn.setAttribute("aria-label", self.label);
+        shortcuts(this.menuBtn, self);
+      }
+    }
+    if (this.menuBtn) {
+      this.toggles.push(this.menuBtn);
+      this.menuBtn.addEventListener("click", () => this.input.act("toolbar"));
+    }
+    if (this.close) this.close.addEventListener("click", () => this.hideSheet());
     if (this.sheet) {
       // The sheet starts faded; keep it out of the tab order until opened.
       this.sheet.inert = true;
@@ -1214,34 +1428,142 @@ class Toolbar {
     }
   }
 
-  // press runs the button's action and flashes it, so a tap has visible
+  // control is the button for one action, in the bar or the sheet: named by
+  // the text it shows, with the action's chords as its keyshortcuts.
+  control(a) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.act = a.id;
+    shortcuts(b, a);
+    this.actions.set(b, a);
+    return b;
+  }
+
+  // press runs a bar button's action and flashes it, so a tap has visible
   // feedback even when the device response is off-screen.
   press(btn) {
-    const act = btn.dataset.act;
-    if (act === "toolbar") { this.toggleSheet(); return; }
-    this.input.act(act);
+    const a = this.actions.get(btn);
+    if (!this.confirm(btn, a)) return;
+    this.input.act(a.id);
     btn.classList.add("done");
     clearTimeout(this.timers.get(btn));
     this.timers.set(btn, setTimeout(() => btn.classList.remove("done"), 350));
   }
 
+  // run runs a sheet row's action. The sheet closes first, as the terminal's
+  // action menu does, so what the action did is in view.
+  run(row) {
+    const a = this.actions.get(row);
+    if (!this.confirm(row, a)) return;
+    this.hideSheet();
+    this.input.act(a.id);
+  }
+
+  // confirm is the two-press Quit: the first press of a Quit button or row
+  // only arms it, and a second press of it within QUIT_CONFIRM_MS quits. Alt+Q
+  // goes straight to Input.act and quits at once.
+  confirm(el, a) {
+    if (a.id !== "quit") return true;
+    if (this.quitArmed === el && performance.now() < this.quitUntil) {
+      this.disarmQuit();
+      return true;
+    }
+    this.armQuit(el, a);
+    return false;
+  }
+
+  // armQuit asks "Quit?" in place. The control keeps the width it had, so the
+  // longer text moves nothing beside it.
+  armQuit(el, a) {
+    this.disarmQuit();
+    const width = el.getBoundingClientRect().width;
+    el.style.boxSizing = "border-box";
+    el.style.width = width + "px";
+    const label = this.labels.get(el);
+    this.quitText = label.textContent;
+    label.textContent = this.quitText + "?";
+    this.quitTitle = el.title;
+    el.title = a.label + "? Press again to end the session";
+    el.classList.add("armed");
+    this.quitArmed = el;
+    this.quitUntil = performance.now() + QUIT_CONFIRM_MS;
+    const timer = setTimeout(() => { if (this.quitTimer === timer) this.disarmQuit(); }, QUIT_CONFIRM_MS);
+    this.quitTimer = timer;
+    toast("press " + a.short + " again to end the session", QUIT_CONFIRM_MS);
+  }
+
+  disarmQuit() {
+    const el = this.quitArmed;
+    if (!el) return;
+    this.quitArmed = null;
+    clearTimeout(this.quitTimer);
+    this.quitTimer = 0;
+    this.labels.get(el).textContent = this.quitText;
+    el.title = this.quitTitle;
+    el.classList.remove("armed");
+    el.style.width = "";
+    el.style.boxSizing = "";
+  }
+
   toggleSheet() {
+    if (this.sheetOpen) this.hideSheet();
+    else this.showSheet();
+  }
+
+  // showSheet opens the sheet and moves the focus to its first row.
+  showSheet() {
     if (!this.sheet) return;
-    const hide = !this.sheet.classList.contains("idle");
-    if (hide) { this.hideSheet(); return; }
+    this.opener = document.activeElement;
     this.sheet.classList.remove("idle");
     this.sheet.inert = false;
     if (this.bar) this.bar.classList.add("idle");
+    this.expanded(true);
+    const first = this.controls()[0];
+    if (first) first.focus();
   }
 
+  // hideSheet closes the sheet and gives the focus back to what had it, if
+  // the focus is still in the sheet (or nowhere): a bye moves it to the
+  // Reconnect button, and there it stays.
   hideSheet() {
-    if (!this.sheet) return;
+    if (!this.sheetOpen) return;
+    this.disarmQuit();
+    const focus = document.activeElement;
     this.sheet.classList.add("idle");
     this.sheet.inert = true; // a faded sheet must not be tabbable
+    this.expanded(false);
+    const back = this.opener;
+    this.opener = null;
+    const inSheet = !focus || focus === document.body || this.owns(focus);
+    if (inSheet && back && typeof back.focus === "function") back.focus();
   }
 
   get sheetOpen() {
     return !!this.sheet && !this.sheet.classList.contains("idle");
+  }
+
+  // expanded says on ☰ and on the bar's Controls button whether the sheet is open.
+  expanded(open) {
+    for (const b of this.toggles) b.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  // controls are the sheet's buttons, in the order Tab visits them.
+  controls() {
+    return this.close ? this.rows.concat([this.close]) : this.rows;
+  }
+
+  owns(el) {
+    return this.controls().includes(el);
+  }
+
+  // cycle moves the focus to the sheet's next (dir 1) or previous (-1)
+  // button, from the last round to the first, so Tab never leaves the sheet.
+  cycle(dir) {
+    const list = this.controls();
+    if (!list.length) return;
+    const at = list.indexOf(document.activeElement);
+    const next = at < 0 ? (dir > 0 ? 0 : list.length - 1) : (at + dir + list.length) % list.length;
+    list[next].focus();
   }
 }
 
@@ -1355,7 +1677,7 @@ const net = new Net();
 const view = new View(els.canvas);
 const pcm = new Pcm();
 const input = new Input(net, view);
-const toolbar = new Toolbar(input);
+const toolbar = new Toolbar(input, CATALOG);
 // Without this call no listener is ever registered and the page is a picture of
 // the device rather than a way to drive it: no pointer, wheel, key or clipboard
 // events at all, in both --web and --window. Easy to lose, because the player
@@ -1585,11 +1907,15 @@ window.addEventListener("resize", () => {
 });
 
 // The HUD and the action bar fade out while the user is not touching
-// anything. The floating menu button fades with them (the same .idle class),
-// so all chrome appears and disappears as one layer. Hidden chrome is also
-// made inert, so a faded bar cannot be tabbed into.
+// anything; ☰ stays visible. The bar and ☰ are made inert while it is faded
+// (the HUD has nothing to focus), so a faded bar cannot be tabbed into. The
+// fade does nothing while the controls sheet is
+// open, so nothing turns inert under it: closing the sheet gives the focus
+// back to ☰ or the bar's Controls button, and an inert button cannot take it.
+// (showSheet hides the bar, but leaves it able to take the focus.)
 let hudTimer = 0;
 function chrome(on) {
+  if (!on && toolbar.sheetOpen) return;
   els.hud.classList.toggle("idle", !on);
   const bar = document.getElementById("bar");
   const mb = document.getElementById("menu-btn");

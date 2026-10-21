@@ -14,10 +14,43 @@ package main
 // ring buffer -- ~20 ms of latency, no codec, no jitter buffer, and no
 // autoplay gesture needed in --window mode.
 
-import _ "embed"
+import (
+	"bytes"
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 //go:embed web/index.html
-var webIndexHTML string
+var webIndexTemplate string
+
+// webIndexHTML is the page as served: index.html with the action catalog
+// (actions.go) in place of its placeholder. player.js builds the action bar,
+// the controls sheet and its key tables from it.
+var webIndexHTML = withActionCatalog(webIndexTemplate, actionsCatalogJSON)
+
+// webActionsPlaceholder is the line of index.html that the catalog replaces.
+// The node suites put the catalog fixture in its place the same way
+// (web/page_fixture.mjs).
+const webActionsPlaceholder = "<!--scterm:actions-->"
+
+// withActionCatalog puts the catalog into the page as
+// <script type="application/json" id="actions">, a data block the browser
+// never runs, so the page's CSP needs nothing for it. json.HTMLEscape writes
+// every '<', '>' and '&' as a \u escape, so no string in the catalog can end
+// the element early. A page without exactly one placeholder is a build-time
+// data error, like a malformed catalog.
+func withActionCatalog(page string, catalog []byte) string {
+	if n := strings.Count(page, webActionsPlaceholder); n != 1 {
+		panic(fmt.Sprintf("web/index.html holds the action catalog placeholder %s %d times, want once", webActionsPlaceholder, n))
+	}
+	var block bytes.Buffer
+	block.WriteString(`<script type="application/json" id="actions">`)
+	json.HTMLEscape(&block, catalog)
+	block.WriteString("</script>")
+	return strings.Replace(page, webActionsPlaceholder, block.String(), 1)
+}
 
 //go:embed web/player.js
 var webPlayerJS string

@@ -18,6 +18,7 @@
 
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { servedIndex } from "./page_fixture.mjs";
 
 const read = (name) => readFileSync(new URL("./" + name, import.meta.url), "utf8");
 const src = read("player.js");
@@ -222,16 +223,18 @@ function fakeEl(tag, cls, hidden) {
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 40 }),
     setPointerCapture() {}, focus() {}, blur() {},
     appendChild(c) { this.children.push(c); return c; },
+    setAttribute(k, v) { this[k] = String(v); },
     remove() {},
   };
 }
 
 // page loads every script index.html lists, in its order, into one global
 // scope, the way a browser does: a script that throws is reported and the
-// next one still runs.
+// next one still runs. The page is the one the server serves, with the action
+// catalog in it; opts.unserved loads index.html as it is on disk instead.
 function page(opts = {}) {
-  const html = read("index.html");
-  const g = { console };
+  const html = opts.unserved ? read("index.html") : servedIndex();
+  const g = { console: opts.console || console };
   const w = state(g);
   const { FakeAC, FakeWorkletNode } = audio(w, opts);
   const els = new Map();
@@ -241,11 +244,8 @@ function page(opts = {}) {
     const cls = /\bclass="([^"]*)"/.exec(m[2]);
     els.set(id[1], fakeEl(m[1], cls ? cls[1] : "", /(^|\s)hidden(\s|$)/.test(m[2])));
   }
-  const bar = [...html.matchAll(/<button data-act="([^"]+)"/g)].map((m) => {
-    const b = fakeEl("button", "", false);
-    b.dataset.act = m[1];
-    return b;
-  });
+  const catalog = /<script type="application\/json" id="actions">([^<]*)<\/script>/.exec(html);
+  if (catalog) els.get("actions").textContent = catalog[1];
   class FakeWS {
     constructor(url) { this.url = url; this.readyState = 0; this.sent = []; p.ws = this; }
     send(s) { this.sent.push(JSON.parse(s)); }
@@ -266,7 +266,7 @@ function page(opts = {}) {
     document: {
       hidden: false, title: "", activeElement: null, body: fakeEl("body", "", false),
       getElementById: (id) => els.get(id) || null,
-      querySelectorAll: (sel) => (sel === "#bar button[data-act]" ? bar : []),
+      querySelectorAll: () => [],
       createElement: (tag) => fakeEl(tag, "", false),
       addEventListener() {}, removeEventListener() {},
     },
@@ -639,6 +639,8 @@ console.log("the page");
   check("index.html loads the ring before the player",
     p.scripts.includes("pcm-worklet.js") && p.scripts.indexOf("pcm-worklet.js") < p.scripts.indexOf("player.js"), true);
   check("every script loads into one page without clashing", p.errors, []);
+  check("and the page builds its action bar from the catalog it is served with",
+    p.els.get("bar").children.filter((c) => c.tagName === "BUTTON").length > 0, true);
   check("the chip starts hidden", p.chip(), null);
   check("the page listens for the gestures that start the sound", unlocks(p.w, p.pcm), ALL_UNLOCKS);
   check("and has not started any sound yet", p.w.made, 0);
@@ -723,6 +725,16 @@ console.log("the page over plain http (no AudioWorklet)");
   if (chipEl) chipEl.fire("click", {});
   check("tapping the note shows the explanation (a phone has no tooltips)", p.els.get("toast").textContent, tip);
   check("and puts the note away", p.chip(), null);
+}
+console.log("the page without its catalog");
+{
+  // index.html opened as a file, not served: no catalog block at all.
+  const warned = [];
+  const p = page({ unserved: true, console: Object.assign({}, console, { warn: (m) => warned.push(m) }) });
+  check("still loads", p.errors, []);
+  check("says what is missing", warned, ["scterm: the page has no action catalog"]);
+  check("with no action bar", p.els.get("bar").children.length, 0);
+  check("and still connects", !!p.ws, true);
 }
 console.log("the page in a browser without Web Audio");
 {

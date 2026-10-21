@@ -94,7 +94,7 @@
     <string name="action_voldown_short">Vol-</string>
     <string name="action_volup_label">Volume up</string>
     <string name="action_volup_short">Vol+</string>
-    <string name="action_mute_label">Mute</string>
+    <string name="action_mute_label">Mute device</string>
     <string name="action_mute_short">Mute</string>
     <string name="action_power_label">Power</string>
     <string name="action_power_short">Power</string>
@@ -107,8 +107,8 @@
     <string name="action_menu_label">Menu key</string>
     <string name="action_menu_short">Menu</string>
     <string name="action_screenshot_label">Screenshot</string>
-    <string name="action_resetvideo_label">Keyframe</string>
-    <string name="action_resetvideo_short">Refresh</string>
+    <string name="action_resetvideo_label">Refresh video</string>
+    <string name="action_resetvideo_short">Redraw</string>
 
     <string name="section_viewer">Viewer</string>
     <string name="viewer_settings_hint">In landscape the video fills the screen, and the handle at the bottom brings up the controls.</string>
