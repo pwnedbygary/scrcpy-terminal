@@ -64,14 +64,19 @@ type keyboard struct {
 	curCol int
 	mods   kbModifierState
 
-	// press flash
+	// press flash: the key that was just pressed, and when (0 = none)
 	flashRow, flashCol int
+	flashAt            int64
 }
 
 const kbRowSpace = 1 // blank row between keyboard and the status bar
 
+// kbFlashDuration is how long a pressed key stays green: as long as a clicked
+// action-bar button.
+const kbFlashDuration = barFlashDuration
+
 func newKeyboard() *keyboard {
-	k := &keyboard{}
+	k := &keyboard{flashRow: -1, flashCol: -1}
 	k.rebuild()
 	return k
 }
@@ -97,13 +102,19 @@ func (k *keyboard) rebuild() {
 		}
 		k.rows = append(k.rows, m)
 	}
-	k.curRow = len(k.rows) - 1
-	k.curCol = 0
+	// The cursor starts on ENT, so Enter on the physical keyboard still means
+	// Enter on the device until the arrows move it somewhere else.
+	k.curRow, k.curCol = 0, 0
+	for ci, c := range k.rows[0].cells {
+		if c.key.label == "ENT" {
+			k.curCol = ci
+		}
+	}
 }
 
 // kbLayout: bottom-to-top rows. Looks like a phone/tablet software keyboard:
 // bottom = space+modifiers, then 3 letter rows (staggered), digits, then a
-// nav row, function row, and the top action bar.
+// dpad row, a system-key row, the function row, and the top action bar.
 func kbLayout() [][]kbKey {
 	return [][]kbKey{
 		{ // bottom: space + modifier cluster
@@ -122,7 +133,7 @@ func kbLayout() [][]kbKey {
 			{label: "V", key: 50, kind: kbText},
 			{label: "B", key: 30, kind: kbText},
 			{label: "N", key: 42, kind: kbText},
-			{label: "M", key: 46, kind: kbText},
+			{label: "M", key: 41, kind: kbText},
 			{label: ",", key: 55, kind: kbText},
 			{label: ".", key: 56, kind: kbText},
 			{label: "/", key: 76, kind: kbText},
@@ -135,8 +146,8 @@ func kbLayout() [][]kbKey {
 			{label: "G", key: 35, kind: kbText},
 			{label: "H", key: 36, kind: kbText},
 			{label: "J", key: 38, kind: kbText},
-			{label: "K", key: 40, kind: kbText},
-			{label: "L", key: 41, kind: kbText},
+			{label: "K", key: 39, kind: kbText},
+			{label: "L", key: 40, kind: kbText},
 			{label: ";", key: 74, kind: kbText},
 			{label: "'", key: 75, kind: kbText},
 		},
@@ -163,17 +174,19 @@ func kbLayout() [][]kbKey {
 			{label: "-", key: 69, kind: kbText}, {label: "=", key: 70, kind: kbText},
 			{label: "\\", key: 73, kind: kbText},
 		},
-		{ // nav row: dpad + android system keys
+		{ // dpad (its own row so every row fits in 80 columns)
+			{label: "LT", key: 21, kind: kbText},
+			{label: "UP", key: 19, kind: kbText},
+			{label: "DN", key: 20, kind: kbText},
+			{label: "RT", key: 22, kind: kbText},
+			{label: "OK", key: 23, kind: kbText},
+		},
+		{ // android system keys
 			{label: "HOME", key: 3, kind: kbText},
 			{label: "BACK", key: 4, kind: kbText},
 			{label: "MENU", key: 82, kind: kbText},
 			{label: "REC", key: 187, kind: kbText},
 			{label: "PWR", key: 26, kind: kbText},
-			{label: "UP", key: 19, kind: kbText},
-			{label: "DN", key: 20, kind: kbText},
-			{label: "LT", key: 21, kind: kbText},
-			{label: "RT", key: 22, kind: kbText},
-			{label: "OK", key: 23, kind: kbText},
 			{label: "VOL+", key: 24, kind: kbText},
 			{label: "VOL-", key: 25, kind: kbText},
 			{label: "MUTE", key: 164, kind: kbText},
@@ -206,14 +219,27 @@ func kbLayout() [][]kbKey {
 
 func (k *keyboard) rowHeight() int { return len(k.rows) }
 
+// top is the 0-based terminal row of the keyboard's top row.
+func (k *keyboard) top(termRows int) int {
+	kbTop := termRows - k.rowHeight() - kbRowSpace - 2 // -2: status bar + spacer
+	if kbTop < 0 {
+		kbTop = 0
+	}
+	return kbTop
+}
+
+// coversRow reports whether terminal row cellY (1-based) is one of the
+// keyboard's rows.
+func (k *keyboard) coversRow(cellY, termRows int) bool {
+	rel := cellY - 1 - k.top(termRows)
+	return rel >= 0 && rel < k.rowHeight()
+}
+
 // lines returns overlay lines for the whole terminal (termRows tall),
 // anchored at the bottom. Only the keyboard rows carry buttons.
 func (k *keyboard) lines(termRows int) []overlayLine {
 	n := k.rowHeight()
-	kbTop := termRows - n - kbRowSpace - 2 // -2: status bar + spacer
-	if kbTop < 0 {
-		kbTop = 0
-	}
+	kbTop := k.top(termRows)
 	out := make([]overlayLine, termRows)
 	for i := range out {
 		out[i] = overlayLine{hlFrom: -1}
@@ -234,6 +260,7 @@ const (
 	btnBg       = "\x1b[48;2;52;52;60m\x1b[38;2;235;235;245m"  // dark gray pill
 	btnBgActive = "\x1b[48;2;90;90;130m\x1b[38;2;255;255;255m" // active modifier
 	btnBgFlash  = "\x1b[48;2;0;120;60m\x1b[38;2;255;255;255m"  // pressed flash
+	btnBgCursor = "\x1b[48;2;205;205;215m\x1b[38;2;20;20;28m"  // keyboard-navigation cursor
 )
 
 type kbSeg = overlaySeg
@@ -262,6 +289,8 @@ func (k *keyboard) renderRow(ri int) overlayLine {
 		code := btnBg
 		if ci == k.flashCol && ri == k.flashRow {
 			code = btnBgFlash
+		} else if ci == k.curCol && ri == k.curRow {
+			code = btnBgCursor
 		} else if c.key.kind == kbModifier && modifierActive(c.key.key, k.mods) {
 			code = btnBgActive
 		}
@@ -301,12 +330,7 @@ func keyLabel(key kbKey, mods kbModifierState) string {
 
 func (k *keyboard) hitTestKeyCell(cellX, cellY, termRows int) (gridCell, bool) {
 	n := k.rowHeight()
-	kbTop := termRows - n - kbRowSpace - 2
-	if kbTop < 0 {
-		kbTop = 0
-	}
-	ov := cellY - 1
-	rel := ov - kbTop
+	rel := cellY - 1 - k.top(termRows)
 	if rel < 0 || rel >= n {
 		return gridCell{}, false
 	}
@@ -337,7 +361,6 @@ func (k *keyboard) hitTest(cellX, cellY, termRows int) (kbKey, bool) {
 // ---------------------------------------------------------------------------
 
 func (k *keyboard) act(a *app, key kbKey) {
-	k.flash(-1, -1) // clear previous flash
 	switch key.kind {
 	case kbText:
 		if a.ctrl != nil {
@@ -389,7 +412,7 @@ func (k *keyboard) act(a *app, key kbKey) {
 
 func (k *keyboard) navigate(dx, dy int) {
 	// clear press flash on navigation (it is only a momentary confirm)
-	k.flashRow, k.flashCol = -1, -1
+	k.flash(-1, -1)
 	n := len(k.rows)
 	if n == 0 {
 		return
@@ -431,8 +454,24 @@ func (k *keyboard) setFlashCurrent() {
 	k.flash(k.curRow, k.curCol)
 }
 
-// flash marks a key as just-pressed (visual confirmation).
+// flash marks a key as just-pressed (visual confirmation); a negative row
+// clears it.
 func (k *keyboard) flash(row, col int) {
 	k.flashRow = row
 	k.flashCol = col
+	k.flashAt = 0
+	if row >= 0 {
+		k.flashAt = timeNowUnixNano()
+	}
+}
+
+// kbTick clears a finished press flash. The run loop calls it on its ticks,
+// so the green lasts even when the device screen sends no new frame.
+func (a *app) kbTick(now int64) {
+	k := a.kb
+	if k == nil || k.flashAt == 0 || now-k.flashAt < int64(kbFlashDuration) {
+		return
+	}
+	k.flash(-1, -1)
+	a.refreshKeyboard()
 }

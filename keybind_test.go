@@ -48,7 +48,8 @@ func TestScreenshotNoFrameYet(t *testing.T) {
 }
 
 // TestScreenshotWritesPPM: happy path — a rendered canvas snapshot is written
-// as binary PPM at terminal-canvas resolution (cols x rows*2), alpha stripped.
+// as binary PPM at terminal-canvas resolution (cols x rows*2). The canvas is
+// FFmpeg's AV_PIX_FMT_BGR0 (bytes B, G, R, unused) and a PPM pixel is R, G, B.
 func TestScreenshotWritesPPM(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -83,13 +84,36 @@ func TestScreenshotWritesPPM(t *testing.T) {
 	if len(body) != wantBody {
 		t.Fatalf("body length %d, want %d", len(body), wantBody)
 	}
-	// spot-check: first pixel RGB and last pixel RGB survive the alpha strip
-	if body[0] != pattern[0] || body[1] != pattern[1] || body[2] != pattern[2] {
+	// spot-check: the first and last pixels come out as R, G, B
+	if body[0] != pattern[2] || body[1] != pattern[1] || body[2] != pattern[0] {
 		t.Fatalf("first pixel mismatch: %v", body[:3])
 	}
-	last := n - 4 // last RGBA quad
-	if body[wantBody-3] != pattern[last] || body[wantBody-2] != pattern[last+1] || body[wantBody-1] != pattern[last+2] {
+	last := n - 4 // last canvas pixel
+	if body[wantBody-3] != pattern[last+2] || body[wantBody-2] != pattern[last+1] || body[wantBody-1] != pattern[last] {
 		t.Fatalf("last pixel mismatch: %v", body[wantBody-3:])
+	}
+}
+
+// TestScreenshotKeepsColours: a pure red, green and blue pixel as the scaler
+// lays them out (B, G, R, unused) are red, green and blue in the PPM.
+func TestScreenshotKeepsColours(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rgb.ppm")
+	canvas := []byte{
+		0, 0, 255, 0, // red
+		0, 255, 0, 0, // green
+		255, 0, 0, 0, // blue
+	}
+	if err := writePPMFile(path, canvas, 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const header = "P6\n3 1\n255\n"
+	want := header + "\xff\x00\x00" + "\x00\xff\x00" + "\x00\x00\xff"
+	if string(data) != want {
+		t.Errorf("PPM = %q, want %q", data, want)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -69,27 +70,23 @@ func truncateRunes(s string, n int) string {
 	return s
 }
 
-// writePPMFile writes an RGBA buffer as a binary PPM to path (alpha ignored).
-func writePPMFile(path string, rgba []byte, w, h int) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
+// writePPMFile writes a canvas as a binary PPM to path. The canvas is what the
+// scaler produces, FFmpeg's AV_PIX_FMT_BGR0: bytes B, G, R, unused per pixel,
+// while a PPM stores R, G, B.
+func writePPMFile(path string, bgr0 []byte, w, h int) error {
+	out := fmt.Appendf(nil, "P6\n%d %d\n255\n", w, h)
+	out = slices.Grow(out, w*h*3)
+	for i := 0; i < w*h; i++ {
+		p := bgr0[i*4 : i*4+3]
+		out = append(out, p[2], p[1], p[0])
 	}
-	defer f.Close()
-	fmt.Fprintf(f, "P6\n%d %d\n255\n", w, h)
-	for y := 0; y < h; y++ {
-		row := rgba[y*w*4 : (y+1)*w*4]
-		for x := 0; x < w; x++ {
-			f.Write(row[x*4 : x*4+3]) // ignore alpha
-		}
-	}
-	return nil
+	return os.WriteFile(path, out, 0o666)
 }
 
-// dumpPPM writes an RGBA canvas as a binary PPM (verification tool).
-func dumpPPM(dir string, idx int, rgba []byte, w, h int) error {
+// dumpPPM writes a canvas as a binary PPM (verification tool).
+func dumpPPM(dir string, idx int, bgr0 []byte, w, h int) error {
 	os.MkdirAll(dir, 0o755)
-	return writePPMFile(fmt.Sprintf("%s/frame%d.ppm", dir, idx), rgba, w, h)
+	return writePPMFile(fmt.Sprintf("%s/frame%d.ppm", dir, idx), bgr0, w, h)
 }
 
 // printSortedKeys lists all Android keycodes (for -keys).

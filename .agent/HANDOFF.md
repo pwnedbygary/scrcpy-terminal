@@ -7,6 +7,23 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 3: terminal keyboard, screenshots, crash restore)
+
+- On-screen keyboard: K, L and M sent L, M and R (now checked against
+  `keycodes_gen.go`); the cursor started on ROTATE, so Enter rotated the phone
+  (it starts on ENT and is drawn); `act()` cleared the flash its callers set
+  (it lasts `kbFlashDuration`, cleared on the tick); the system-key row is
+  split so every row fits 80 columns; only a real left press acts (drag motion
+  and wheel notches pressed keys), a click between keys stays on the keyboard,
+  and a drag begun on the video ends on the device (it left a finger down).
+- Alt+S and `--dump-frames` wrote the BGR0 canvas as RGB, swapping red and
+  blue; pixels are now written R, G, B in one write.
+- A panic on a terminal-UI goroutine restores the terminal (normal screen,
+  mouse reporting off, cooked mode) before it carries on.
+- Verification: the keycode, row-width and colour tests fail on the base
+  code; a probe on the base showed a wheel notch pressing a key, a drag
+  release leaving the touch down and the cursor on ROTATE.
+
 ## Update (2026-10-20: QoL overhaul, part 2: one press per key in the browser)
 
 - Keys sent through `sendKey` (the plain keycode keys such as Backspace,

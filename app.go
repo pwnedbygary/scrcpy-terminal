@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -79,6 +80,11 @@ type app struct {
 	// ("stream ended: use of closed network connection") are not reported as
 	// failures on the way out.
 	quitting atomic.Bool
+
+	// restoreTerm gives the terminal back (normal screen, no mouse reporting,
+	// cooked mode) once, whichever of the run loop's exit and a panic on
+	// another goroutine gets there first. Nil outside the terminal UI.
+	restoreTerm func()
 }
 
 type inputEvent struct {
@@ -174,7 +180,14 @@ func (a *app) run() error {
 	if err != nil {
 		return fmt.Errorf("raw mode: %w", err)
 	}
-	defer restoreMode(ttyReadFD(), oldMode)
+	var restoreOnce sync.Once
+	a.restoreTerm = func() {
+		restoreOnce.Do(func() {
+			a.tui.shellClose()
+			restoreMode(ttyReadFD(), oldMode)
+		})
+	}
+	defer a.restoreTerm()
 
 	// Print warnings before entering the alternate screen so they don't
 	// corrupt the TUI.
@@ -183,15 +196,14 @@ func (a *app) run() error {
 	}
 
 	a.tui.shellInit()
-	defer a.tui.shellClose()
 
 	a.setMouse(a.grabbed)
 	a.tui.setStatus(a.statusLine())
 
-	go a.inputLoop()
+	a.goTUI(a.inputLoop)
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
+	a.goTUI(func() {
 		for s := range sigCh {
 			switch s {
 			case syscall.SIGWINCH:
@@ -200,34 +212,34 @@ func (a *app) run() error {
 				a.events <- inputEvent{kind: evQuit}
 			}
 		}
-	}()
+	})
 
-	go func() {
+	a.goTUI(func() {
 		if err := a.stream.runVideo(); err != nil {
 			fmt.Fprintf(stderrWriter(), "scterm: video: %v\n", err)
 			a.events <- inputEvent{kind: evQuit}
 		}
-	}()
-	go func() {
+	})
+	a.goTUI(func() {
 		if err := a.stream.runAudio(a.audio); err != nil {
 			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
 		}
-	}()
+	})
 
-	go func() {
+	a.goTUI(func() {
 		for {
 			time.Sleep(500 * time.Millisecond)
 			a.events <- inputEvent{kind: evTick}
 		}
-	}()
-	go func() {
+	})
+	a.goTUI(func() {
 		fast := time.NewTicker(16 * time.Millisecond)
 		defer fast.Stop()
 		for range fast.C {
 			a.events <- inputEvent{kind: evTickFast}
 		}
-	}()
-	go a.followAudioSink()
+	})
+	a.goTUI(a.followAudioSink)
 
 	for {
 		select {
@@ -242,6 +254,7 @@ func (a *app) run() error {
 			case evTick:
 				a.flushPendingMove()
 				a.barTick()
+				a.kbTick(timeNowUnixNano())
 				a.tui.setStatus(a.statusLine())
 			case evBytes:
 				a.handleInput(ev.buf)
@@ -259,6 +272,27 @@ func (a *app) run() error {
 			a.tui.draw(f.rgb)
 			a.stream.returnPooled(f.rgb)
 		}
+	}
+}
+
+// goTUI runs fn on its own goroutine while the terminal UI owns the screen. A
+// panic there would end the process without run's deferred restore, leaving
+// the shell in raw mode on the alternate screen with mouse reporting on.
+func (a *app) goTUI(fn func()) {
+	go func() {
+		defer a.restoreTerminalOnPanic()
+		fn()
+	}()
+}
+
+// restoreTerminalOnPanic gives the terminal back, then lets the panic go on
+// to print its stack trace and end the process.
+func (a *app) restoreTerminalOnPanic() {
+	if r := recover(); r != nil {
+		if a.restoreTerm != nil {
+			a.restoreTerm()
+		}
+		panic(r)
 	}
 }
 

@@ -183,7 +183,7 @@ func (a *app) handleInput(b []byte) {
 		a.toggleGrab()
 		return
 	}
-	// Alt+letter: the mnemonic device actions (appkeys.go appMnemonicOps).
+	// Alt+letter: the mnemonic device actions (actions.go appMnemonicOps).
 	// These are the primary bindings on a phone keyboard, which has Alt but no
 	// F-row. They run before the case-sensitive locals below so that each
 	// chord has exactly one meaning: Alt+M is LOCAL mute, not device mute, and
@@ -559,6 +559,13 @@ func seqKeyMap(b []byte) (uint32, uint32, bool) {
 // mouse: SGR escape sequences ESC[<b;x;yM / m
 // ---------------------------------------------------------------------------
 
+// leftPress reports whether an SGR mouse event is the left button going down.
+// Drag motion (bit 32) and wheel notches (bit 64) also arrive as "M" with the
+// low button bits clear, and must not press an overlay button.
+func leftPress(pressed bool, btnRaw int) bool {
+	return pressed && btnRaw&(0x07|32|64) == 0
+}
+
 func (a *app) mouseEvent(b []byte) bool {
 	s := string(b)
 	if !strings.HasPrefix(s, "\x1b[<") {
@@ -592,7 +599,7 @@ func (a *app) mouseEvent(b []byte) bool {
 	// Menu open: clicks on a row run it; clicks elsewhere are swallowed, so a
 	// stray click never reaches the device through the overlay.
 	if a.menuOpen {
-		if pressed && btnRaw&0x07 == 0 { // left button only
+		if leftPress(pressed, btnRaw) {
 			_, rows := termSize()
 			if item, ok := a.menuHitTest(cellX, cellY, rows); ok {
 				a.closeMenu()
@@ -603,8 +610,10 @@ func (a *app) mouseEvent(b []byte) bool {
 	}
 
 	// Keyboard open: clicks inside the keyboard area press keys, clicks
-	// above it pass through to the device (tap-through).
-	if a.kb != nil && a.kb.open {
+	// above it pass through to the device (tap-through). A drag that started
+	// on the video keeps going to the device until it is released, wherever
+	// the pointer is, or the device would be left with a finger down.
+	if a.kb != nil && a.kb.open && !a.drag.isDown() {
 		_, rows := termSize()
 		if dbgControl != "" {
 			fmt.Fprintf(stderrWriter(), "scterm: kb hit-test click (%d,%d) rows=%d open=%v\n", cellX, cellY, rows, a.kb.open)
@@ -614,7 +623,7 @@ func (a *app) mouseEvent(b []byte) bool {
 			fmt.Fprintf(stderrWriter(), "scterm: kb hit-test (%d,%d) -> key=%v ok=%v\n", cellX, cellY, key.label, ok)
 		}
 		if ok {
-			if pressed && btnRaw&0x07 == 0 { // left button only
+			if leftPress(pressed, btnRaw) {
 				// flash the pressed key (we need its grid position: re-hit)
 				if kc, ok2 := a.kb.hitTestKeyCell(cellX, cellY, rows); ok2 {
 					a.kb.flash(kc.row, kc.col)
@@ -622,6 +631,11 @@ func (a *app) mouseEvent(b []byte) bool {
 				a.kb.act(a, key)
 				a.refreshKeyboard()
 			}
+			return true
+		}
+		// The gap between two keys is still the keyboard: a near miss must
+		// not tap the device behind it.
+		if a.kb.coversRow(cellY, rows) {
 			return true
 		}
 	}
