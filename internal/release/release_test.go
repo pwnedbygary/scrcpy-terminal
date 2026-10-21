@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewer(t *testing.T) {
@@ -117,6 +119,37 @@ func TestDownloadRefusesWhatWasNotPublished(t *testing.T) {
 	srv := server(t, body, 0, "")
 	if _, err := Latest(context.Background(), srv.Client(), srv.URL+"/missing", "scterm-test"); err == nil {
 		t.Error("a 404 read as a release")
+	}
+}
+
+// TestDownloadCancelledLeavesNothing: a download whose context ends, before
+// it starts or part way, leaves no file behind.
+func TestDownloadCancelledLeavesNothing(t *testing.T) {
+	body := bytes.Repeat([]byte("scterm "), 40000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body[:len(body)/2])
+		w.(http.Flusher).Flush()
+		select { // the rest never comes
+		case <-r.Context().Done():
+		case <-time.After(30 * time.Second):
+		}
+	}))
+	t.Cleanup(srv.Close)
+	a := &Asset{Name: "scterm", URL: srv.URL + "/scterm", Size: int64(len(body)), SHA256: sha(body)}
+	for _, partWay := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		if !partWay {
+			cancel()
+		}
+		dir := t.TempDir()
+		_, err := Download(ctx, srv.Client(), a, dir, "scterm-test", func(int64) { cancel() })
+		cancel()
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("part way %v: %v, want the download cancelled", partWay, err)
+		}
+		if left, _ := filepath.Glob(filepath.Join(dir, "*")); len(left) != 0 {
+			t.Errorf("part way %v: left %v behind", partWay, left)
+		}
 	}
 }
 

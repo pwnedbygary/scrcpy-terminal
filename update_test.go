@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -15,7 +17,9 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestCheckoutOf(t *testing.T) {
@@ -43,15 +47,15 @@ func TestCheckRunsRefusesABinaryThatCannotStart(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good")
 	os.WriteFile(good, []byte("#!/bin/sh\necho 'scterm 2.1.0'\n"), 0o644)
-	if err := checkRuns(good, "2.1.0"); err != nil {
+	if err := checkRuns(context.Background(), good, "2.1.0"); err != nil {
 		t.Errorf("a working binary was refused: %v", err)
 	}
-	if err := checkRuns(good, "2.2.0"); err == nil {
+	if err := checkRuns(context.Background(), good, "2.2.0"); err == nil {
 		t.Error("a binary reporting another version was accepted")
 	}
 	broken := filepath.Join(dir, "broken")
 	os.WriteFile(broken, []byte("#!/bin/sh\necho 'error while loading shared libraries: libavcodec.so.61' >&2\nexit 127\n"), 0o644)
-	if err := checkRuns(broken, "2.1.0"); err == nil || !strings.Contains(err.Error(), "libavcodec.so.61") {
+	if err := checkRuns(context.Background(), broken, "2.1.0"); err == nil || !strings.Contains(err.Error(), "libavcodec.so.61") {
 		t.Errorf("a binary missing its libraries: %v", err)
 	}
 }
@@ -70,6 +74,9 @@ type fakeRelease struct {
 	noDigest bool   // no digest is published for it
 	missing  bool   // downloading it finds nothing
 	apiDown  bool   // the release list cannot be had
+	noPage   bool   // the release has no page
+	// download, when set, answers the binary's download instead
+	download func(w http.ResponseWriter, r *http.Request)
 }
 
 // serveRelease publishes rel the way GitHub's API does, and counts the
@@ -107,14 +114,22 @@ func serveRelease(t *testing.T, rel fakeRelease) (*httptest.Server, *atomic.Int3
 				}
 				assets = append(assets, a)
 			}
+			page := "https://example.invalid/releases/tag/v" + rel.version
+			if rel.noPage {
+				page = ""
+			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"tag_name": "v" + rel.version,
-				"html_url": "https://example.invalid/releases/tag/v" + rel.version,
+				"html_url": page,
 				"body":     rel.notes,
 				"assets":   assets,
 			})
 		case "/scterm":
 			downloads.Add(1)
+			if rel.download != nil {
+				rel.download(w, r)
+				return
+			}
 			if rel.missing {
 				http.NotFound(w, r)
 				return
@@ -266,6 +281,30 @@ func TestUpdateCheck(t *testing.T) {
 	}
 	if n := downloads.Load(); n != 0 {
 		t.Errorf("--check downloaded the binary %d times", n)
+	}
+}
+
+// TestUpdateCheckWithoutALinuxBinary: --check reports a newer release that
+// has no binary for it to update to, and succeeds; the update itself still
+// fails, before anything is downloaded.
+func TestUpdateCheckWithoutALinuxBinary(t *testing.T) {
+	srv, downloads := serveRelease(t, fakeRelease{version: "1.3.0", notes: "Faster."})
+	updating(t, srv, "1.2.3")
+	exe := installed(t, "1.2.3")
+	before := files(t, filepath.Dir(exe))
+	out, _, err := runUpdate(t, exe, updateOptions{check: true})
+	if want := "scterm 1.3.0 has been released (you have 1.2.3), but it has no linux/amd64 binary to update to.\n"; err != nil || out != want {
+		t.Errorf("--check: %q, %v; want %q", out, err, want)
+	}
+	out, _, err = runUpdate(t, exe, updateOptions{yes: true})
+	if err == nil || err.Error() != "release 1.3.0 has no Linux binary" || out != "" {
+		t.Errorf("update: printed %q, %v; want only the error that there is no Linux binary", out, err)
+	}
+	if after := files(t, filepath.Dir(exe)); !maps.Equal(after, before) {
+		t.Errorf("the files went from %v to %v", before, after)
+	}
+	if n := downloads.Load(); n != 0 {
+		t.Errorf("downloaded %d times", n)
 	}
 }
 
@@ -538,7 +577,25 @@ func TestNoteLines(t *testing.T) {
 		{"none", "", nil, false},
 		{"blank", "\r\n  \n\t\n", nil, false},
 		{"CRLF and blank ends", "\r\n\r\nFaster.\r\n\r\nFixes:  \r\n- audio\r\n\r\n", []string{"Faster.", "", "Fixes:", "- audio"}, false},
-		{"control characters", "a\x1b[2Jb\x07\tc", []string{"a[2Jb\tc"}, false},
+		{"control characters", "a\x1b[2Jb\x07\tc\x7f", []string{"ab\tc"}, false},
+		{"colours", "\x1b[31mred\x1b[0m and \x1b[1;4mbold\x1b[m", []string{"red and bold"}, false},
+		{"CSI with private parameters and an intermediate byte", "\x1b[?25la\x1b[2 qb\x1b[>4;1mc", []string{"abc"}, false},
+		{"CSI final bytes at either end of their range", "\x1b[2@a\x1b[200~b", []string{"ab"}, false},
+		{"8-bit CSI", "\u009b31mred\u009b0m", []string{"red"}, false},
+		{"OSC ended by BEL", "\x1b]0;a window title\x07Title", []string{"Title"}, false},
+		{"OSC ended by ESC \\", "\x1b]8;;https://example.com\x1b\\a link\x1b]8;;\x1b\\", []string{"a link"}, false},
+		{"8-bit OSC ended by 8-bit ST", "\u009d0;a title\u009cshown", []string{"shown"}, false},
+		{"ESC in an OSC starts a sequence of its own", "\x1b]0;a title\x1b[1mbold\x1b[0m", []string{"bold"}, false},
+		{"other escape sequences", "\x1b(Ba\x1b7b\x1b8c\x1b%Gd\x1bce\x1b~f", []string{"abcdef"}, false},
+		{"other escape sequences at the ends of ECMA-35's ranges", "\x1b0a\x1b 0b\x1b/Ac", []string{"abc"}, false},
+		{"DCS, SOS, PM and APC ended by ESC \\", "a\x1bP1$r0m\x1b\\b\x1bXsos\x1b\\c\x1b^pm\x1b\\d\x1b_apc\x1b\\e", []string{"abcde"}, false},
+		{"8-bit DCS, SOS, PM and APC ended by 8-bit ST", "a\u00901$r0m\u009cb\u0098sos\u009cc\u009epm\u009cd\u009fapc\u009ce", []string{"abcde"}, false},
+		{"a sixel image", "a\x1bPq#0;2;0;0;0#1~~@@vv@@~~$-\x1b\\b", []string{"ab"}, false},
+		{"BEL ends an OSC, not a DCS", "\x1bP1$r\x07x\x1b\\a", []string{"a"}, false},
+		{"unfinished DCS ends with its line", "before\x1bPq#0;2\nafter", []string{"before", "after"}, false},
+		{"unfinished OSC ends with its line", "before\x1b]0;no end\nafter\u009d0;nor here\nlast", []string{"before", "after", "last"}, false},
+		{"unfinished CSI and ESC", "a\x1b[31\nb\x1b[\nc\x1b", []string{"a", "b", "c"}, false},
+		{"sequences cut short by text", "\x1b[3é\x1bü", []string{"éü"}, false},
 		{"fifteen lines", strings.Join(numbered(15), "\n"), numbered(15), false},
 		{"sixteen lines", strings.Join(numbered(16), "\n"), numbered(15), true},
 		{"cut at a blank line", strings.Join(append(numbered(14), "", "after"), "\n"), numbered(14), true},
@@ -570,6 +627,199 @@ func TestUpdateShowsTheStartOfTheNotes(t *testing.T) {
 	if errOut != "Update scterm 1.2.3 to 1.3.0? [Y/n] " {
 		t.Errorf("asked %q on stderr", errOut)
 	}
+}
+
+// TestUpdateCutsTheNotesWithoutAReleasePage: notes cut short end with "…"
+// alone when there is no release page for the rest.
+func TestUpdateCutsTheNotesWithoutAReleasePage(t *testing.T) {
+	var notes, shown strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&notes, "Line %d of the notes.\n", i)
+		if i <= 15 { // update shows the first 15 lines
+			fmt.Fprintf(&shown, "  Line %d of the notes.\n", i)
+		}
+	}
+	srv, _ := serveRelease(t, fakeRelease{version: "1.3.0", binary: fakeBinary("1.3.0"), notes: notes.String(), noPage: true})
+	updating(t, srv, "1.2.3")
+	withInteractive(t, true)
+	answering(t, "n\n")
+	out, _, err := runUpdate(t, installed(t, "1.2.3"), updateOptions{})
+	want := "scterm 1.3.0 is available (you have 1.2.3).\n\n" + shown.String() + "  …\n\nKept scterm 1.2.3.\n"
+	if err != nil || out != want {
+		t.Errorf("printed %q, %v; want %q", out, err, want)
+	}
+}
+
+// TestInterruptedSwapLeavesEverythingAsItWas: an interruption that comes
+// before the swap leaves the binary and the kept one as they were, and
+// removes the download and the copy.
+func TestInterruptedSwapLeavesEverythingAsItWas(t *testing.T) {
+	exe := installed(t, "1.2.3")
+	os.WriteFile(exe+".old", fakeBinary("1.1.0"), 0o755)
+	before := files(t, filepath.Dir(exe))
+	next := filepath.Join(filepath.Dir(exe), ".scterm-download-1")
+	os.WriteFile(next, fakeBinary("1.3.0"), 0o755)
+	intr, interrupt := context.WithCancel(context.Background())
+	interrupt()
+	var err error
+	out := captureStdout(t, func() { err = replaceBinary(intr, next, exe, "1.3.0") })
+	if !errors.Is(err, context.Canceled) || out != "" {
+		t.Errorf("printed %q, %v; want nothing and the interruption", out, err)
+	}
+	if after := files(t, filepath.Dir(exe)); !maps.Equal(after, before) {
+		t.Errorf("the files went from %v to %v", before, after)
+	}
+}
+
+// TestInterruptedCopyLeavesEverythingAsItWas: an interruption that comes
+// while replaceBinary copies the previous binary stops it too, before the
+// swap. The binary is a FIFO here, so a copy that reads it to its end waits
+// on the test, which ends the interruption before it lets the copy finish.
+// That pins such a copy: a previous binary kept by a hard link instead, also
+// correct, cannot pass; a copy of only the size the file reports (0 for a
+// FIFO) does not wait, and races the test.
+func TestInterruptedCopyLeavesEverythingAsItWas(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "scterm")
+	if err := syscall.Mkfifo(exe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(exe+".old", fakeBinary("1.1.0"), 0o755)
+	next := filepath.Join(dir, ".scterm-download-1")
+	os.WriteFile(next, fakeBinary("1.3.0"), 0o755)
+	intr, interrupt := context.WithCancel(context.Background())
+	defer interrupt()
+	returned := make(chan error, 1)
+	go func() { returned <- replaceBinary(intr, next, exe, "1.3.0") }()
+	// Until the copy opens the FIFO for reading, opening it for writing
+	// without blocking fails with ENXIO; give up after 10 s.
+	var w *os.File
+	var err error
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(time.Millisecond) {
+		w, err = os.OpenFile(exe, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if !errors.Is(err, syscall.ENXIO) || time.Now().After(deadline) {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatalf("the copy never opened the binary: %v", err)
+	}
+	if info, err := w.Stat(); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+		t.Fatal("the binary was replaced before the copy read it")
+	}
+	w.Write(fakeBinary("1.2.3"))
+	interrupt() // the copy is still reading: the FIFO is open
+	w.Close()
+	select {
+	case err = <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("replaceBinary did not return")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("returned %v, want the interruption", err)
+	}
+	if info, err := os.Lstat(exe); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+		t.Error("the binary was replaced")
+	}
+	if info, err := os.Lstat(exe + ".old"); err != nil || !info.Mode().IsRegular() {
+		t.Error("the kept binary was replaced")
+	} else if b, _ := os.ReadFile(exe + ".old"); string(b) != string(fakeBinary("1.1.0")) {
+		t.Errorf("the kept binary is now %q", b)
+	}
+	entries, _ := os.ReadDir(dir)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"scterm", "scterm.old"}) {
+		t.Errorf("left %v", names)
+	}
+}
+
+// TestSwapIsThePointOfNoReturn: an interruption that comes with the swap
+// does not stop replaceBinary from keeping the previous binary as .old and
+// saying so, so the previous binary is never left under a hidden name. The
+// interruption is a real context, ended by the rename that puts the new
+// binary in place, so a check before the swap finds it running and a check
+// after it finds it ended, however the check is made. A swap made other than
+// through rename is never interrupted, so it fails here. replaceBinary not
+// checking at all passes here, and fails
+// TestInterruptedSwapLeavesEverythingAsItWas and
+// TestInterruptedCopyLeavesEverythingAsItWas.
+func TestSwapIsThePointOfNoReturn(t *testing.T) {
+	exe := installed(t, "1.2.3")
+	next := filepath.Join(filepath.Dir(exe), ".scterm-download-1")
+	os.WriteFile(next, fakeBinary("1.3.0"), 0o755)
+	intr := interruptAtSwap(t, exe)
+	var err error
+	out := captureStdout(t, func() { err = replaceBinary(intr, next, exe, "1.3.0") })
+	if intr.Err() == nil {
+		t.Fatal("the new binary was not put in place through rename, so nothing interrupted it")
+	}
+	want := map[string]string{"scterm": string(fakeBinary("1.3.0")), "scterm.old": string(fakeBinary("1.2.3"))}
+	if got := files(t, filepath.Dir(exe)); err != nil || !maps.Equal(got, want) {
+		t.Errorf("left %v, %v; want %v", slices.Sorted(maps.Keys(got)), err, slices.Sorted(maps.Keys(want)))
+	}
+	if !strings.Contains(out, "Updated "+exe+" from ") || !strings.Contains(out, " is kept as "+exe+".old. ") {
+		t.Errorf("printed %q", out)
+	}
+}
+
+// TestSwapIsThePointOfNoReturnWhenOldIsTaken: with .old taken, an
+// interruption that comes with the swap does not stop replaceBinary from
+// naming the hidden copy that keeps the previous binary, and saying why it
+// is not .old.
+func TestSwapIsThePointOfNoReturnWhenOldIsTaken(t *testing.T) {
+	exe := installed(t, "1.2.3")
+	dir := filepath.Dir(exe)
+	os.Mkdir(exe+".old", 0o755)
+	next := filepath.Join(dir, ".scterm-download-1")
+	os.WriteFile(next, fakeBinary("1.3.0"), 0o755)
+	intr := interruptAtSwap(t, exe)
+	var out string
+	var err error
+	stderr := captureStderr(t, func() {
+		out = captureStdout(t, func() { err = replaceBinary(intr, next, exe, "1.3.0") })
+	})
+	if intr.Err() == nil {
+		t.Fatal("the new binary was not put in place through rename, so nothing interrupted it")
+	}
+	hidden := filepath.Join(dir, ".scterm-old-")
+	if err != nil || !strings.Contains(out, "Updated "+exe+" from ") || !strings.Contains(out, " is kept as "+hidden) {
+		t.Errorf("printed %q, %v; want the update, and the hidden copy named", out, err)
+	}
+	if !strings.Contains(stderr, "could not keep the previous version as "+exe+".old") {
+		t.Errorf("stderr %q", stderr)
+	}
+	var kept []string
+	for name, content := range files(t, dir) {
+		if strings.HasPrefix(name, ".scterm-old-") && content == string(fakeBinary("1.2.3")) {
+			kept = append(kept, name)
+		}
+	}
+	if got, _ := os.ReadFile(exe); string(got) != string(fakeBinary("1.3.0")) || len(kept) != 1 {
+		t.Errorf("left %v; want the new binary, and the previous one in one hidden copy", slices.Sorted(maps.Keys(files(t, dir))))
+	}
+}
+
+// interruptAtSwap returns an interruption that the rename putting the new
+// binary at exe ends, and makes rename that stand-in until the test ends.
+func interruptAtSwap(t *testing.T, exe string) context.Context {
+	t.Helper()
+	intr, interrupt := context.WithCancel(context.Background())
+	t.Cleanup(interrupt)
+	rename = func(from, to string) error {
+		err := os.Rename(from, to)
+		if err == nil && to == exe {
+			interrupt()
+			// A function given to context.AfterFunc runs on a goroutine of
+			// its own: let it run before replaceBinary goes on.
+			time.Sleep(20 * time.Millisecond)
+		}
+		return err
+	}
+	t.Cleanup(func() { rename = os.Rename })
+	return intr
 }
 
 func TestProgressLine(t *testing.T) {

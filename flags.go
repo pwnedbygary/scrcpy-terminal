@@ -163,7 +163,7 @@ var helpSections = []struct {
 		{"peers [--check]", "list the paired devices; --check tests each one"},
 		{"forget NAME", "forget a paired device"},
 		{"doctor", "check what scterm needs on this computer"},
-		{"update", "update to the latest release, or pull and rebuild"},
+		{"update [--check] [-y]", "update to the latest release, or pull and rebuild"},
 		{"version", "print the version"},
 		{"help", "print this help"},
 		{"COMMAND -h", "print a command's own help"},

@@ -7,6 +7,382 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 33: scterm update follow-ups)
+
+- `scterm update` keeps the previous binary as `<path>.old` before it prints
+  "Updated …": with stdout closed (`scterm update -y | head -1`) the first
+  line printed after the download ends the process by SIGPIPE, which used to
+  leave the previous binary only as a hidden `.scterm-old-*` file (part 24's
+  review, L1). The lines and their order are unchanged.
+- `scterm update --check` on a newer release without a linux/amd64 binary
+  says "scterm 1.3.0 has been released (you have 1.2.3), but it has no
+  linux/amd64 binary to update to." and exits 0; it failed with "release
+  1.3.0 has no Linux binary" (exit 1), as `scterm update` still does (L3).
+- Release notes lose whole escape sequences, not just their control
+  characters: "\x1b[31mred\x1b[0m" shows as "red", not "[31mred[0m" (N4).
+  A CSI (ESC [ or U+009B) goes with the bytes 0x20-0x3F after it and a final
+  byte 0x40-0x7E; a control string (ECMA-48: OSC, ESC ] or U+009D; DCS, ESC
+  P or U+0090; SOS, ESC X or U+0098; PM, ESC ^ or U+009E; APC, ESC _ or
+  U+009F) with its text up to ESC or ST (U+009C), and an OSC also up to BEL,
+  as xterm takes it; any other ESC with the bytes 0x20-0x2F after it and a
+  final byte 0x30-0x7E (ECMA-35: ESC ( B, ESC 7). A sequence ends at the
+  first character that cannot be part of it, and a control string with no
+  end at the end of its line, so an unfinished one hides nothing past its
+  line. Tabs and newlines stay; CR and other control characters still go.
+- SIGINT, SIGTERM and SIGHUP from the download on no longer leave files:
+  the download, a copy of the old binary and a binary left in TMPDIR for
+  sudo are removed, the binary and any `.old` stay as they were, and then
+  the signal is raised again at its default, so the shell still sees 128
+  plus its number. The swap is the point of no return: a signal after it
+  waits until the old binary is `.old` (or named) and the lines are
+  printed. Ctrl+C at the question still ends update at once. SIGHUP or
+  SIGINT that the process started out ignoring (under nohup, or in a
+  script's background job) stays ignored; SIGTERM does not, since Go's
+  runtime takes it over at start even when it was ignored, so update catches
+  it then too (before this part, an ignored SIGTERM still ended update, and
+  left the download, as the review saw). The new binary's version check is
+  killed when update is interrupted (`checkRuns` takes a context);
+  `release.Download` already removed its file when its context ended, and a
+  test now holds that.
+- `update -h` and the README say the binary is checked against the digest
+  and the size GitHub publishes (N1); they said the size was always
+  checked. The README's Updating section also says that an update stops when
+  no copy of the binary can be made, what an interruption does, and what
+  `--check` says without a Linux binary. `scterm -h` lists `update [--check]
+  [-y]` (N3).
+- New tests run update in a child process (`SCTERM_TEST_UPDATE`, listed in
+  `docs/DEVELOPMENT.md`) and send it real signals; they start the child
+  with SIGINT and SIGHUP at their defaults, since `signal.Ignored` stops
+  telling the truth once `Notify` has caught a signal. Part 24's review gaps
+  are covered: a partial copy is removed (at a file size limit), the real
+  stderr check (a file and a pipe are not a terminal, a pseudo-terminal is),
+  and "…" alone when cut notes have no release page.
+- Verification, in the builder's tree (`/tmp/opencode/dev-33`, base
+  `b30c8ac`: `141cd3e` plus parts 29, 30, 31 and 32 as they were then):
+  gofmt, `go vet ./...`, the build, `go test -count=1 ./...` (413 pass, 3
+  skip, with the proposed docs and help applied in a copy; without them
+  `TestDevelopmentNamesTheTestVariables` fails, as docs/DEVELOPMENT.md did
+  not yet name `SCTERM_TEST_UPDATE`), `-race` on the update and release
+  tests, the 13 new and changed tests 20 times and 5 times under `-race`.
+  Against the old `update.go` with only its signature seams, 6 of them
+  fail for their reasons; 7 pin older behaviour or part 24's gaps and pass
+  there. 27 mutants, one change each: 25 caught; `signal.Reset` in `die`
+  is redundant after `signal.Stop` (equivalent), and the removal of a
+  staged binary on a late signal is reasoned, not tested. Not run: a real
+  terminal's Ctrl+C (signals went to the child with kill), nohup itself, a
+  full disk, GitHub, CI.
+- Taken into the worktree: the code and test files as built; the
+  builder's proposed texts for `flags.go`'s Commands line,
+  `docs/DEVELOPMENT.md`'s list and the README's Updating section were
+  applied by hand, after which all seven files equal the builder's
+  proposed copies.
+- Verification, snapshot (`/tmp/opencode/review-33`, on part 30's
+  snapshot), with `iso.env`: gofmt, vet, the build and `git diff --check`;
+  `go test ./...` (414 top-level tests pass and 3 skip); `-race -count=3`
+  on 29 update, help and docs tests; 16 update and release tests (the 13
+  new and changed ones and 3 unchanged ones next to them) 20 times and 5
+  times under `-race`; with the builder's old `update.go` laid over, the
+  same 6 tests fail as in its run (stdout closed, both interruptions, an
+  interrupted swap, `--check` without a Linux binary, the notes' escape
+  sequences), and the other 6 of the root package's 12 new and changed
+  tests pass; the docs checker finds 41 links and no problem in README.md
+  and docs/DEVELOPMENT.md, and the docs tests pass; and the whole module,
+  in the desktop-like bwrap sandbox described in part 30's entry, connects
+  to none of its decoy sockets.
+- Review round 1 (NEEDS CHANGES), resolved in round 2. LOW: DCS, SOS, PM
+  and APC kept their text, since only an OSC was taken as a string, so N4
+  was met for OSC alone; the sentence on ignored signals was untrue for
+  SIGTERM, here and in a comment; and no test held the swap as the point of
+  no return (a check of the interruption after the swap passed the whole
+  package and left L1's state). NITs: the fake server and the test both
+  waited 30 s, so a download the interruption cannot end failed the test
+  only because the test's timer won; and three ECMA-35 range ends were
+  unpinned. Suggestions: an expectation for the cut notes that does not use
+  `maxNoteLines`; the cosmetic cases below; the checks inside bwrap.
+- Round 2: DCS, SOS, PM and APC end as an OSC does, in both forms, but not
+  at BEL, which xterm takes as the end of an OSC only. `TestNoteLines`
+  gained rows for the four in both forms, a sixel image, a BEL inside a DCS,
+  an unfinished DCS and the ECMA-35 range ends. The new
+  `TestSwapIsThePointOfNoReturn` gives `replaceBinary` a context meant to
+  end just after the check before the swap (round 3 made it end, below),
+  and wants the binary updated, the previous one kept as `.old` and both
+  lines printed. The download test's
+  server waits 10 minutes, so only the interruption can end the download
+  within the test's 30 s. `TestUpdateCutsTheNotesWithoutAReleasePage`
+  expects 15 lines by number. The comments on ignored signals in `update.go`
+  and `update_process_test.go` name SIGHUP and SIGINT.
+- Verification, round 2, in the worktree, each Go command inside the bwrap
+  sandbox with `iso.env`: gofmt and vet; the five tests round 2 added or
+  changed (one only in a comment) and
+  `TestInterruptedSwapLeavesEverythingAsItWas` next to them, also 20 times
+  and 5 times under `-race`; with round 1's `update.go` laid over, the five
+  new control-string rows fail and the rest pass (the range ends were right,
+  and the swap held); and eight mutants each fail a test: BEL ending every
+  control string, ESC P or U+009F left out, each of the three ECMA-35 range
+  ends, a check of the interruption after the swap through `Err` (in
+  `TestSwapIsThePointOfNoReturn`), and a download the interruption cannot
+  end (in the download test, after its 30 s wait).
+- Review round 2 (NEEDS CHANGES), resolved in round 3. LOW: round 2's
+  stand-in for an interruption (`flipCtx`) changed only what `Err` said;
+  its `Done` was `context.Background()`'s, which never closes, where a real
+  interruption closes `Done` as `Err` turns. So a check after the swap
+  written with `Done` passed the whole module and left the previous binary
+  under a hidden name, L1's state again. NIT: the round-2 bullet above said
+  "the 6 changed tests". The review found round 1's other findings
+  resolved: the control-string rule matched an independent model on
+  2,000,000 random inputs and xterm's man page, the sentences on ignored
+  signals matched Go's runtime, and with a download the interruption cannot
+  end, the test now fails at its own 30 s wait. Its suggestions are taken:
+  the fail-before figures below, one more case under Left alone, and "as
+  xterm takes it" in `plainText`'s comment.
+- Round 3: `flipCtx` cancelled a real context at the first call to `Err`,
+  so from then on `Done` was closed and `Err` said so, together, and
+  `TestSwapIsThePointOfNoReturn` also failed when `replaceBinary` never
+  called `Err`. `update.go` changed only in that comment.
+- Verification, round 3, in the worktree (parts 33 to 36, uncommitted),
+  each Go command inside the bwrap sandbox with `iso.env`: gofmt and vet;
+  the swap test 20 times and 5 times under `-race`; the whole module, 443
+  pass and 3 skip. Mutants laid over `update.go`: a check after the swap
+  through `Done` fails the swap test, and passes round 2's test, as the
+  review found; the same check through `Err` fails it too; no check before
+  the swap fails both swap tests. Against the `update.go` from before this
+  part (part 24's, with only its signature seams), 7 of the 13 root-package
+  tests this part adds or changes fail: the builder's 6, and now
+  `TestSwapIsThePointOfNoReturn`, since the old code never checks for an
+  interruption, so none comes (round 2's version of that test passed there;
+  the builder's 13 had the release package's
+  `TestDownloadCancelledLeavesNothing` in its place). Against round 1's
+  `update.go`, only `TestNoteLines` fails.
+- Verification, snapshot round 3 (`/tmp/opencode/review-33c`, on
+  `9598a59`), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (415
+  top-level tests pass and 3 skip); `-race -count=3` on 33 update, help and
+  docs tests; the 17 update and release tests (14 new or changed, and 3
+  unchanged ones next to them) 20 times and 5 times under `-race`; the
+  fail-before runs and the three mutants as above, and the `Done` mutant
+  passing round 2's test; the docs checker finds 41 links and no problem,
+  and the docs tests pass; the whole module, in the desktop-like sandbox,
+  connects to none of its decoy sockets, while the positive control
+  reaches two.
+- Review round 3 (NEEDS CHANGES): LOW: `flipCtx` ended at the first call
+  to `Err`, not at the swap, so the test took it that `replaceBinary`
+  checks once, through `Err`, just before the swap. A rewrite in two
+  places, the check before the swap made through `Done` and an `Err` check
+  added after the swap, passed the whole root package and left the
+  previous binary under a hidden name. Correct rewrites, the check made
+  through `Done` or an extra check before the copy, failed it with
+  misleading messages. NITs: the round-3 bullet said the test failed when
+  `replaceBinary` never checks before the swap (it failed when it never
+  called `Err`), and the snapshot bullet counted 17 new and changed tests
+  (14 are). Both are corrected above.
+- Round 4: the review's stand-in, `swapCtx`, ends once the binary on disk
+  is the new one, which only the swap makes it: a check before the swap
+  finds it running, and a check after the swap made through its own `Err`
+  or `Done` finds it ended (round 4's review found that a check through a
+  channel, a derived context or an `AfterFunc` taken before the swap did
+  not; round 5 replaces it, below). The test no longer asks that a check
+  came: none after the swap is right, and none at all fails
+  `TestInterruptedSwapLeavesEverythingAsItWas`. Only `update_test.go`
+  changed.
+- Verification, round 4, in the worktree (parts 33 to 36), each Go command
+  inside the bwrap sandbox with `iso.env`: gofmt and vet; the two swap
+  tests 20 times and 5 times under `-race`. Mutants laid over `update.go`
+  with the new test: a check after the swap through `Done`, or through
+  `Err`, fails the swap test; the check moved after the swap fails both
+  swap tests; the check before the swap through `Done` with an `Err` check
+  after the swap fails the swap test (round 3's test passed it, as the
+  review found); no check at all fails only
+  `TestInterruptedSwapLeavesEverythingAsItWas`; three correct rewrites
+  pass both: the check before the swap through `Done`, or through
+  `context.Cause`, and an extra `Err` check before the copy.
+- Verification, snapshot round 4 (`/tmp/opencode/review-33d`, on
+  `9598a59`), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `-race -count=3` on 33
+  update, help and docs tests; the 17 update and release tests (14 new or
+  changed, and 3 unchanged ones next to them) 20 times and 5 times under
+  `-race`; against round 1's `update.go` only `TestNoteLines` fails, and
+  against the one from before this part 6 of the 13 root-package tests
+  fail, the builder's 6 (with no check at all the swap test now passes,
+  and `TestInterruptedSwapLeavesEverythingAsItWas` catches it); the eight
+  mutants as above, and the one with a check before the swap through
+  `Done` and an `Err` check after it passing round 3's test; the docs
+  checker finds 41 links and no problem, and the docs tests pass; the
+  whole module, in the desktop-like sandbox, connects to none of its decoy
+  sockets, while the positive control reaches two. The first
+  `go test ./...` failed one test outside this part: three three-finger
+  tap checks in `web/input_test.mjs` ("keyboard came up", "the field was
+  focused", "second tap turns the keyboard off"), that suite taking about
+  75 s while another review's sandbox kept the machine busy (part 34's
+  third review saw three keyboard-tap checks there fail under load too).
+  Run again once the load had dropped, `go test ./...` gave 415 top-level
+  tests passing and 3 skipped, the browser suites taking about 1.3 s.
+- Review round 4 (NEEDS CHANGES): LOW: `swapCtx` saw the swap only when
+  `replaceBinary` later called its own `Err` or `Done`, so a check after
+  the swap through a `Done` channel, a derived context or a
+  `context.AfterFunc` taken before it passed both swap tests and the whole
+  root package, and left the previous binary under a hidden name (two
+  edits). LOW: before the swap, only an interruption that came before
+  `replaceBinary` started was tested, so the one check moved to the start
+  passed everything, and an interruption during the copy then replaced the
+  binary and overwrote `exe.old`. It proposed a seam at the rename and a
+  test with the binary as a FIFO.
+- Round 5: `replaceBinary` renames through `rename`, a package variable
+  holding `os.Rename`, and `TestSwapIsThePointOfNoReturn` ends a real
+  context in the rename that puts the new binary in place, then pauses 20
+  ms so that a function given to `context.AfterFunc` runs; a check before
+  the swap finds it running and a check after finds it ended, however the
+  check is made, as long as the swap goes through `rename` (round 6 made
+  the test check that it does). New
+  `TestInterruptedCopyLeavesEverythingAsItWas` makes the binary a FIFO, so
+  the copy waits on the test, which interrupts before it lets the copy
+  finish: the binary and `exe.old` stay as they were, and the download and
+  the copy go. Its 10 s way out, for a copy that never opens the FIFO,
+  worked only while the FIFO stayed at the binary's path (round 6 changed
+  it). `swapCtx` is gone.
+- Verification, round 5, in the worktree (parts 33 to 36), each Go command
+  inside the bwrap sandbox with `iso.env`: gofmt and vet; the three tests
+  that guard the swap 20 times and 5 times under `-race`, each at
+  `-cpu=1,4`. Mutants laid over `update.go` with the new tests: every
+  check after the swap (through `Err` or `Done`; through a `Done` channel
+  or a derived context taken at the start, for that check alone or for
+  both; through an `AfterFunc` registered at the start; and a check before
+  the swap through `Done` with an `Err` check after it) fails the swap
+  test, the `AfterFunc` one in 40 of 40 runs at `-cpu=1,4`; the check
+  moved after the swap fails all three tests; no check, and renaming even
+  when interrupted, fail the interrupted-swap and interrupted-copy tests;
+  the one check moved to the start fails the interrupted-copy test; five
+  correct rewrites pass all three: the check before the swap through
+  `Done`, through `context.Cause`, or through a `Done` channel or a
+  derived context taken at the start, and an extra `Err` check at the
+  start. Round 4's tests pass the two new kinds of gap, as the review
+  found. `go test ./...`: 445 top-level tests pass and 3 skip. With a test
+  file that declares `rename` (which older code never calls), round 1's
+  `update.go` fails only `TestNoteLines` of the 14 root-package tests this
+  part adds or changes, and the one from before this part fails 7 of
+  them: the builder's 6 and the interrupted-copy test.
+- Verification, snapshot round 5 (`/tmp/opencode/review-33e`, on
+  `9598a59`), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (416
+  top-level tests pass and 3 skip); `-race -count=3` on 34 update, help
+  and docs tests; the 18 update and release tests (15 new or changed, and
+  3 unchanged ones next to them) 20 times and 5 times under `-race`; the
+  fail-before runs and the seventeen mutants as above, and round 4's tests
+  passing the review's two gaps; the docs checker finds 41 links and no
+  problem, and the docs tests pass; the whole module, in the desktop-like
+  sandbox, connects to none of its decoy sockets, while the positive
+  control reaches two.
+- Review round 5 (NEEDS CHANGES): LOW: the swap test never checked that
+  its interruption came. A swap made with `os.Rename` rather than
+  `rename`, with a check after it through `Err` or `Done`, passed all three
+  tests that guard the swap and the whole root package, and would leave
+  the previous binary under a hidden name. LOW: the interrupted-copy
+  test's way out reopened the binary's path, not the FIFO, so a
+  `replaceBinary` that renamed over the FIFO or moved it (copying the
+  download instead of the binary, keeping the previous binary by a hard
+  link, or renaming it aside) hung until go test's timeout. The review
+  found round 4's findings resolved, the 20 ms pause needed (without it,
+  two checks made on goroutines of their own were caught in none of 400
+  runs; with 1 ms, in all 400), and the seam acceptable.
+- Round 6 takes the review's tested fixes. The swap test fails unless the
+  rename stand-in ended the context ("the new binary was not put in place
+  through rename, so nothing interrupted it"). The interrupted-copy test
+  opens the FIFO for writing without blocking, retrying while that fails
+  with ENXIO (until the copy opens it for reading) for up to 10 s; it
+  checks that what it opened is the FIFO, and that `exe.old` is still a
+  plain file before reading it. Its comment now says it pins the copy: a
+  previous binary kept by a hard link, also correct, cannot pass it. Only
+  `update_test.go` changed.
+- Verification, round 6, in a copy of the round-5 snapshot with the
+  worktree's `update_test.go` (which differs from the review's tested fix
+  file only in two comment lines), each Go command inside the bwrap sandbox
+  with `iso.env`: gofmt and vet; the three tests that guard the swap 20
+  times and 5 times under `-race`, each at `-cpu=1,4`. The seventeen
+  mutants of round 5 end as before. Of the review's fifteen, the two swaps
+  made with `os.Rename`, with a check after them through `Err` or `Done`,
+  now fail the swap test (round 5's test passes both, as the review found);
+  so does a correct swap made with `os.Rename` and no check after it, which
+  round 6 means to refuse. Copying the download instead of the binary fails
+  the interrupted-copy and swap tests in 1.8 s, and keeping the previous
+  binary by a hard link or by renaming it aside fails the interrupted-copy
+  test in 1.7 to 1.8 s, where those hung before; returning at the start
+  fails all three in 12.1 s, through the 10 s way out; a copy that stops on
+  the interruption passes all three, and the other wrong ones each fail a
+  guard test. Of the 16 root-package update tests the fail-before runs
+  pick, round 1's `update.go` now fails `TestNoteLines` and the swap test
+  (that code has no `rename` to interrupt), and the one from before this
+  part fails 8: round 5's 7 and the swap test. The whole module passes.
+- Verification, snapshot round 6 (`/tmp/opencode/review-33f`, on
+  `9598a59`), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (416
+  top-level tests pass and 3 skip); `-race -count=3` on 34 update, help
+  and docs tests; the 18 update and release tests 20 times and 5 times
+  under `-race`; the fail-before runs as above; round 5's seventeen
+  mutants and the review's fifteen, ending as in the round-6 bullet, and
+  round 4's and round 5's tests passing the gaps their reviews found.
+  Three of those overlay runs first failed to build, because something
+  else trimmed the shared build cache in the middle of the run (Go then
+  reported even `unicode` as missing from the standard library); run
+  again, each ended as expected. The docs checker finds 41 links and no
+  problem, and the docs tests pass; the whole module, in the desktop-like
+  sandbox, connects to none of its decoy sockets, while the positive
+  control reaches two.
+- Review round 6 (NEEDS CHANGES): LOW: no test interrupted the swap with
+  `.old` taken. One check after keeping the previous binary fails (`if
+  keepErr != nil && intr.Err() != nil { return intr.Err() }`) passed the
+  whole root package: it returns before printing anything, so the new
+  binary is in place and the previous one only under a hidden name, with
+  nothing said. NIT: the interrupted-copy test pins a copy that reads the
+  binary to its end; one that copies only the size the file reports (0 for
+  a FIFO) does not wait, and races the test (it failed 81 of 200 runs at
+  `-cpu=1` and 1 of 200 at `-cpu=4`; round 5's version alike). The review
+  found round 5's findings resolved and every claim of round 6's bullets
+  true.
+- Round 7: `TestSwapIsThePointOfNoReturnWhenOldIsTaken` interrupts the
+  swap with `.old` a directory, and requires no error, the update and the
+  hidden copy named on stdout, the line that says why it is not `.old` on
+  stderr, and the previous binary in one hidden copy. The stand-in that
+  interrupts at the swap is now `interruptAtSwap`, shared by both swap
+  tests. The interrupted-copy test's comment says what it pins, and the
+  comment on `rename` in `update.go` says the swap goes through it.
+- Verification, round 7, in the worktree, each Go command inside the bwrap
+  sandbox with `iso.env`: gofmt and vet; the four tests that guard the
+  swap and the copy 20 times and 5 times under `-race`, each at
+  `-cpu=1,4`. The review's mutant that returns when `.old` cannot be taken
+  fails the new test (it printed nothing and returned "context canceled"),
+  and passes round 6's tests; its two correct ones (the copy read whole
+  with `io.ReadAll`, and `os.Rename` for the step that keeps `.old`) pass
+  all four; leaving the copy behind on the error path fails both
+  interruption tests. The root package passes.
+- Verification, snapshot round 7 (`/tmp/opencode/review-33g`, on
+  `9598a59`), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (417
+  top-level tests pass and 3 skip); `-race -count=3` on 35 update, help
+  and docs tests; the 19 update and release tests (16 new or changed, and
+  3 unchanged ones next to them) 20 times and 5 times under `-race`. Of the
+  17 root-package update tests the fail-before runs pick, round 1's
+  `update.go` fails 3 (`TestNoteLines` and both swap tests: that code has
+  no `rename` to interrupt), and the one from before this part fails 9
+  (round 6's 8, and the new test). Every earlier mutant, with the new test
+  among the four guard tests: each wrong one fails at least one of them,
+  each correct one passes all four, and a correct swap made with
+  `os.Rename` fails by design. Of the round-6 review's mutants, the one that
+  returns when `.old` cannot be taken fails the new test, and passes round
+  6's tests; the copy left behind fails both interruption tests; the two
+  correct ones pass. The older tests pass the gaps their reviews found.
+  The docs checker finds 41 links and no problem, and the docs tests pass;
+  the whole module, in the desktop-like sandbox, connects to none of its
+  decoy sockets, while the positive control reaches two.
+- Left alone: a signal in the microseconds between the end of the catching
+  and the sudo hint leaves the staged binary in TMPDIR without the hint; a
+  second Ctrl+C during the cleanup is not special; a source build's update
+  still catches nothing, so Ctrl+C there can leave `<path>.new`. CAN or SUB
+  inside a control string does not end it, so the rest of its line stays
+  hidden, and a C0 character inside a CSI ends it early, so "ESC [ 3 CR 1 m"
+  leaves "1m", where a terminal acts on the C0 and goes on. A C1 control
+  inside a control string does not end it either: "a ESC P b U+009B 31m c
+  ESC \ d" gives "ad", where a terminal that follows DEC's parser ends the
+  DCS at U+009B and shows the "c".
+
 ## Update (2026-10-21: QoL overhaul, part 30: scterm doctor)
 
 - New command `scterm doctor` (`doctor.go`): one line for each check, `ok`,

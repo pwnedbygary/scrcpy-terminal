@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"scterm/internal/release"
 )
@@ -35,6 +37,10 @@ const maxNoteLines = 15
 // stderrIsTerminal reports whether stderr is a terminal, where a download's
 // progress can be redrawn in place.
 var stderrIsTerminal = func() bool { return isTerminal(syscall.Stderr) }
+
+// rename is how replaceBinary renames, the swap included: os.Rename, or a
+// test's stand-in that interrupts update at the swap itself.
+var rename = os.Rename
 
 // updateOptions are the options `scterm update` was run with.
 type updateOptions struct {
@@ -101,11 +107,10 @@ const updateHelp = `usage: scterm update [--check] [-y|--yes]
 A release binary looks for a newer GitHub release and shows its version,
 release page and the start of its notes, then asks before going ahead when
 there is a terminal to ask on. It downloads the release, checks it against
-the SHA-256 digest GitHub publishes for it (when there is none, it says so
-and checks only the size), and replaces itself once the new binary has
-started on this system. The binary it replaces is kept beside it, with .old
-added to its name. A build from a source checkout pulls and rebuilds it
-instead.
+the SHA-256 digest and the size GitHub publishes for it (it says when there
+is no digest), and replaces itself once the new binary has started on this
+system. The binary it replaces is kept beside it, with .old added to its
+name. A build from a source checkout pulls and rebuilds it instead.
 
   --check    say whether a newer release exists, without downloading it
   -y, --yes  update without asking
@@ -164,12 +169,16 @@ func updateRelease(exe string, opts updateOptions) error {
 		return nil
 	}
 	asset := rel.Asset(releaseBinary)
-	if asset == nil {
-		return fmt.Errorf("release %s has no Linux binary", rel.Version)
-	}
 	if opts.check {
+		if asset == nil {
+			fmt.Printf("scterm %s has been released (you have %s), but it has no linux/amd64 binary to update to.\n", rel.Version, version)
+			return nil
+		}
 		fmt.Printf("scterm %s is available (you have %s): run scterm update\n", rel.Version, version)
 		return nil
+	}
+	if asset == nil {
+		return fmt.Errorf("release %s has no Linux binary", rel.Version)
 	}
 	describeRelease(rel, asset)
 	if !opts.yes && interactive() && !confirmed(fmt.Sprintf("Update scterm %s to %s? [Y/n] ", version, rel.Version)) {
@@ -177,8 +186,22 @@ func updateRelease(exe string, opts updateOptions) error {
 		return nil
 	}
 	fmt.Printf("Downloading scterm %s…\n", rel.Version)
+	// From here on SIGINT, SIGTERM and SIGHUP end intr rather than the
+	// process. The process ends by the signal all the same, once the files
+	// this run made are gone, or, after the swap, once the old binary is kept
+	// (see replaceBinary).
+	intr, interrupted := interruptible()
+	var staged string // a binary left for sudo to install
+	defer func() {
+		if sig := interrupted(); sig != nil {
+			if staged != "" {
+				os.Remove(staged)
+			}
+			die(sig)
+		}
+	}()
 	// A limit of its own: the question above waits as long as it takes.
-	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel = context.WithTimeout(intr, 5*time.Minute)
 	defer cancel()
 	// Next to the binary, so the final rename cannot cross filesystems.
 	next, err := fetch(ctx, client, asset, filepath.Dir(exe), agent)
@@ -187,20 +210,71 @@ func updateRelease(exe string, opts updateOptions) error {
 		if err != nil {
 			return err
 		}
-		if err := checkRuns(next, rel.Version); err != nil {
+		if err := checkRuns(intr, next, rel.Version); err != nil {
 			os.Remove(next)
 			return err
 		}
+		staged = next
 		return fmt.Errorf("no permission to replace %s; install the new version with:\n  sudo install -m 755 %s %s", exe, next, exe)
 	}
 	if err != nil {
 		return err
 	}
-	if err := checkRuns(next, rel.Version); err != nil {
+	if err := checkRuns(intr, next, rel.Version); err != nil {
 		os.Remove(next)
 		return err
 	}
-	return replaceBinary(next, exe, rel.Version)
+	return replaceBinary(intr, next, exe, rel.Version)
+}
+
+// interruptible catches SIGINT, SIGTERM and SIGHUP until interrupted is
+// called, ending ctx when one arrives instead of letting it end the process,
+// so that update can remove its own files first. interrupted stops catching
+// them and returns the one that arrived, if one did. SIGHUP or SIGINT that
+// the process started out ignoring (under nohup, or in a script's background
+// job) stays ignored. SIGTERM does not: Go's runtime takes it over at start
+// even when it was ignored, and it would end the process, so it is caught
+// then too.
+func interruptible() (ctx context.Context, interrupted func() os.Signal) {
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 1)
+	for _, sig := range []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
+		if !signal.Ignored(sig) {
+			signal.Notify(signals, sig)
+		}
+	}
+	var got os.Signal
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case got = <-signals:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() os.Signal {
+		signal.Stop(signals)
+		cancel()
+		<-done
+		if got == nil {
+			select {
+			case got = <-signals: // came as the catching stopped
+			default:
+			}
+		}
+		return got
+	}
+}
+
+// die ends the process by sig, which update caught, as sig would have ended
+// it, so that the shell sees 128 plus its number.
+func die(sig os.Signal) {
+	s := sig.(syscall.Signal)
+	signal.Reset(s)
+	syscall.Kill(syscall.Getpid(), s)
+	time.Sleep(time.Second) // Kill may return before the signal arrives
+	os.Exit(128 + int(s))
 }
 
 // describeRelease says what updating to rel brings: its version, release
@@ -235,18 +309,11 @@ func describeRelease(rel *release.Release, asset *release.Asset) {
 	}
 }
 
-// noteLines is the start of a release's notes as update shows them: without
-// control characters (GitHub often ends lines with \r\n) or the blank lines
-// around them, and at most maxNoteLines lines. more reports that some were
-// left out.
+// noteLines is the start of a release's notes as update shows them: as plain
+// text, without the blank lines around them, and at most maxNoteLines lines.
+// more reports that some were left out.
 func noteLines(notes string) (lines []string, more bool) {
-	notes = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) && r != '\n' && r != '\t' {
-			return -1
-		}
-		return r
-	}, notes)
-	for _, l := range strings.Split(notes, "\n") {
+	for _, l := range strings.Split(plainText(notes), "\n") {
 		lines = append(lines, strings.TrimRightFunc(l, unicode.IsSpace))
 	}
 	lines = trimBlank(lines)
@@ -254,6 +321,60 @@ func noteLines(notes string) (lines []string, more bool) {
 		lines, more = trimBlank(lines[:maxNoteLines]), true
 	}
 	return lines, more
+}
+
+// plainText is notes without what a terminal would act on rather than show:
+// control characters other than \t and \n (GitHub often ends lines with
+// \r\n), and escape sequences, whole, so "\x1b[31mred\x1b[0m" is "red". A CSI
+// (ESC [ or U+009B) goes with the bytes from 0x20 to 0x3F after it and a final
+// byte from 0x40 to 0x7E; a control string, an OSC (ESC ] or U+009D), DCS (ESC
+// P or U+0090), SOS (ESC X or U+0098), PM (ESC ^ or U+009E) or APC (ESC _ or
+// U+009F), with its text, up to the ESC (ST is ESC \) or ST (U+009C) that ends
+// it, or for an OSC also a BEL, as xterm takes it; any other ESC with the bytes
+// from 0x20 to 0x2F after it and a final byte from 0x30 to 0x7E, the form
+// ECMA-35 gives escape sequences, as in ESC ( B. A sequence ends early at the
+// first character that cannot be part of it, and a control string with no end
+// stops at the end of its line, so an unfinished one cannot hide the rest of
+// the notes.
+func plainText(notes string) string {
+	var b strings.Builder
+	for i := 0; i < len(notes); {
+		r, n := utf8.DecodeRuneInString(notes[i:])
+		i += n
+		if r == '\x1b' && i < len(notes) && strings.IndexByte("[]PX^_", notes[i]) >= 0 {
+			r = rune(notes[i]) + 0x40 // the 8-bit form: CSI, OSC, DCS, SOS, PM or APC
+			i++
+		}
+		switch {
+		case r == '\u009b':
+			for i < len(notes) && notes[i] >= 0x20 && notes[i] <= 0x3f {
+				i++
+			}
+			if i < len(notes) && notes[i] >= 0x40 && notes[i] <= 0x7e {
+				i++
+			}
+		case r == '\u009d' || r == '\u0090' || r == '\u0098' || r == '\u009e' || r == '\u009f':
+			ends := "\x1b\u009c\n"
+			if r == '\u009d' {
+				ends += "\a"
+			}
+			end := strings.IndexAny(notes[i:], ends)
+			if end < 0 {
+				end = len(notes) - i
+			}
+			i += end // what ends it is left to the loop, which keeps only a newline
+		case r == '\x1b':
+			for i < len(notes) && notes[i] >= 0x20 && notes[i] <= 0x2f {
+				i++
+			}
+			if i < len(notes) && notes[i] >= 0x30 && notes[i] <= 0x7e {
+				i++
+			}
+		case r == '\t' || r == '\n' || !unicode.IsControl(r):
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // trimBlank drops the empty lines at either end of lines.
@@ -321,22 +442,32 @@ func (p *progressLine) clear() {
 
 // replaceBinary puts the new binary at next in exe's place and keeps the
 // one it replaces as exe.old, instead of any older one. Until the new binary
-// is in place, a failure leaves exe and exe.old as they were.
-func replaceBinary(next, exe, newVersion string) error {
+// is in place, a failure, or intr ending because update was interrupted,
+// leaves exe and exe.old as they were. The swap is the point of no return:
+// after it the previous binary is only in the copy, so replaceBinary goes on
+// to make the copy exe.old, or to name it, interrupted or not. Nothing is
+// printed until both renames are done, since with stdout closed the first
+// line printed ends the process.
+func replaceBinary(intr context.Context, next, exe, newVersion string) error {
 	saved, err := copyBeside(exe)
 	if err != nil {
 		os.Remove(next)
 		return fmt.Errorf("could not keep a copy of %s, so it was not replaced: %w", exe, err)
 	}
-	if err := os.Rename(next, exe); err != nil {
+	err = intr.Err()
+	if err == nil {
+		err = rename(next, exe)
+	}
+	if err != nil {
 		os.Remove(next)
 		os.Remove(saved)
 		return err
 	}
-	fmt.Printf("Updated %s from %s to %s.\n", exe, version, newVersion)
 	old := exe + ".old"
-	if err := os.Rename(saved, old); err != nil {
-		fmt.Fprintf(os.Stderr, "scterm: could not keep the previous version as %s: %v\n", old, err)
+	keepErr := rename(saved, old)
+	fmt.Printf("Updated %s from %s to %s.\n", exe, version, newVersion)
+	if keepErr != nil {
+		fmt.Fprintf(os.Stderr, "scterm: could not keep the previous version as %s: %v\n", old, keepErr)
 		old = saved
 	}
 	fmt.Printf("scterm %s is kept as %s. To go back to it: mv %s %s\n", version, old, shellQuote(old), shellQuote(exe))
@@ -408,7 +539,7 @@ func updateCheckout(exe string) error {
 		os.Remove(next)
 		return err
 	}
-	if err := checkRuns(next, version); err != nil {
+	if err := checkRuns(context.Background(), next, version); err != nil {
 		os.Remove(next)
 		return err
 	}
@@ -459,11 +590,12 @@ func buildRevision() (revision string, modified bool) {
 // checkRuns makes sure a new binary starts on this system, and is the
 // version expected, before it replaces the running one: a release binary
 // needs the same shared libraries (ffmpeg, PulseAudio) it was built against.
-func checkRuns(path, want string) error {
+// The binary is killed if ctx ends first.
+func checkRuns(ctx context.Context, path, want string) error {
 	if err := os.Chmod(path, 0o755); err != nil {
 		return err
 	}
-	out, err := exec.Command(path, "version").CombinedOutput()
+	out, err := exec.CommandContext(ctx, path, "version").CombinedOutput()
 	got := strings.TrimSpace(string(out))
 	if err != nil {
 		first, _, _ := strings.Cut(got, "\n")

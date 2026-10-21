@@ -387,19 +387,26 @@ This computer's identity and the paired devices are in `~/.config/scterm` (see
 - A release binary asks GitHub for the latest release. When that is newer, scterm shows the
   new version, its release page and the start of its release notes, and on a terminal asks
   before it goes on (`-y` or `--yes` skips the question; without a terminal it goes on). It
-  downloads the binary next to itself, with a progress line on a terminal, and checks its size
-  and, when the release publishes one, its SHA-256 digest (it says when there is none). Then it
-  runs the new binary's `version` command, to check that it starts on this system and is the
-  expected version, and only then replaces itself. The previous binary stays beside it, with
-  `.old` added to its name, and scterm prints the `mv` command that goes back to it. When it
-  may not write to its own directory, it prints the `sudo install` command that finishes the
-  update. Releases contain a linux/amd64 binary only.
+  downloads the binary next to itself, with a progress line on a terminal, and checks it
+  against the SHA-256 digest and the size that GitHub publishes for it (it says when there is
+  no digest). Then it runs the new binary's `version` command, to check that it starts on this
+  system and is the expected version, and only then replaces itself. The previous binary stays
+  beside it, with `.old` added to its name, and scterm prints the `mv` command that goes back
+  to it. When scterm cannot make that copy (it cannot read its own binary, or there is no
+  room), it does not update. When it may not write to its own directory, it prints the
+  `sudo install` command that finishes the update. Releases contain a linux/amd64 binary only.
 - A build from source (`scterm dev`) runs `git pull --ff-only` in its checkout. Unless the
   binary was built from the new commit without local changes, scterm rebuilds it with
   `go build`, checks that it starts, and replaces itself. The binary must be in the checkout,
   or one or two directories below it.
 
-`scterm update --check` only says whether a newer release exists, and downloads nothing.
+Ctrl+C, SIGTERM or SIGHUP while a release binary downloads or replaces itself stops the update
+and removes the files it made, so the binary and any `.old` stay as they were; scterm then
+ends as the signal would have ended it. Once the new binary is in place, scterm first keeps
+the previous one as `.old` and says so. Ctrl+C at the question stops at once.
+
+`scterm update --check` only says whether a newer release exists, and downloads nothing. When
+the newer release has no linux/amd64 binary, it says that there is nothing to update to.
 
 `scterm version` prints the version: `scterm 2.1.0`, for example, or `scterm dev`. A session
 prints the same line first.
