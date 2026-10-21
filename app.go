@@ -83,10 +83,6 @@ type app struct {
 	// failures on the way out.
 	quitting atomic.Bool
 
-	// audioOff is set once the device has turned the audio stream off (see
-	// playAudio): the status row then shows no volume.
-	audioOff atomic.Bool
-
 	// restoreTerm gives the terminal back (normal screen, no mouse reporting,
 	// cooked mode) once, whichever of the run loop's exit and a panic on
 	// another goroutine gets there first. Nil outside the terminal UI.
@@ -111,11 +107,14 @@ func newApp(sess *session, cfg config) *app {
 	a := &app{
 		sess:        sess,
 		cfg:         cfg,
-		audio:       newAudioSink(),
+		audio:       noAudioSink(),
 		events:      make(chan inputEvent, 256),
 		frames:      make(chan *videoFrame, 1), // drop-old display mailbox
 		grabbed:     true,
 		barFlashIdx: -1, // no button flashed until one is clicked
+	}
+	if sessionHasSound(cfg, sess) {
+		a.audio = newAudioSink()
 	}
 	_, a.inZellij = os.LookupEnv("ZELLIJ")
 	if a.inZellij {
@@ -192,9 +191,7 @@ func (a *app) run() error {
 
 	// Print warnings before entering the alternate screen so they don't
 	// corrupt the TUI.
-	if a.cfg.audio && a.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
-	}
+	a.sayAudioDisabled()
 
 	// From here until the terminal is restored, messages are notices.
 	wake := notices.start()
@@ -332,14 +329,16 @@ func (a *app) watchStreams() <-chan error {
 // playAudio runs the audio demuxer and returns how the audio stream ended.
 // When the device turns the stream off, the session goes on without sound, as
 // in scrcpy: playAudio says so, with the server's reason, and returns nil.
+// The reason is the device's text, and the line also goes to stderr and to
+// the replay at exit, which print it as it is: its control characters are
+// taken out here.
 func (a *app) playAudio() error {
 	err := a.stream.runAudio(a.audio)
 	if !errors.Is(err, errAudioOff) {
 		return err
 	}
-	a.audioOff.Store(true)
 	line := "scterm: no sound from " + a.deviceName()
-	if reason := a.sess.audioOffReason(audioOffWait); reason != "" {
+	if reason := cleanText(a.sess.audioOffReason(audioOffWait)); reason != "" {
 		line += ": " + reason
 	}
 	if a.cfg.audioDup && a.cfg.audioSource == "" && !a.cfg.usePeer {
@@ -432,6 +431,37 @@ func hostAudioSilent(cfg config) bool {
 	return cfg.web && !cfg.audioDup
 }
 
+// sessionHasSound reports whether the session has a sound stream: not with
+// --no-audio. In peer mode cfg.audio is only the request: the session has an
+// audio socket only when the target grants sound.
+func sessionHasSound(cfg config, sess *session) bool {
+	return cfg.audio && sess != nil && sess.audio != nil
+}
+
+// playsHere reports whether the session plays its sound on this computer: it
+// has a sound stream, and the browser is not its only output. Only such a
+// session silences the leftover streams of other scterms (main). Whether the
+// device keeps the stream on, and whether the sink opens, is not known yet.
+func playsHere(cfg config, sess *session) bool {
+	return sessionHasSound(cfg, sess) && !hostAudioSilent(cfg)
+}
+
+// soundless reports whether the session has no sound at all, so there is
+// nothing to say about where it plays: with --no-audio, or with the sink a
+// session without a sound stream gets (noAudioSink).
+func (a *app) soundless() bool {
+	return !a.cfg.audio || errors.Is(a.audio.err, errNoSound)
+}
+
+// sayAudioDisabled prints why this computer plays none of the session's
+// sound: the session has sound, and its sink did not open. run and
+// runHeadless print it before they start.
+func (a *app) sayAudioDisabled() {
+	if !a.soundless() && a.audio.err != nil {
+		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
+	}
+}
+
 // runWeb is the --web / --window main loop. There is no terminal UI: the
 // browser is the display, so this loop only owns the stream goroutines, the
 // shutdown signal path and the shutdown sequence.
@@ -455,7 +485,7 @@ func (a *app) runWeb() error {
 	if a.audio != nil {
 		a.audio.silent.Store(hostAudioSilent(a.cfg))
 		switch {
-		case !a.cfg.audio:
+		case a.soundless():
 			// No sound, so nowhere for it to play.
 		case a.audio.err != nil:
 			// The PCM tap does not go through the sink: the browser still plays.
@@ -562,9 +592,7 @@ func (a *app) runWeb() error {
 }
 
 func (a *app) runHeadless() error {
-	if a.cfg.audio && a.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
-	}
+	a.sayAudioDisabled()
 	// Same signal handling as the TUI path: SIGTERM/SIGINT must exit and
 	// run shutdown so the PulseAudio stream is closed.
 	sigCh := make(chan os.Signal, 4)
@@ -626,8 +654,12 @@ func (a *app) runHeadless() error {
 	}
 }
 
+// audioState is the sound for the statistics line of --no-tui, where this
+// computer's sink is what plays: off with --no-audio, once the device has
+// turned the sound off, and when the sink did not open; muted or the volume
+// otherwise.
 func audioState(a *app) string {
-	if a.audio.err != nil {
+	if !a.cfg.audio || a.audio.err != nil || a.stream.audioTurnedOff() {
 		return "off"
 	}
 	if a.audio.gainPercent() == 0 {
@@ -899,7 +931,7 @@ func (a *app) statusParts() []statusPart {
 	var vol string
 	if a.cfg.audio {
 		vol = "audio off"
-		if a.audio.err == nil && !a.audioOff.Load() {
+		if a.audio.err == nil && !a.stream.audioTurnedOff() {
 			vol = "vol " + strconv.Itoa(a.audio.gainPercent()) + "%"
 		}
 	}

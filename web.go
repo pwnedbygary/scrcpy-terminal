@@ -1491,7 +1491,7 @@ type webHello struct {
 	Device  string `json:"device"`
 	VideoW  int    `json:"videoW"`
 	VideoH  int    `json:"videoH"`
-	Audio   bool   `json:"audio"`
+	Audio   bool   `json:"audio"` // the session's sound is on (see webStatus.Audio)
 	Raw     bool   `json:"raw"`
 	Version string `json:"version"`
 }
@@ -1507,7 +1507,11 @@ type webStatus struct {
 	FitH    int     `json:"fitH"`
 	Gain    int     `json:"gain"`
 	Muted   bool    `json:"muted"`
-	Audio   string  `json:"audio"`
+	// Audio is the session's sound as the browser gets it: "on" while the
+	// session has a sound stream that the device has not turned off, and
+	// "off" otherwise. The PCM tap feeds the browser whether or not this
+	// computer's sink opened, so the sink only decides HostAudio.
+	Audio string `json:"audio"`
 	// DevVol is the DEVICE's media volume as a percentage of its own scale
 	// (DevVolIdx out of DevVolMax). This is what the HUD shows: it is the
 	// volume the volume keys actually change, and — unlike Gain — it is the
@@ -1530,8 +1534,9 @@ type webStatus struct {
 	// mode needs it to answer "is the device actually making a sound?" without
 	// listening.
 	AudioPeak int16 `json:"audioPeak"`
-	// HostAudio reports whether the host sink also plays (--audio-dup); false
-	// means the browser is the sole audio output.
+	// HostAudio reports whether this computer plays the sound too
+	// (--audio-dup, with a sink that opened); false means the browser is the
+	// sole audio output, or that the sound is off.
 	HostAudio bool `json:"hostAudio"`
 }
 
@@ -1547,7 +1552,7 @@ func (c *webClient) sendHello() {
 		Op:      "hello",
 		Proto:   1,
 		Device:  dev,
-		Audio:   c.srv.audio != nil && c.srv.audio.err == nil,
+		Audio:   c.srv.stream.soundOn(),
 		Raw:     raw,
 		Version: version,
 	})
@@ -1560,15 +1565,13 @@ func (c *webClient) sendStatus() {
 	c.mu.Unlock()
 	gain := 100
 	muted := false
-	audio := "off"
-	if c.srv.audio != nil {
-		if c.srv.audio.err == nil {
-			gain = c.srv.audio.gainPercent()
-			muted = gain == 0
-			audio = "on"
-		} else {
-			audio = "error"
-		}
+	if c.srv.audio != nil && c.srv.audio.err == nil {
+		gain = c.srv.audio.gainPercent()
+		muted = gain == 0
+	}
+	audio, hostAudio := "off", false
+	if c.srv.stream.soundOn() {
+		audio, hostAudio = "on", c.srv.audio.plays()
 	}
 	c.srv.clientsMu.Lock()
 	n := int64(len(c.srv.clients))
@@ -1596,7 +1599,7 @@ func (c *webClient) sendStatus() {
 		Keys:      1,
 		JPEGms:    c.srv.encodeMs(),
 		AudioPeak: c.srv.stream.peakAudio(),
-		HostAudio: c.srv.audio != nil && !c.srv.audio.silent.Load(),
+		HostAudio: hostAudio,
 	}
 	c.writeJSON(st)
 }

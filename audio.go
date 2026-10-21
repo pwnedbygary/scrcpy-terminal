@@ -146,6 +146,7 @@ static void sct_audio_close(sct_audio_sink *a) {
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -179,6 +180,24 @@ func newAudioSink() *audioSink {
 	a := &audioSink{gain: 256, pct: 100}
 	a.open()
 	return a
+}
+
+// errNoSound is the error of the sink of a session without sound, which is
+// never opened (noAudioSink).
+var errNoSound = errors.New("the session has no sound")
+
+// noAudioSink is the sink of a session without sound. It never connects to
+// the sound server, so the session does not show in the desktop's mixer and
+// does not wait for a server that is not there. Its error makes every use
+// treat it as a sink that cannot play.
+func noAudioSink() *audioSink {
+	return &audioSink{gain: 256, pct: 100, err: errNoSound}
+}
+
+// plays reports whether the sink plays the sound on this computer: it
+// opened, has not failed since, and is not kept silent for the browser.
+func (a *audioSink) plays() bool {
+	return a != nil && a.err == nil && !a.silent.Load()
 }
 
 // open connects to PulseAudio and opens the stream on the first server and
@@ -511,10 +530,12 @@ func (a *audioSink) gainPercent() int {
 // cleanupStaleStreams: if scterm was killed hard (SIGKILL, pane death) or a
 // stray instance is still alive in another pane, its sink-input keeps
 // playing audio and no amount of quitting the visible instance stops it
-// ("the app is killed but the sound still plays"). On startup, kill every
-// leftover scterm sink-input BEFORE opening our own stream, so the new
-// instance is the only audio source. (pactl has no kill-sink-input;
-// the libpulse control API does.)
+// ("the app is killed but the sound still plays"). A session that plays its
+// sound on this computer (playsHere) kills every leftover scterm sink-input
+// at start, BEFORE opening its own stream, so it is the only audio source.
+// A session that plays nothing here leaves them alone: they may belong to
+// another live session. (pactl has no kill-sink-input; the libpulse control
+// API does.)
 func cleanupStaleStreams() {
 	if n := killStaleStreams(audioServers(), killAppStreams); n > 0 {
 		noticef("scterm: silenced %d leftover audio stream(s)\n", n)

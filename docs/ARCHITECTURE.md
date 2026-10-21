@@ -35,8 +35,9 @@ there, with exit status 1, and the browser display later serves that listener. T
    on. The first connection starts with the device name. scterm waits up to 15 seconds for all
    of the connections together, then up to 15 seconds more for the device name. When the server
    exits first, scterm shows the server's last output lines.
-6. It removes the tunnel, and it stops the PulseAudio streams of any other scterm on this
-   computer, so that only the new session plays sound.
+6. It removes the tunnel. When the session plays its sound on this computer, scterm then stops
+   the PulseAudio streams of any other scterm here, so that only the new session plays sound
+   (`main.go`).
 
 ## The scrcpy stream format
 
@@ -102,6 +103,8 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   and converts it with libswresample to 48 kHz stereo, 16-bit samples (`native.c`).
 - The terminal display plays it through a PulseAudio stream named `scterm`, with a 20 ms
   buffer target and a software gain for Alt+M, Alt+- and Alt+= (`audio.go`).
+- A session without sound, with `--no-audio` or from a peer target that does not grant sound,
+  opens no PulseAudio stream and does not connect to the server (`newApp` in `app.go`).
 - scterm plays on the sink set by `SCT_AUDIO_DEVICE`. Without it, scterm opens its stream on
   the desktop's default sink when that is a sound card, and otherwise on the sinks other
   programs play on, then the sound cards `pactl` reports running, then every sound card it
@@ -117,10 +120,19 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   server, or else the user's socket), then the socket in `XDG_RUNTIME_DIR` by name. It tries
   every server and sink once per round, in up to three rounds 150 and 300 ms apart, for a
   server that is still starting; a server or sink that libpulse refuses as invalid is not
-  tried again, and with no server the open gives up after about 0.45 s. The leftover streams
-  of another scterm are stopped on the first server, in the same order, that answers.
+  tried again, and with no server the open gives up after about 0.45 s.
+- Only a session that plays its sound on this computer stops the leftover streams of other
+  scterms, on the first server, in the same order, that answers. A session without sound, or
+  with the browser as its only output (`--web` or `--window` without `--audio-dup`), leaves
+  them alone: they can belong to another live session (`playsHere` in `app.go`). The decision
+  comes at start, from the session's sockets, before the device sends its codec id: a device
+  that then turns the sound off (codec id 0, as Android 10 does, and the playback source
+  before Android 13) has stopped them by then, and has its sink open.
 - In the browser display, the browser plays the sound, and the PulseAudio stream stays silent
-  unless `--audio-dup` is given (`app.go`).
+  unless `--audio-dup` is given (`app.go`). The `audio` field of the hello and status messages
+  says whether the session's sound is on: on while the session has a sound stream that the
+  device has not turned off, whether or not this computer's stream opened. `hostAudio` says
+  whether this computer plays the sound too (`web.go`).
 
 ## The browser display
 

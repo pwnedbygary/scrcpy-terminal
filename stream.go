@@ -71,6 +71,11 @@ type streamState struct {
 	packets   int64       // audio media packets received
 	pktSizes  map[int]int // histogram: config/first packets
 
+	// audioOff is set once the device has turned the audio stream off (see
+	// errAudioOff): from then on the session has no sound. The terminal's
+	// status row and the browser's status read it from other goroutines.
+	audioOff atomic.Bool
+
 	// A/V lag probe: the device timestamps audio packets and video frames on
 	// the same monotonic clock, so ptsLagUs = video.pts - audio.pts at arrival
 	// time shows how much the audio stream lags the video pipeline end-to-end
@@ -147,6 +152,18 @@ func (s *streamState) audioBytesSeen() int64 {
 		return 0
 	}
 	return s.audioBytes
+}
+
+// audioTurnedOff reports whether the device has turned the audio stream off.
+func (s *streamState) audioTurnedOff() bool {
+	return s != nil && s.audioOff.Load()
+}
+
+// soundOn reports whether the session's sound is on: the session has a sound
+// stream, and the device has not turned it off. The browser gets that sound
+// whether or not this computer's sink opened.
+func (s *streamState) soundOn() bool {
+	return s != nil && sessionHasSound(s.cfg, s.sess) && !s.audioOff.Load()
 }
 
 type videoFrame struct {
@@ -579,6 +596,7 @@ func (s *streamState) runAudio(audioOut *audioSink) error {
 		return fmt.Errorf("audio codec id: %w", err)
 	}
 	if codecID == 0 {
+		s.audioOff.Store(true)
 		return errAudioOff
 	}
 	if codecID == 1 {

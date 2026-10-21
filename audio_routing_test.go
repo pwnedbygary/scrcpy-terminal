@@ -43,6 +43,40 @@ func TestHostAudioSilent(t *testing.T) {
 	}
 }
 
+// TestOnlyASessionThatPlaysHereSilencesLeftovers: main silences the leftover
+// streams of other scterms only for a session that plays its sound on this
+// computer. Not with --no-audio; not with --web or --window without
+// --audio-dup, where the browser is the only output; and not in peer mode
+// when the target grants no sound, though the command line asked for it: the
+// session then has no audio socket.
+func TestOnlyASessionThatPlaysHereSilencesLeftovers(t *testing.T) {
+	sound := &session{audio: videoSocket(t)}
+	none := &session{}
+	for _, tc := range []struct {
+		name string
+		cfg  config
+		sess *session
+		want bool
+	}{
+		{"terminal", config{audio: true}, sound, true},
+		{"--no-tui", config{audio: true, noTUI: true}, sound, true},
+		{"--web --audio-dup", config{audio: true, web: true, audioDup: true}, sound, true},
+		{"--window --audio-dup", config{audio: true, web: true, window: true, audioDup: true}, sound, true},
+		{"--no-audio", config{}, none, false},
+		{"--no-audio --no-tui", config{noTUI: true}, none, false},
+		{"--web", config{audio: true, web: true}, sound, false},
+		{"--window", config{audio: true, web: true, window: true}, sound, false},
+		{"peer mode, sound granted", config{audio: true, usePeer: true}, sound, true},
+		{"peer mode, no sound granted", config{audio: true, usePeer: true}, none, false},
+		{"peer mode, --web --audio-dup, no sound granted", config{audio: true, web: true, audioDup: true, usePeer: true}, none, false},
+		{"peer mode, --no-audio --audio-dup", config{audioDup: true, usePeer: true}, none, false},
+	} {
+		if got := playsHere(tc.cfg, tc.sess); got != tc.want {
+			t.Errorf("%s: playsHere = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestWebWithoutPulseAudioSaysTheBrowserPlays: without a PulseAudio sink the
 // browser still plays the sound, which reaches it through the PCM tap and not
 // the sink. So --web and --window say that only this computer is silent, and

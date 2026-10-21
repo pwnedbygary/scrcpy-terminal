@@ -7,6 +7,120 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 36: sound work only for sessions that play here, one account of the sound)
+
+- Behaviour: main silences other scterms' leftover sound streams
+  (`cleanupStaleStreams`) only when the session plays its sound on this
+  computer (`playsHere`, `app.go`): not with `--no-audio`, not with
+  `--web` or `--window` without `--audio-dup` (the browser is the only
+  output), and not from a peer target that grants no sound. A session
+  without a sound stream gets a sink that is never opened (`noAudioSink`,
+  error `errNoSound`): nothing connects to the sound server, no stream
+  shows in the mixer, the follower does not start, and no
+  `audio disabled` or `browser only` line is printed (`soundless`).
+- The browser's `hello.audio` and `status.audio` say whether the
+  session's sound is on: on while it has a sound stream that the device
+  has not turned off, whether or not this computer's sink opened.
+  `"error"` is gone. `hostAudio` is true only when the sound is on and
+  the sink opened and is not kept silent. The device-off flag moved from
+  `app` to `streamState.audioOff` (set by `runAudio`), so a web server
+  without an app reads it. The HUD's `audioLabel` says `audio off` for
+  anything but `"on"`. The terminal status row keeps its meaning.
+- `--no-tui`'s statistics line says `audio=off` with `--no-audio`, once
+  the device has turned the sound off, and when the sink did not open.
+- The server's reason in `scterm: no sound from …` goes through
+  `cleanText` in `playAudio`: stderr and the replay at exit printed it
+  raw (the status row already cleaned it).
+- Decisions: in peer mode a session has sound only with an audio socket
+  (`sess.audio`, opened when the target grants and offers sound), which
+  is known when main decides; such a session's status row now says
+  `audio off`, not `vol 100%`. `--web`/`--window` without `--audio-dup`
+  still open the silent sink, as the brief defaulted
+  (`TestWebRunStopsItsAudioFollower` runs the follower there); it costs
+  up to ~0.45 s at start without a sound server, and a silent stream in
+  the mixer. `status.audio` is per session, not per viewer's caps.
+- Tests: `audio_here_test.go` (main in a child process with a fake adb
+  device served through adb forward, cleanup calls counted through
+  `killAppStreams`, a listener as the sound server; `newApp` without
+  sound; the browser's hello and status, with and without an app; the
+  statistics line; control characters in the reason) and a `playsHere`
+  table in `audio_routing_test.go`. `web/audio_test.mjs` pins the label.
+  `SCTERM_TEST_CLEANUP_LOG` is named in `docs/DEVELOPMENT.md`.
+- Verification (builder's tree, base `844148c`, iso.env, bwrap, go1.27.1,
+  node v26.11.1): gofmt, vet and build clean. `go test -count=1 -v
+  ./...`: 433 pass, 3 skip, 0 fail (base: 430 tests listed; +6 new).
+  `-race`: the new tests and those of the changed code 101/101, the whole
+  tree 433/3/0, no race reported. New tests x20: 120/120; under `-race`
+  x5: 30/30. On the base files all 6 new tests fail, and the label check
+  fails on the base `player.js`. Mutants: 13 of 13 killed.
+- Intake: taken into the worktree on top of parts 33 and 34's second
+  rounds and part 35's first. README.md and web.go merged three ways
+  (`git merge-file`), each adding exactly part 36's changed lines, and the
+  worktree passed `go test ./...` (439 pass, 3 skip) with iso.env in
+  bwrap. Part 35's second round, taken in next, also changed stream.go,
+  README.md and docs/ARCHITECTURE.md (443 pass, 3 skip). So in the
+  snapshot, on part 35's second round, four files hold part 36's lines
+  merged with the parts under them (README.md, web.go, stream.go and
+  docs/ARCHITECTURE.md), and the other nine are the builder's.
+- Review round 1 (NEEDS CHANGES), three LOWs: the Intake bullet described
+  the earlier snapshot (on part 35's first round: two merged files and
+  439 tests, where this one has four and 443); the README said that a
+  session that plays no sound here leaves the other scterms' sound alone,
+  and that a device that does not let it hear keeps it off the sound
+  server, which a device that connects its sound socket and then turns
+  the sound off (Android 10 over adb) does not; and the terminal display's
+  start-up line, reverted to the base's condition, passed every test (a
+  peer session without sound would print `audio disabled` again). Its
+  suggestions: pin the cleanup's order (moving it after the sink opens
+  passed every test, and would silence the session's own stream), and
+  test the `audio disabled` line itself (removing `--no-tui`'s passed).
+- Round 2: `run` and `runHeadless` print the line through one function,
+  `sayAudioDisabled`. `TestAudioDisabledIsSaidOnlyWithSound` checks it:
+  the line comes with sound and a failed sink, and not when the sink
+  opened, with `--no-audio`, or from a peer target that grants no sound;
+  and it runs `runHeadless` with a device that sends no sound. The child
+  process test also checks that a session that silences connects to the
+  sound server only after the cleanup (`listenPulse` takes a callback,
+  which reads the child's cleanup notes as each connection comes). The
+  README and docs/ARCHITECTURE.md say that main decides at start, before
+  the device says whether it sends sound. The Intake bullet is corrected
+  above.
+- Verification, round 2, in the worktree (parts 33 to 36, part 33 in its
+  third round), in bwrap with iso.env: gofmt and vet; the seven tests of
+  this part; the two changed ones 20 times and 5 times under `-race`;
+  `go test -count=1 -v ./...`, 444 pass, 3 skip, 0 fail. Mutants: the
+  base's condition in `sayAudioDisabled` fails the new test and
+  `TestSessionWithoutSoundStaysOffTheSoundServer`; `runHeadless` without
+  the call, and a `sayAudioDisabled` that prints nothing, fail the new
+  test; the cleanup moved after `newApp` fails
+  `TestMainSilencesLeftoversOnlyWhenItPlaysHere`; `run` without the call
+  passes every test, as it needs a terminal (checked by reading).
+- Verification, snapshot round 2 (`/tmp/opencode/review-36c`, on part
+  35's second round), every Go command inside the bwrap sandbox with
+  `iso.env`: gofmt, vet, the build and `git diff --check`; `go test ./...`
+  (444 top-level tests pass and 3 skip); `-race -count=3` on 97 sound, web
+  and headless tests; the 7 new tests, with `TestHostAudioSilent` and
+  `TestDisplaySinkIsWiredForEveryMode` next to them, 20 times and 5 times
+  under `-race`; with the base's `app.go`, `audio.go`, `main.go`,
+  `stream.go` and `web.go` laid over (and a shim for what the new tests
+  name), all 7 new tests fail; the mutants above fail the same tests, and
+  `run` without the call passes; the docs checker finds 43 links in three
+  files and no problem, and the docs tests pass; the whole module, in the
+  desktop-like sandbox, connects to none of its decoy sockets, while the
+  positive control reaches two.
+- Left alone: the silent sink of browser-only sessions; no line when a
+  peer target grants no sound; raw device text in start errors
+  (`serverOutputNote`), in `endSession`'s peer line and in peer notices;
+  `audioSink.err` read without its lock while `writePCM16` may set it
+  (all before this part). A device that connects its sound socket and
+  then turns the sound off (codec id 0: Android 10 over adb, or the
+  playback source before Android 13) counts as playing here, since main
+  decides at start: it stops the other scterms' sound and opens its sink.
+  After an audio config error (codec id 1), or a sound stream that ends
+  while the video goes on, `status.audio` stays `on` and the terminal row
+  keeps `vol N%`. In `web/check.mjs`, "browser only (host sink stays
+  silent)" also covers a failed host sink with `--audio-dup`.
+
 ## Update (2026-10-21: QoL overhaul, part 35: terminal screenshots at the stream's resolution)
 
 - Behaviour: Alt+S, the Shot button and the menu row save the device's

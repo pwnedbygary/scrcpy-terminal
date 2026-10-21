@@ -702,8 +702,11 @@ console.log("the HUD's device volume");
     check("it names the device's volume", label(on, 0), "device vol 47%");
     check("the device muted", label(Object.assign({}, on, { devVol: 0 }), 0), "device vol muted");
     check("before the first reading", label(Object.assign({}, on, { devVolOk: false }), 0), "device vol —");
-    check("host audio off", label({ audio: "off" }, 0), "audio off");
-    check("host audio broken", label({ audio: "error" }, 0), "audio error");
+    check("no sound in the session", label({ audio: "off" }, 0), "audio off");
+    check("the device turned the sound off: no volume, whatever the last reading",
+      label(Object.assign({}, on, { audio: "off" }), 3), "audio off · u3");
+    check("only on and off: never an error for the output of the computer running scterm",
+      label({ audio: "error" }, 0), "audio off");
     check("this page's underruns follow", label(on, 3), "device vol 47% · u3");
   }
 }

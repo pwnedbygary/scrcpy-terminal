@@ -460,15 +460,23 @@ connection it was waiting for.
   start scterm. When the device sends no sound, scterm says so, with the reason the device
   gives, if any, for example
   `scterm: no sound from Pixel 8: Audio disabled: it is not supported before Android 11`.
-  In the terminal display, the bottom line then says `audio off`.
+  In the terminal display, the bottom line then says `audio off`. In the browser display, the
+  line at the bottom of the page says `audio off` in place of the device volume.
 - In the terminal display, sound needs a PulseAudio server. Without one, scterm prints
   `scterm: audio disabled: …` before it starts, and the bottom line says `audio off`. The
-  browser display still plays the sound in the browser.
+  browser display still plays the sound in the browser, and shows the device volume.
 - scterm plays on the output your desktop uses, and with `pactl` installed it follows it when
   it changes. `SCT_AUDIO_DEVICE` sets a fixed sink (see `pactl list sinks short`).
-- Only one scterm plays sound at a time. When a session starts, scterm stops the sound of any
-  other scterm on this computer, running or left behind by a crash, and says how many sound
-  streams it silenced.
+- Only one scterm plays sound at a time. When a session that plays sound on this computer
+  starts, scterm stops the sound of any other scterm here, running or left behind by a crash,
+  and says how many sound streams it silenced. A session that plays no sound here leaves them
+  alone: with `--no-audio`, with `--web` or `--window` but without `--audio-dup` (the browser
+  plays the sound), or in peer mode when the device does not let this computer hear. A session
+  without a sound stream (`--no-audio`, or a paired device that does not let this computer
+  hear) does not connect to the sound server at all. scterm decides both when it starts,
+  before the device says whether it sends sound: a device that turns its sound off (see
+  above) still stops the other scterms' sound, and opens a sound stream here that stays
+  silent.
 - The default `--audio-source output` mutes the device while scterm runs. To hear the sound on
   the device too, use `--audio-source playback --audio-dup` (Android 13 and later).
 - In the browser, the sound chip says what is wrong: *Tap for sound*, *Sound off · Alt+M* (the

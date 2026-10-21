@@ -129,9 +129,13 @@ func main() {
 	}
 	defer sess.stop()
 
-	// Remove any sink-inputs left behind by a previous hard-killed sct
-	// (they keep playing audio from a dead process).
-	cleanupStaleStreams()
+	// A session that plays its sound on this computer first removes the
+	// sink-inputs a hard-killed scterm left behind (they keep playing audio
+	// from a dead process). One that plays nothing here leaves every stream
+	// alone, another live session's included.
+	if playsHere(cfg, sess) {
+		cleanupStaleStreams()
+	}
 
 	app := newApp(sess, cfg)
 	if cfg.web {

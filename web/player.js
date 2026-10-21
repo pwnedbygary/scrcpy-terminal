@@ -1832,14 +1832,16 @@ function geomLabel(st) {
   return st.videoW ? st.videoW + "×" + st.videoH : "—";
 }
 
-// audioLabel is the HUD's sound readout: while the host audio is on, the
-// DEVICE's media volume -- what the volume keys change, as a percentage of the
-// device's own scale, "—" until the first reading -- and otherwise the host
-// audio state ("off", "error"). It is not this browser's volume (the sound
-// chip reports that), hence "device vol". The underruns are this page's.
+// audioLabel is the HUD's sound readout: while the session's sound is on
+// (st.audio "on", whether or not the computer running scterm plays it too),
+// the DEVICE's media volume -- what the volume keys change, as a percentage of
+// the device's own scale, "—" until the first reading -- and otherwise "audio
+// off": the session has no sound, or the device turned it off. It is not this
+// browser's volume (the sound chip reports that), hence "device vol". The
+// underruns are this page's.
 function audioLabel(st, underruns) {
   let text;
-  if (st.audio !== "on") text = "audio " + st.audio;
+  if (st.audio !== "on") text = "audio off";
   else if (!st.devVolOk) text = "device vol —";
   else if (st.devVol === 0) text = "device vol muted";
   else text = "device vol " + st.devVol + "%";
