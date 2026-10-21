@@ -117,8 +117,9 @@ func parse(version string) ([3]int, bool) {
 }
 
 // Download saves a into a new file in dir, checking its size and digest,
-// and returns the file's path. Nothing is left behind on failure.
-func Download(ctx context.Context, client *http.Client, a *Asset, dir, userAgent string) (string, error) {
+// and returns the file's path. Nothing is left behind on failure. progress,
+// when not nil, is told how many bytes have arrived each time more do.
+func Download(ctx context.Context, client *http.Client, a *Asset, dir, userAgent string, progress func(done int64)) (string, error) {
 	f, err := os.CreateTemp(dir, ".scterm-download-*")
 	if err != nil {
 		return "", err
@@ -139,7 +140,11 @@ func Download(ctx context.Context, client *http.Client, a *Asset, dir, userAgent
 		limit = a.Size + 1
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, limit))
+	sinks := []io.Writer{f, h}
+	if progress != nil {
+		sinks = append(sinks, &counter{report: progress})
+	}
+	n, err := io.Copy(io.MultiWriter(sinks...), io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return fail(fmt.Errorf("downloading %s: %w", a.Name, err))
 	}
@@ -154,6 +159,18 @@ func Download(ctx context.Context, client *http.Client, a *Asset, dir, userAgent
 		return "", err
 	}
 	return path, nil
+}
+
+// counter reports the running total of the bytes written to it.
+type counter struct {
+	total  int64
+	report func(int64)
+}
+
+func (c *counter) Write(p []byte) (int, error) {
+	c.total += int64(len(p))
+	c.report(c.total)
+	return len(p), nil
 }
 
 func get(ctx context.Context, client *http.Client, url, userAgent, accept string) (*http.Response, error) {

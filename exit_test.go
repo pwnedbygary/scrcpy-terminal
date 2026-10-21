@@ -263,7 +263,7 @@ func TestCommandLineExitStatus(t *testing.T) {
 			"scterm: --video, --audio and --control are all off, so there is nothing to show or control\n"},
 		{[]string{"--no-tui", "--web"}, "", 1, "", "scterm: --web/--window and --no-tui are mutually exclusive\n"},
 		{[]string{"version", "x"}, "", 1, "", "scterm: usage: scterm version (it takes no arguments)\n"},
-		{[]string{"update", "--bogus"}, "", 1, "", "scterm: usage: scterm update (it takes no arguments)\n"},
+		{[]string{"update", "--bogus"}, "", 1, "", "scterm: usage: scterm update [--check] [-y|--yes] (\"--bogus\" is not one of these)\n"},
 		{[]string{"peers", "--bogus"}, "", 1, "", "scterm: usage: scterm peers [--check]\n"},
 		{[]string{"forget"}, "", 1, "", "scterm: usage: scterm forget NAME (scterm peers lists the names)\n"},
 		{nil, "", 1, "", "scterm dev\nscterm: adb not found: install Android platform-tools (often packaged as android-tools or adb), " +

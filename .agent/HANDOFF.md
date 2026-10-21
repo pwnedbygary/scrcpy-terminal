@@ -7,6 +7,67 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 24: scterm update)
+
+- `scterm update` shows what it is about to do first: the current and new
+  versions, the release page, and the release notes cut to 15 lines ("… (the
+  rest is on the release page)"). On a terminal it then asks "Update scterm
+  1.2.3 to 1.3.0? [Y/n]": Enter, y or yes updates, anything else or the end
+  of input keeps it ("Kept scterm 1.2.3.", exit 0). `-y`/`--yes` skips the
+  question; without a terminal it updates as before, after the same summary.
+  It used to replace the binary without showing the notes or asking.
+- `scterm update --check` says whether a newer release exists ("scterm 1.3.0
+  is available (you have 1.2.3): run scterm update", or the usual
+  latest-release line), exits 0 and downloads nothing. On a source build it
+  explains that `dev` cannot be compared with a release.
+- The download shows one progress line on stderr while stderr is a terminal,
+  redrawn in place and cleared at the end (`release.Download` gained a
+  progress callback).
+- The previous binary is kept as `<path>.old`: copied under a temporary name
+  before the swap and renamed after it, and the output says how to go back
+  ("scterm 1.2.3 is kept as <path>.old. To go back to it: mv …", quoted for a
+  POSIX shell when needed). A failure before the swap leaves the binary and
+  any older `.old` untouched; with something in the way of `.old`, the
+  update stands, a warning says where the copy is, and the go-back command
+  names it.
+- A release without a published SHA-256 digest is still installed, as the
+  help says, but it now says so before the question: "GitHub published no
+  SHA-256 digest for scterm, so only its size is checked."
+- Unchanged: what `version` prints (`checkRuns` relies on it), the
+  source-build path and the latest-release message. An unknown argument now
+  says which word is wrong ("usage: scterm update [--check] [-y|--yes]
+  ("--bogus" is not one of these)"), and part 17's exit-status test expects
+  that line.
+- Verification: gofmt, `go vet ./...`, the build, `go test -count=1 ./...`,
+  `-race` on the update and release tests, the new tests 20 times. New
+  tests: `TestUpdateWithoutAQuestion`, `TestNoteLines`,
+  `TestUpdateShowsTheStartOfTheNotes`, `TestUpdateAsksOnATerminal`,
+  `TestUpdateArgs`, `TestUpdateCheck`, `TestUpdateCheckOnASourceBuild`,
+  `TestDownloadReportsProgress`, `TestProgressLine`,
+  `TestUpdateShowsProgressOnlyOnATerminal`,
+  `TestUpdateKeepsThePreviousBinary`,
+  `TestUpdateKeepsThePreviousBinaryWhenOldIsTaken`,
+  `TestFailedUpdateKeepsTheOriginal` (9 cases),
+  `TestUpdateWithoutPermissionLeavesItToSudo` and
+  `TestUpdateSaysWhenThereIsNoDigest`. They do not compile against the old
+  files; against the old behaviour with only test seams added, every new
+  behavioural test fails, while the sudo test and 8 of the 9 failure cases
+  guard older behaviour and pass there. 21 single-line mutants, each caught.
+  Release-style builds run against local test servers (with a dead proxy for
+  anything else) made only local requests, downloaded only after a yes, and
+  `mv` took them back to 1.2.3; an unreadable binary stopped the update with
+  nothing replaced. The terminal cases ran in a pseudo-terminal from
+  `script`. Not run: the real GitHub API or a published release, CI.
+- Left alone: the question comes before the download, so the release check
+  and the download each get their own 5-minute limit (10 minutes at worst);
+  progress follows stderr and the question stdin; the copy costs about 13 MB
+  of extra disk while the update runs; the question goes to stdout through
+  the shared `ask()`, as `pair`, `forget` and the peer chooser do, so with
+  stdout redirected it is hidden and update seems to hang (`-y` avoids it);
+  the sudo hint is unquoted and keeps no `.old`; a source build is still
+  replaced without a question or a `.old`; Ctrl+C mid-update can leave a
+  `.scterm-download-*` or `.scterm-old-*` file; the README is out of date.
+
 ## Update (2026-10-21: QoL overhaul, part 16: terminal polish)
 
 - Autowrap is off while the terminal UI owns the screen: `shellInit` writes
