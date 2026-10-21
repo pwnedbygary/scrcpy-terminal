@@ -7,6 +7,8 @@ package main
 // (hit zones = the rendered button). Toggle with Ctrl-K / Ctrl-O.
 // ---------------------------------------------------------------------------
 
+import "time"
+
 type kbKeyType int
 
 const (
@@ -67,6 +69,10 @@ type keyboard struct {
 	// press flash: the key that was just pressed, and when (0 = none)
 	flashRow, flashCol int
 	flashAt            int64
+
+	// quit is the pending first press on an overlay's Quit: this keyboard's,
+	// the action menu's or the action bar's (see pressQuit).
+	quit quitArm
 }
 
 const kbRowSpace = 1 // blank row between keyboard and the status bar
@@ -272,6 +278,9 @@ func (k *keyboard) renderRow(ri int) overlayLine {
 	for ci := range row.cells {
 		c := row.cells[ci]
 		label := keyLabel(c.key, k.mods)
+		if c.key.kind == kbAction && c.key.key == 7 && k.quitArmed(quitFromKeyboard, timeNowUnixNano()) {
+			label += "?"
+		}
 		start := len(b)
 		// button area: pad + centered label + pad
 		pad := (c.width - len([]rune(label))) / 2
@@ -405,7 +414,9 @@ func (k *keyboard) act(a *app, key kbKey) {
 		case 6:
 			a.closeKeyboard()
 		case 7:
-			a.events <- inputEvent{kind: evQuit}
+			if a.pressQuit(quitFromKeyboard) {
+				a.events <- inputEvent{kind: evQuit}
+			}
 		}
 	}
 }
@@ -465,13 +476,91 @@ func (k *keyboard) flash(row, col int) {
 	}
 }
 
-// kbTick clears a finished press flash. The run loop calls it on its ticks,
-// so the green lasts even when the device screen sends no new frame.
+// kbTick clears a finished press flash and an overlay Quit arm that has run
+// out. The run loop calls it on its ticks, so neither outlasts its time when
+// the device screen sends no new frame.
 func (a *app) kbTick(now int64) {
 	k := a.kb
-	if k == nil || k.flashAt == 0 || now-k.flashAt < int64(kbFlashDuration) {
+	if k == nil {
+		return
+	}
+	if k.quit.from != 0 && !k.quitArmed(k.quit.from, now) {
+		k.quit = quitArm{}
+		a.refreshOverlays()
+	}
+	if k.flashAt == 0 || now-k.flashAt < int64(kbFlashDuration) {
 		return
 	}
 	k.flash(-1, -1)
 	a.refreshKeyboard()
+}
+
+// ---------------------------------------------------------------------------
+// two-press Quit: the action bar's Quit button, the action menu's Quit row and
+// this keyboard's QUIT key quit only on a second press within
+// quitConfirmWindow. The first press arms the control and relabels it, and any
+// other press drops the arm; chords (Alt+Q, Ctrl-Q in the menu) still quit at
+// once. The overlays are never on screen together, so one arm serves all
+// three, and the keyboard holds it because every terminal UI has one.
+// ---------------------------------------------------------------------------
+
+// quitConfirmWindow is how long an armed Quit waits for its second press.
+const quitConfirmWindow = 2 * time.Second
+
+// The overlay a Quit press came from.
+const (
+	quitFromBar = iota + 1
+	quitFromMenu
+	quitFromKeyboard
+)
+
+// quitArm is a first press on an overlay's Quit, waiting for the second.
+type quitArm struct {
+	from int   // quitFromBar, quitFromMenu or quitFromKeyboard; 0 = not armed
+	at   int64 // when it was pressed
+}
+
+// quitArmed reports whether the Quit of overlay from is armed at time now.
+func (k *keyboard) quitArmed(from int, now int64) bool {
+	if k == nil || k.quit.from != from {
+		return false
+	}
+	age := now - k.quit.at
+	return age >= 0 && age < int64(quitConfirmWindow)
+}
+
+// pressQuit is a press on the Quit of overlay from. It reports whether to quit:
+// true for the second press within quitConfirmWindow, false for a first press,
+// which arms it.
+func (a *app) pressQuit(from int) bool {
+	k := a.kb
+	if k == nil {
+		return true // no terminal UI, so no overlay to ask again on
+	}
+	now := timeNowUnixNano()
+	if k.quitArmed(from, now) {
+		k.quit = quitArm{}
+		return true
+	}
+	k.quit = quitArm{from: from, at: now}
+	return false
+}
+
+// pendingQuit is the overlay Quit arm as it stands, for dropQuitArm.
+func (a *app) pendingQuit() quitArm {
+	if a.kb == nil {
+		return quitArm{}
+	}
+	return a.kb.quit
+}
+
+// dropQuitArm runs after a press, given the arm as the press found it. An arm
+// still exactly as found was neither armed nor used by that press, so it was
+// some other press: the arm is dropped and its label repainted.
+func (a *app) dropQuitArm(found quitArm) {
+	if found.from == 0 || a.kb == nil || a.kb.quit != found {
+		return
+	}
+	a.kb.quit = quitArm{}
+	a.refreshOverlays()
 }

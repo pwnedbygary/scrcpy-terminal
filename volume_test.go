@@ -8,7 +8,7 @@ func TestVolumeWithDeadAudio(t *testing.T) {
 		events:  make(chan inputEvent, 64),
 		kb:      newKeyboard(),
 		grabbed: true,
-		audio:   &audioSink{gain: 100 * 256 / 100, err: errPulseUnavailable{}},
+		audio:   &audioSink{gain: 100 * 256 / 100, pct: 100, err: errPulseUnavailable{}},
 		cfg:     config{audio: true},
 		tui:     &tui{cols: 80, rows: 39, keys: make([]uint64, 80*39), prev: make([]uint64, 80*39)},
 		stream:  &streamState{videoW: 1280, videoH: 720},

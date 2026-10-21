@@ -71,6 +71,42 @@ here is a snapshot, not proof that no other work has started.
   takeover` and `version` gave the expected output and exit codes; `version`
   prints the same bytes as before. Not run: a device, or peer mode.
 
+## Update (2026-10-20: QoL overhaul, part 9: terminal action bar and two-press Quit)
+
+- The click that wakes the hidden action bar never runs a button. Without
+  hover reporting, a first click on the bottom rows used to press whatever
+  was under it (POWER at 120 columns, Quit at 200); it now reaches the device
+  as the tap it would have been without the bar.
+- ‹ and › turn the bar by the buttons actually shown instead of 8, so every
+  button can be reached at every width from 16 to 140 columns (at 80, Grab
+  never showed). A left arrow counted twice also hid buttons at 16-17 columns.
+- Turning mouse grab off hides the bar: with reporting off, no click could
+  reach it and no motion could say the pointer had left, so it stayed up.
+- Quit in the bar, the Alt+/ menu and the on-screen keyboard takes a second
+  press within 2 s. The first press relabels it "Quit?", "Press again to
+  quit" or "QUIT?" (in the same cells, so nothing moves), and any other press
+  drops it. Alt+Q, and Ctrl-Q in the menu, still quit at once.
+- Local volume is kept in whole percent: Alt+- steps read 90, 80, 70 (they
+  read 89, 78), and Alt+M unmutes to the volume from before the mute instead
+  of 100%. Test fixtures that build an audio sink by hand now set it to 100%
+  like `newAudioSink`.
+- A left press while a drag is still down (its release was lost, for example
+  let go outside the window) lifts the device finger first, then counts as a
+  new click; an on-screen keyboard click in that state used to become a device
+  tap. The finger is lifted at the new press position, since the last one is
+  not tracked.
+- The on-screen keyboard and the menu ignore mouse buttons 8 to 11: button 8
+  pressed keyboard keys and ran menu rows.
+- Verification: `gofmt`, `go vet ./...` and `go test ./...` passed, and a
+  `-race` run of the bar, menu, keyboard, quit and volume tests (60 passed).
+  Nine of the ten new tests fail with the old production files;
+  `TestQuitChordsQuitAtOnce` pins unchanged behaviour and passes with both.
+  Not run: a real terminal or a device.
+- Left alone: `mouseEvent` still masks the button byte with 0x7f, so buttons
+  8 to 11 act as left, middle and right on the video and on the bar;
+  unmuting through the browser's `gain` op still restores 100%; the README's
+  Alt+M row does not say unmute restores the earlier volume.
+
 ## Update (2026-10-20: QoL overhaul, part 8: browser connection states)
 
 - The page says what it is waiting for whenever it is not showing live video:

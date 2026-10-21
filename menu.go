@@ -74,6 +74,18 @@ func (a *app) menuAction(op string) {
 	}
 }
 
+// runMenuRow runs the row a click or its letter picked: the menu closes and
+// the row's action runs. A first press on Quit instead keeps the menu up to
+// ask for the second.
+func (a *app) runMenuRow(it menuItem) {
+	if it.Op == "quit" && !a.pressQuit(quitFromMenu) {
+		a.refreshMenu()
+		return
+	}
+	a.closeMenu()
+	a.menuAction(it.Op)
+}
+
 // menuKeyInput handles keyboard input while the menu is open. It consumes the
 // single-byte keys a menu can use (row letters, Esc, Enter, Ctrl-Q) and returns
 // false for everything else -- escape sequences in particular, because those
@@ -97,8 +109,7 @@ func (a *app) menuKeyInput(b []byte) bool {
 	// swallowed rather than typed, so a stray letter never reaches the device
 	// through an overlay that is already gone.
 	if it, ok := menuItemForKey(b[0]); ok {
-		a.closeMenu()
-		a.menuAction(it.Op)
+		a.runMenuRow(it)
 		return true
 	}
 	a.closeMenu()
@@ -154,11 +165,16 @@ const menuLeftMargin = 2
 // row backgrounds form a box; the TUI painter then fills the rest of the line.
 func (a *app) menuLines(rows int) []overlayLine {
 	width := 0
+	now := timeNowUnixNano()
 	label := func(it menuItem) string {
-		if it.Key == 0 {
-			return "     " + it.Label
+		text := it.Label
+		if it.Op == "quit" && a.kb.quitArmed(quitFromMenu, now) {
+			text = "Press again to quit"
 		}
-		return string(it.Key) + " ·  " + it.Label
+		if it.Key == 0 {
+			return "     " + text
+		}
+		return string(it.Key) + " ·  " + text
 	}
 	body := make([]string, 0, len(menuItems))
 	for _, it := range menuItems {

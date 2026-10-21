@@ -9,7 +9,7 @@ func TestCtrlBracketEquals(t *testing.T) {
 		events:  make(chan inputEvent, 64),
 		kb:      newKeyboard(),
 		grabbed: true,
-		audio:   &audioSink{gain: 256},
+		audio:   &audioSink{gain: 256, pct: 100},
 		cfg:     config{audio: true},
 		tui:     &tui{cols: 80, rows: 39, keys: make([]uint64, 80*39), prev: make([]uint64, 80*39)},
 		stream:  &streamState{videoW: 1280, videoH: 720},

@@ -149,6 +149,11 @@ func (a *app) handleInput(b []byte) {
 	if len(b) == 0 {
 		return
 	}
+	// An armed overlay Quit is for the press right after it; any other press
+	// drops it.
+	if isPress(b) {
+		defer a.dropQuitArm(a.pendingQuit())
+	}
 	// global keys (work even when grabbed, before the keyboard consumes input).
 	// NOTE: no Ctrl-Q! Zellij owns it (quits the session) — use Alt+Q.
 	if len(b) == 1 {
@@ -259,19 +264,21 @@ func (a *app) handleInput(b []byte) {
 
 func (a *app) toggleGrab() {
 	a.setMouse(!a.grabbed)
+	if !a.grabbed {
+		// With mouse reporting off no click can reach the bar, and no motion
+		// will say the pointer has left it.
+		a.hideBar()
+	}
 	a.refreshStatus()
 }
 
-// toggleLocalMute mutes/unmutes the local audio stream (Alt+M).
+// toggleLocalMute mutes the local audio stream, or brings back the volume it
+// had before the mute (Alt+M).
 func (a *app) toggleLocalMute() {
 	if a.audio == nil || a.audio.err != nil {
 		return // no sink to mute
 	}
-	if a.audio.gainPercent() == 0 {
-		a.audio.setGain(100)
-	} else {
-		a.audio.setGain(0)
-	}
+	a.audio.toggleMute()
 	a.refreshStatus()
 }
 
@@ -560,40 +567,58 @@ func seqKeyMap(b []byte) (uint32, uint32, bool) {
 // ---------------------------------------------------------------------------
 
 // leftPress reports whether an SGR mouse event is the left button going down.
-// Drag motion (bit 32) and wheel notches (bit 64) also arrive as "M" with the
-// low button bits clear, and must not press an overlay button.
+// Drag motion (bit 32), wheel-up (64; wheel-down is 65) and buttons 8 to 11
+// (128 to 131) also arrive as "M", and must not press an overlay button.
 func leftPress(pressed bool, btnRaw int) bool {
-	return pressed && btnRaw&(0x07|32|64) == 0
+	return pressed && btnRaw&(0x07|32|64|128) == 0
 }
 
-func (a *app) mouseEvent(b []byte) bool {
+// sgrMouse parses an SGR mouse report, ESC[<b;x;y ending in M for a press or
+// motion and in m for a release. The cell is 1-based.
+func sgrMouse(b []byte) (btnRaw, cellX, cellY int, pressed, ok bool) {
 	s := string(b)
 	if !strings.HasPrefix(s, "\x1b[<") {
-		return false
+		return 0, 0, 0, false, false
 	}
-	// parse b;x;y (M = press/motion, m = release)
-	var parts []string
 	end := strings.IndexByte(s, 'M')
-	pressed := true
+	pressed = true
 	if end < 0 {
 		end = strings.IndexByte(s, 'm')
 		pressed = false
 	}
 	if end < 0 {
-		return false
+		return 0, 0, 0, false, false
 	}
-	parts = strings.Split(s[3:end], ";")
+	parts := strings.Split(s[3:end], ";")
 	if len(parts) != 3 {
+		return 0, 0, 0, false, false
+	}
+	btnRaw, _ = strconv.Atoi(parts[0])
+	cellX, _ = strconv.Atoi(parts[1])
+	cellY, _ = strconv.Atoi(parts[2])
+	return btnRaw, max(cellX, 1), max(cellY, 1), pressed, true
+}
+
+// isPress reports whether decoded input presses something: any key, or a mouse
+// button or the wheel going down. Motion and releases do not.
+func isPress(b []byte) bool {
+	btnRaw, _, _, pressed, ok := sgrMouse(b)
+	return !ok || pressed && btnRaw&32 == 0
+}
+
+func (a *app) mouseEvent(b []byte) bool {
+	btnRaw, cellX, cellY, pressed, ok := sgrMouse(b)
+	if !ok {
 		return false
 	}
-	btnRaw, _ := strconv.Atoi(parts[0])
-	cellX, _ := strconv.Atoi(parts[1]) // 1-based
-	cellY, _ := strconv.Atoi(parts[2])
-	if cellX <= 0 {
-		cellX = 1
-	}
-	if cellY <= 0 {
-		cellY = 1
+
+	// A press while a drag is still down means the drag's release never
+	// arrived (let go outside the window, or dropped by a multiplexer). Lift
+	// the device finger first, so it is not left down and this press is
+	// handled as the new click it is rather than as part of that drag.
+	if leftPress(pressed, btnRaw) && a.drag.isDown() {
+		a.drag.setDown(false)
+		a.ctrl.touchRelease(a.posAt(cellX, cellY))
 	}
 
 	// Menu open: clicks on a row run it; clicks elsewhere are swallowed, so a
@@ -602,8 +627,7 @@ func (a *app) mouseEvent(b []byte) bool {
 		if leftPress(pressed, btnRaw) {
 			_, rows := termSize()
 			if item, ok := a.menuHitTest(cellX, cellY, rows); ok {
-				a.closeMenu()
-				a.menuAction(item.Op)
+				a.runMenuRow(item)
 			}
 		}
 		return true
@@ -650,14 +674,18 @@ func (a *app) mouseEvent(b []byte) bool {
 	// forwards it (1003), and otherwise a click or wheel, so the strip is
 	// discoverable even through a multiplexer that drops pure motion. A LEFT
 	// click on either of its rows runs a button (or is swallowed) before it
-	// can reach the device as a tap. Other buttons and the wheel keep their
-	// normal meaning -- right is Back, wheel scrolls -- even when they land on
-	// the strip, so the bar cannot hijack them.
+	// can reach the device as a tap, but only if the bar was on screen before
+	// the click: the click that wakes it is handled as if it were not there,
+	// so without hover reporting nothing runs a button nobody has seen. Other
+	// buttons and the wheel keep their normal meaning -- right is Back, wheel
+	// scrolls -- even when they land on the strip, so the bar cannot hijack
+	// them.
+	shown := a.barVisible()
 	if btnRaw&32 != 0 {
 		a.barPointerY = cellY
 	}
 	a.wakeBar()
-	if btn == 0 && a.barVisible() {
+	if btn == 0 && shown {
 		if a.barClick(cellX, cellY, pressed) {
 			return true
 		}

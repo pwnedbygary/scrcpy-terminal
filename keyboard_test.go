@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 // ---------------------------------------------------------------------------
 // The TUI software keyboard: what each key sends, where the cursor starts,
@@ -209,5 +213,112 @@ func TestKeyboardDragFromTheVideoEndsOnTheDevice(t *testing.T) {
 		if w[0] == ctrlInjectKeycode {
 			t.Errorf("the drag pressed a key: % x", w)
 		}
+	}
+}
+
+// TestKeyboardClickAfterALostRelease: a drag on the video whose release never
+// arrived leaves the device finger down. The next click on a key lifts that
+// finger and then presses the key; it does not tap the device.
+func TestKeyboardClickAfterALostRelease(t *testing.T) {
+	withTermSize(t, 80, 30)
+	cc := &capConn{}
+	a := newTestApp(newController(cc))
+	a.kb.open = true
+
+	a.handleInput(mouseSeq(0, 40, 5, true)) // down on the video; the release is lost
+	cc.captured = nil
+	x, y := kbKeyCell(t, a.kb, "K", 30)
+	a.handleInput(mouseSeq(0, x, y, true))
+	a.handleInput(mouseSeq(0, x, y, false))
+	if len(cc.captured) != 3 {
+		t.Fatalf("the click sent % x, want a touch up, then K down and up", cc.captured)
+	}
+	// AMOTION_EVENT_ACTION_UP is 1.
+	if up := cc.captured[0]; up[0] != ctrlInjectTouch || up[1] != 1 {
+		t.Errorf("the first message is % x, want the touch up", up)
+	}
+	for _, w := range cc.captured[1:] {
+		if _, code, _ := keycoded(t, w); code != 39 {
+			t.Errorf("the click sent keycode %d, want K (39)", code)
+		}
+	}
+	if a.drag.isDown() {
+		t.Error("the device finger is still believed down")
+	}
+}
+
+// TestOverlaysIgnoreButtonsEightToEleven: buttons 8 to 11 (the side buttons
+// many mice have) report as 128 to 131. A press of one is not a left click, so
+// it must not press a key or run a menu row.
+func TestOverlaysIgnoreButtonsEightToEleven(t *testing.T) {
+	withTermSize(t, 80, 30)
+	cc := &capConn{}
+	a := newTestApp(newController(cc))
+	a.kb.open = true
+	x, y := kbKeyCell(t, a.kb, "K", 30)
+	a.handleInput(mouseSeq(128, x, y, true))
+	a.handleInput(mouseSeq(128, x, y, false))
+	if len(cc.captured) != 0 {
+		t.Errorf("button 8 on a key sent % x", cc.captured)
+	}
+
+	mc := &capConn{}
+	m := newTestApp(newController(mc))
+	m.tui = &tui{cols: 80, rows: 29}
+	m.toggleMenu()
+	m.handleInput(mouseSeq(128, 5, menuRow(t, m, "Home"), true))
+	if !m.menuOpen || len(mc.captured) != 0 {
+		t.Errorf("button 8 on the Home row: menu open=%v, sent % x", m.menuOpen, mc.captured)
+	}
+}
+
+// TestKeyboardQuitTakesTwoPresses: the first press on QUIT arms it and the key
+// reads QUIT?; a second press within 2 s quits, and so does Enter on the key.
+// Once the arm has run out, the next tick puts the label back and a press arms
+// it again instead of quitting.
+func TestKeyboardQuitTakesTwoPresses(t *testing.T) {
+	withTermSize(t, 80, 30)
+	a := newTestApp(newController(&capConn{}))
+	a.tui = &tui{cols: 80, rows: 29}
+	a.openKeyboard()
+	x, y := kbKeyCell(t, a.kb, "QUIT", 30)
+	click := func() {
+		a.handleInput(mouseSeq(0, x, y, true))
+		a.handleInput(mouseSeq(0, x, y, false))
+	}
+	row := func() string { return a.tui.overlay[y-1].text }
+
+	click()
+	if quitQueued(a) {
+		t.Fatal("one press on QUIT quit")
+	}
+	if !strings.Contains(row(), "QUIT?") {
+		t.Fatalf("armed QUIT is painted as %q, want QUIT?", row())
+	}
+	click()
+	if !quitQueued(a) {
+		t.Fatal("a second press at once did not quit")
+	}
+
+	click()
+	a.kbTick(timeNowUnixNano() + int64(2100*time.Millisecond))
+	if strings.Contains(row(), "QUIT?") {
+		t.Errorf("QUIT? is still painted after the tick 2.1 s on: %q", row())
+	}
+	click()
+	if quitQueued(a) {
+		t.Fatal("a press after the arm ran out quit")
+	}
+
+	// That press armed it again; Enter on the focused QUIT is the second press.
+	a.kb.curRow = len(a.kb.rows) - 1
+	for ci, c := range a.kb.rows[a.kb.curRow].cells {
+		if c.key.label == "QUIT" {
+			a.kb.curCol = ci
+		}
+	}
+	a.handleInput([]byte{0x0d})
+	if !quitQueued(a) {
+		t.Error("Enter on the armed QUIT did not quit")
 	}
 }

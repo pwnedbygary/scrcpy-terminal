@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/binary"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -207,5 +209,41 @@ func TestMouseModesPreferSGR(t *testing.T) {
 	// The off sequence still clears 1015, in case something else set it.
 	if !strings.Contains(mouseOffSeq, "?1015l") {
 		t.Error("mouseOffSeq does not disable urxvt (1015)")
+	}
+}
+
+// TestLocalVolumeIsWholePercent: Alt+- steps the local volume from 100% to 90,
+// 80 and 70 (not 89, 78, 67), the status line says so, and Alt+M mutes and
+// then brings back 70%, not 100%. Playback follows the percentage.
+func TestLocalVolumeIsWholePercent(t *testing.T) {
+	a := newTestApp(nil)
+	a.tui = &tui{cols: 80, rows: 29}
+	a.cfg.audio = true
+	a.audio = &audioSink{}
+	a.audio.setGain(100)
+
+	for _, want := range []int{90, 80, 70} {
+		a.handleInput([]byte{0x1b, '-'})
+		if got := a.audio.gainPercent(); got != want {
+			t.Fatalf("Alt+- reads %d%%, want %d%%", got, want)
+		}
+		if s := a.statusLine(); !strings.Contains(s, "vol "+strconv.Itoa(want)+"%") {
+			t.Errorf("at %d%% the status line reads %q", want, s)
+		}
+	}
+	a.handleInput([]byte{0x1b, 'm'})
+	if got := a.audio.gainPercent(); got != 0 {
+		t.Fatalf("Alt+M left the volume at %d%%, want 0", got)
+	}
+	a.handleInput([]byte{0x1b, 'm'})
+	if got := a.audio.gainPercent(); got != 70 {
+		t.Fatalf("Alt+M again brought back %d%%, want the 70%% from before the mute", got)
+	}
+
+	// Two samples of 10000 come out at 70% of that, to within q8 resolution.
+	pcm := binary.LittleEndian.AppendUint16(binary.LittleEndian.AppendUint16(nil, 10000), 10000)
+	a.audio.writePCM16(pcm)
+	if got := int16(binary.LittleEndian.Uint16(pcm)); got < 6950 || got > 7050 {
+		t.Errorf("a 10000 sample plays as %d at 70%%, want about 7000", got)
 	}
 }

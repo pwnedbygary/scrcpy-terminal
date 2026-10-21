@@ -157,8 +157,14 @@ import (
 type audioSink struct {
 	mu   sync.Mutex
 	sink *C.sct_audio_sink
-	gain int32 // q8, 256 = 1.0
+	gain int32 // q8, 256 = 1.0, derived from pct
 	err  error
+
+	// pct is the volume in whole percent, and unmutePct the volume the last
+	// mute replaced. volMu keeps them and gain changing together.
+	volMu     sync.Mutex
+	pct       int32
+	unmutePct int32
 
 	// silent drops PCM instead of writing it to the host device. Web/window
 	// mode sets it: there the browser is the audio output, and playing on the
@@ -169,7 +175,7 @@ type audioSink struct {
 }
 
 func newAudioSink() *audioSink {
-	a := &audioSink{gain: 256}
+	a := &audioSink{gain: 256, pct: 100}
 	a.open()
 	return a
 }
@@ -384,19 +390,42 @@ type errPulseLagged struct{}
 
 func (errPulseLagged) Error() string { return "pulseaudio write failed" }
 
-// setGain sets volume in percent (0..200). Mute = 0.
+// setGain sets the volume in whole percent (0..200). Mute = 0, and the volume
+// it replaces is kept for toggleMute.
 func (a *audioSink) setGain(pct int) {
-	if pct < 0 {
-		pct = 0
+	a.volMu.Lock()
+	defer a.volMu.Unlock()
+	a.storeGain(pct)
+}
+
+// toggleMute mutes, or brings back the volume from before the mute (100% when
+// there was none).
+func (a *audioSink) toggleMute() {
+	a.volMu.Lock()
+	defer a.volMu.Unlock()
+	if atomic.LoadInt32(&a.pct) > 0 {
+		a.storeGain(0)
+		return
 	}
-	if pct > 200 {
-		pct = 200
+	pct := int(a.unmutePct)
+	if pct == 0 {
+		pct = 100
 	}
+	a.storeGain(pct)
+}
+
+// storeGain is setGain with volMu held.
+func (a *audioSink) storeGain(pct int) {
+	pct = min(max(pct, 0), 200)
+	if old := atomic.LoadInt32(&a.pct); pct == 0 && old > 0 {
+		a.unmutePct = old
+	}
+	atomic.StoreInt32(&a.pct, int32(pct))
 	atomic.StoreInt32(&a.gain, int32(pct*256/100))
 }
 
 func (a *audioSink) gainPercent() int {
-	return int(atomic.LoadInt32(&a.gain)) * 100 / 256
+	return int(atomic.LoadInt32(&a.pct))
 }
 
 // cleanupStaleStreams: if scterm was killed hard (SIGKILL, pane death) or a
