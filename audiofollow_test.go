@@ -227,19 +227,24 @@ func TestAudioFollowerNeedsASinkAndPactl(t *testing.T) {
 // SCT_AUDIO_DEVICE set, pactl never runs while the loop runs for 20 of the
 // follower's ticks, though it is on PATH. A run that looked pactl up itself
 // would follow the desktop's sink though SCT_AUDIO_DEVICE names one, and ask
-// pactl every second for a sink that never opened.
+// pactl every second for a sink that never opened. With a sink that opened
+// and no SCT_AUDIO_DEVICE, pactl must run within those ticks: a runWeb that
+// gave the follower a longer interval than audioFollowEvery, such as a second,
+// would let the other cases pass whatever follower it started.
 func TestWebRunStartsTheFollowerOnlyWhenItShould(t *testing.T) {
 	// runWeb takes SIGINT/SIGTERM/SIGHUP for the app and never gives them back.
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
 	fastAudioFollower(t)
 	for _, tc := range []struct {
-		name string
-		sink *audioSink
-		pin  string
+		name    string
+		sink    *audioSink
+		pin     string
+		follows bool
 	}{
-		{"no sink", nil, ""},
-		{"a sink that did not open", &audioSink{err: errPulseUnavailable{}}, ""},
-		{"SCT_AUDIO_DEVICE", &audioSink{gain: 256, pct: 100}, "speakers"},
+		{"no sink", nil, "", false},
+		{"a sink that did not open", &audioSink{err: errPulseUnavailable{}}, "", false},
+		{"SCT_AUDIO_DEVICE", &audioSink{gain: 256, pct: 100}, "speakers", false},
+		{"a sink that opened", &audioSink{gain: 256, pct: 100}, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			count := countingPactl(t, isolatePulse(t))
@@ -266,8 +271,11 @@ func TestWebRunStartsTheFollowerOnlyWhenItShould(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("the main loop did not quit")
 			}
-			if n := count(); n != 0 {
+			switch n := count(); {
+			case n != 0 && !tc.follows:
 				t.Errorf("pactl ran %d times: runWeb started a follower that audioFollower refused", n)
+			case n == 0 && tc.follows:
+				t.Error("pactl did not run in 20 of the follower's ticks: runWeb started no follower, or one that asks less often")
 			}
 		})
 	}
@@ -284,7 +292,7 @@ func TestWebRunStopsItsAudioFollower(t *testing.T) {
 	fastAudioFollower(t)
 	count, sink := movingPactl(t, isolatePulse(t))
 	cfg := config{web: true, audio: true, webAddr: "127.0.0.1"}
-	webLinesUntil(t, cfg, &session{deviceName: "Pixel 8"}, &audioSink{gain: 256, pct: 100}, "audio -> "+sink)
+	webLinesHere(t, cfg, &session{deviceName: "Pixel 8"}, &audioSink{gain: 256, pct: 100}, "audio -> "+sink)
 	time.Sleep(100 * time.Millisecond) // a pactl call under way when the run ended
 	n := count()
 	time.Sleep(100 * time.Millisecond)

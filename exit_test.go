@@ -101,6 +101,7 @@ func TestOnlyALostDeviceExitsTwo(t *testing.T) {
 func TestWebExitsTwoWhenTheDeviceIsLost(t *testing.T) {
 	// runWeb takes SIGINT/SIGTERM/SIGHUP for the app and never gives them back.
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
+	isolatePulse(t) // no sound server or pactl to reach
 	for _, tc := range []struct {
 		name   string
 		head   [][]byte
@@ -282,6 +283,9 @@ func TestSessionEndCleansThePeersReason(t *testing.T) {
 // and a scratch home, so none can reach a real device.
 func TestCommandLineExitStatus(t *testing.T) {
 	if args, ok := os.LookupEnv("SCTERM_TEST_MAIN_ARGS"); ok {
+		if noted, ok := os.LookupEnv("SCTERM_TEST_NO_PRESENCE"); ok {
+			presenceSearch = notedPresenceSearch(noted)
+		}
 		os.Args = []string{"scterm"}
 		if args != "" {
 			os.Args = append(os.Args, strings.Split(args, "\n")...)
@@ -328,6 +332,7 @@ func TestCommandLineExitStatus(t *testing.T) {
 		home := t.TempDir()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestCommandLineExitStatus$")
 		cmd.Env = []string{"SCTERM_TEST_MAIN_ARGS=" + strings.Join(tc.args, "\n"),
+			"SCTERM_TEST_NO_PRESENCE=" + filepath.Join(home, "presence"),
 			"PATH=" + tc.path, "HOME=" + home, "SCTERM_HOME=" + filepath.Join(home, "scterm")}
 		if dir, ok := os.LookupEnv("GOCOVERDIR"); ok {
 			// Under go test -cover the child warns on stderr without it.
@@ -445,12 +450,15 @@ func startMain(t *testing.T, args, env []string) (*exec.Cmd, *strings.Builder) {
 	return cmd, stderr
 }
 
-// mainCommand is the command that startMain starts.
+// mainCommand is the command that startMain starts. Its main notes its
+// presence searches in a file of its own (SCTERM_TEST_NO_PRESENCE) instead of
+// searching the network.
 func mainCommand(t *testing.T, args, env []string) *exec.Cmd {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCommandLineExitStatus$")
-	cmd.Env = append([]string{"SCTERM_TEST_MAIN_ARGS=" + strings.Join(args, "\n")}, env...)
+	cmd.Env = append([]string{"SCTERM_TEST_MAIN_ARGS=" + strings.Join(args, "\n"),
+		"SCTERM_TEST_NO_PRESENCE=" + filepath.Join(t.TempDir(), "presence")}, env...)
 	if dir, ok := os.LookupEnv("GOCOVERDIR"); ok {
 		// Under go test -cover the child warns on stderr without it.
 		cmd.Env = append(cmd.Env, "GOCOVERDIR="+dir)
@@ -458,6 +466,54 @@ func mainCommand(t *testing.T, args, env []string) *exec.Cmd {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	return cmd
+}
+
+// notedPresenceSearch is the presence search of main in a child process: it
+// finds nothing, with nothing sent on the network, and notes each search in
+// the file noted.
+func notedPresenceSearch(noted string) peerDiscovery {
+	return func(context.Context, time.Duration) ([]peer.NearbyDevice, error) {
+		if f, err := os.OpenFile(noted, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			fmt.Fprintln(f, "presence search")
+			f.Close()
+		}
+		return nil, nil
+	}
+}
+
+// TestChildMainSearchesNoNetwork: main in a child process that cannot reach
+// its paired device, here at a port nothing listens on, searches for the
+// device as main does then, in case it moved, but the search goes nowhere: it
+// is noted in the file SCTERM_TEST_NO_PRESENCE names, which mainCommand sets,
+// and finds nothing, so the run fails as for a device that cannot be found.
+// Before, the child ran a real one-second multicast DNS search of the network.
+func TestChildMainSearchesNoNetwork(t *testing.T) {
+	dir := t.TempDir()
+	env := scratchEnv(t, dir, fakeADB(t, dir, filepath.Join(dir, "adb.log"), ""))
+	id, err := peer.LoadOrCreateIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := closedPort(t)
+	if err := peer.OpenStore(filepath.Join(dir, "scterm")).Put(peer.Record{Fingerprint: id.Fingerprint.Hex(),
+		Name: "Pixel 8", Host: "127.0.0.1", Port: port, Grants: []string{"control"}, PairedAtMs: 1}); err != nil {
+		t.Fatal(err)
+	}
+	cmd, stderr := startMain(t, []string{"--peer", "Pixel 8", "--video=false", "--audio=false"}, env)
+	status := childStatus(cmd.Wait())
+	if want := fmt.Sprintf("scterm: could not reach Pixel 8 at 127.0.0.1:%d (connection refused)", port); status != 1 ||
+		!strings.Contains(stderr.String(), want) {
+		t.Fatalf("status %d, stderr %q; want 1, and a line saying %q", status, stderr.String(), want)
+	}
+	noted := ""
+	for _, kv := range cmd.Env {
+		if v, ok := strings.CutPrefix(kv, "SCTERM_TEST_NO_PRESENCE="); ok {
+			noted = v
+		}
+	}
+	if got, err := os.ReadFile(noted); err != nil || string(got) != "presence search\n" {
+		t.Errorf("the child's presence searches, noted in %q: %q (%v); want one", noted, got, err)
+	}
 }
 
 // childStatus is the exit status of a child process that ended with err, as

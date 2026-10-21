@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -587,6 +589,49 @@ func TestWebLateViewerGetsTheBye(t *testing.T) {
 			t.Errorf("%d viewers listed after the stop, want 0", n)
 		}
 	})
+}
+
+// TestWebRefusedViewerCountsAsAViewer: a viewer refused with the bye, its
+// upgrade having completed once the stop had begun, has connected, and its
+// page shows why the session ended. So a --window browser that shows it has
+// displayed something: the stop takes the browser's log for chatter and
+// removes it, as for any window that showed the mirror, rather than keeping it
+// to explain a failure. The test holds winMu, so that the stop closes the
+// window once the viewer is refused. Before, such a viewer did not count
+// (hadClient).
+func TestWebRefusedViewerCountsAsAViewer(t *testing.T) {
+	h := newWebTestHarness(t, config{web: true}, false)
+	logPath := filepath.Join(t.TempDir(), "scterm-browser.log")
+	if err := os.WriteFile(logPath, []byte("browser chatter\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.setWindow(&exec.Cmd{}, logPath) // a window with no process to kill
+	upgrade, done := lateViewer(t, h.srv)
+	letClose := stall(t, &h.srv.winMu)
+	stopped := make(chan struct{})
+	go func() { h.srv.stopWith(webByeQuit); close(stopped) }()
+	eventually(t, "the stop has taken its list of viewers", func() bool { return stopping(h.srv) })
+	late := upgrade()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the late viewer's handler never returned")
+	}
+	if got := late.byeBeforeClose(3 * time.Second)["reason"]; got != webByeQuit {
+		t.Errorf("bye reason %q, want %q", got, webByeQuit)
+	}
+	letClose()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stop never returned")
+	}
+	if !h.srv.hadClient.Load() {
+		t.Error("the viewer refused with the bye does not count as one that connected")
+	}
+	if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the stop kept the log of a window that showed the bye (%v), as if it had shown nothing", err)
+	}
 }
 
 // TestWebWindowEndsWithAFullEventQueue: the end of a --window session reaches

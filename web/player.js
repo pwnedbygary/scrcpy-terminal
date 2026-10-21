@@ -2116,7 +2116,7 @@ window.addEventListener("resize", () => {
 // The chrome: the HUD, the action bar and a quiet sound chip. With a mouse,
 // keys or the wheel it shows and fades out CHROME_IDLE_MS after the last of
 // them, but not while the pointer rests on the bar or, once the session has
-// ended, one of the chrome's controls has the keyboard focus. A finger does
+// ended, one of the bar's controls has the keyboard focus. A finger does
 // not bring it up, nor, while the page is used by touch, does a key (a soft
 // keyboard sends them too): a tap or a drag on the picture is for the device,
 // and a bar that came up under it would take the next tap. On a touch screen

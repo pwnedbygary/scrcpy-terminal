@@ -155,10 +155,14 @@ func captureTerminal(t *testing.T, fn func()) string {
 	}
 	got := make(chan []byte)
 	go func() { b, _ := io.ReadAll(r); got <- b }()
-	oldOut, oldErr := os.Stdout, os.Stderr
-	os.Stdout, os.Stderr = w, w
+	oldOut := os.Stdout
+	os.Stdout = w
+	oldErr := setStderr(w)
 	func() {
-		defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
+		defer func() {
+			os.Stdout = oldOut
+			setStderr(oldErr)
+		}()
 		fn()
 	}()
 	_ = w.Close()
@@ -176,10 +180,12 @@ func terminalUntil(t *testing.T, want string, fn func()) string {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	oldOut, oldErr := os.Stdout, os.Stderr
-	os.Stdout, os.Stderr = w, w
+	oldOut := os.Stdout
+	os.Stdout = w
+	oldErr := setStderr(w)
 	defer func() {
-		os.Stdout, os.Stderr = oldOut, oldErr
+		os.Stdout = oldOut
+		setStderr(oldErr)
 		_ = w.Close()
 	}()
 	fn()

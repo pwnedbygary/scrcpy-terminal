@@ -207,10 +207,9 @@ func stderrOf(t *testing.T, fn func()) (out string) {
 	}
 	got := make(chan string, 1)
 	go func() { b, _ := io.ReadAll(r); r.Close(); got <- string(b) }()
-	old := os.Stderr
-	os.Stderr = w
+	old := setStderr(w)
 	defer func() {
-		os.Stderr = old
+		setStderr(old)
 		w.Close()
 		out = <-got
 	}()

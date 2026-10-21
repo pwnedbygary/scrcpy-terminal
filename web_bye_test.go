@@ -173,6 +173,7 @@ func TestWebStreamEndSaysBye(t *testing.T) {
 	t.Cleanup(func() { device.Close() })
 	// runWeb takes SIGINT/SIGTERM/SIGHUP for the app and never gives them back.
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
+	isolatePulse(t) // no sound server or pactl to reach
 
 	cfg := config{web: true, webAddr: "127.0.0.1"}
 	sess := &session{deviceName: "testphone", video: video}

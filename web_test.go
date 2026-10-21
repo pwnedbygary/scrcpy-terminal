@@ -190,6 +190,7 @@ func TestWebServesTheListenerItIsGiven(t *testing.T) {
 // up, as a signal at start-up does, leaves run nothing to do: run returns nil
 // at once, prints no address and leaves the listener closed.
 func TestWebStopBeforeRunServesNothing(t *testing.T) {
+	t.Setenv(webHostsEnv, "") // an entry it ignores would be reported
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -206,6 +207,27 @@ func TestWebStopBeforeRunServesNothing(t *testing.T) {
 		c.Close()
 		t.Error("the listener still took a connection after the stop")
 	}
+}
+
+// TestWebStopBeforeRunFreesItsPort: run given no listener listens itself, on
+// the port it is asked for, and a stop that came first then leaves it to close
+// that listener: run returns at once and prints nothing, and the port is free
+// again, for the next scterm.
+func TestWebStopBeforeRunFreesItsPort(t *testing.T) {
+	t.Setenv(webHostsEnv, "") // an entry it ignores would be reported
+	port := freeLoopbackPort(t)
+	cfg := config{web: true, webAddr: "127.0.0.1", webPort: port}
+	srv := newWebServer(cfg, &session{deviceName: "testphone"}, &streamState{cfg: cfg}, nil, nil, nil)
+	srv.stop()
+	var ran error
+	if out := captureStderr(t, func() { ran = srv.run(false) }); ran != nil || out != "" {
+		t.Errorf("run after a stop: %v, and printed %q; want nil and nothing", ran, out)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("port %d is still taken after run gave up: %v", port, err)
+	}
+	ln.Close()
 }
 
 // TestWebStopFromAnotherGoroutine: a stop can come at any time from another

@@ -559,8 +559,13 @@ func webPortInUse(addr string, port int) (detail, todo string) {
 
 // run starts the HTTP server, prints the URL, optionally opens a browser
 // window, and blocks until the server is shut down. It serves s.ln when that
-// is set, as main sets it, and otherwise listens itself. Once a stop has
-// begun, run serves nothing.
+// is set, as main sets it, and otherwise listens itself. A stop that has begun
+// when run is about to publish its server leaves run nothing to do: it closes
+// the listener, given or its own, and returns without serving or printing its
+// address (it still warns of SCTERM_WEB_HOSTS entries it ignores, as it reads
+// them first). A later stop shuts down what run has started, and no browser
+// window outlives it: a window starts only if the stop has not begun, and the
+// stop then closes it (startWindow).
 func (s *webServer) run(openWindow bool) error {
 	host := s.addr
 	if host == "" {
@@ -1122,6 +1127,9 @@ func (s *webServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	// the list: the stop takes the list and sets stopBye under clientsMu.
 	if bye := s.stopBye; bye != "" {
 		s.clientsMu.Unlock()
+		// It connected all the same, and its page shows why the session
+		// ended: a --window browser that shows it has displayed something.
+		s.hadClient.Store(true)
 		_ = ws.CloseWith(bye)
 		return
 	}

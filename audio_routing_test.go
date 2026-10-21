@@ -140,8 +140,17 @@ func webStartLines(t *testing.T, cfg config, audio *audioSink) string {
 }
 
 // webLinesUntil is webStartLines on sess, whose video sends nothing, and it
-// also waits for a line holding each of wants.
+// also waits for a line holding each of wants. The run reaches no sound server
+// and no pactl (isolatePulse).
 func webLinesUntil(t *testing.T, cfg config, sess *session, audio *audioSink, wants ...string) string {
+	t.Helper()
+	isolatePulse(t)
+	return webLinesHere(t, cfg, sess, audio, wants...)
+}
+
+// webLinesHere is webLinesUntil in the environment as the test left it, for a
+// test that isolates the run itself and puts a pactl of its own on PATH.
+func webLinesHere(t *testing.T, cfg config, sess *session, audio *audioSink, wants ...string) string {
 	t.Helper()
 	video, device := net.Pipe()
 	defer device.Close()
@@ -161,8 +170,7 @@ func stderrUntil(t *testing.T, a *app, run func() error, wants ...string) string
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := os.Stderr
-	os.Stderr = w
+	old := setStderr(w)
 	lines := make(chan string)
 	go func() {
 		sc := bufio.NewScanner(r)
@@ -192,7 +200,7 @@ func stderrUntil(t *testing.T, a *app, run func() error, wants ...string) string
 	case <-time.After(5 * time.Second):
 		t.Error("the main loop did not quit")
 	}
-	os.Stderr = old
+	setStderr(old)
 	w.Close()
 	for line := range lines { // the rest, until the pipe is drained
 		out.WriteString(line + "\n")

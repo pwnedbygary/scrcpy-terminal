@@ -7,6 +7,241 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 38: web loose ends and test isolation)
+
+- `--window`: no browser opens once a stop has begun, and none outlives the
+  stop. `openWindow` returns at once when a stop has begun, and starts the
+  browser through `startWindow`, which holds `winMu` from its check of
+  `closing` until the window is recorded. The stop sets `closing` first and
+  looks for the window under `winMu` (`killWindow`), so it finds the browser
+  and closes it, or the browser never starts. Before, a stop between `run()`
+  publishing its server and the launch left the browser running after
+  scterm, holding the private profile's lock. Refused, `openWindow` prints
+  no window line and removes the browser's log (when the stop begins after
+  its first check, the browser note is already out). `run()`'s comment says
+  what holds: after a stop it serves nothing and prints no address, but it
+  still warns of `SCTERM_WEB_HOSTS` entries it ignores (round 2 corrected
+  the comment, which said it printed nothing). `windowStart` is the seam
+  (`cmd.Start`); `setWindow` stays, for tests that register a stand-in
+  window.
+- A viewer refused with the stop's bye now counts as connected
+  (`hadClient`): its page showed why the session ended, so the browser's
+  log goes as chatter instead of staying to explain a failure. Two reads
+  of `hadClient` remove the log: the stop's, just after it takes the
+  window it closes (`killWindow`), and the window's watcher's, once the
+  browser has exited (`watchWindow`, if scterm still runs). A refusal
+  recorded before either read removes the log; one recorded after both
+  changes nothing: the log goes or stays as before (the watcher removes it
+  anyway, for example, for a window that lived 15 s, `windowGrace`, or a
+  browser that handed the mirror over to a running one). Nothing orders
+  the refusal and those reads: the refusal's critical section always
+  follows the stop's, the stop never waits for the handler afterwards, and
+  the watcher waits only for the browser. A window whose
+  watcher cleared it before the stop looked, and reported it as a
+  failure, keeps its log, which explains a real failure. A window the stop
+  took first can lose a log its watcher has just reported, when a refusal
+  comes between the report and the stop's read. This is reasoned from the
+  code; the test forces the first order by holding `winMu`, and the
+  reviews showed the watcher's read with a browser that ignores SIGTERM,
+  the reported window with one that fails at once, and the last order
+  with a probe that holds the stop between its two steps.
+- Left as harmless: `quit()` waiting for room in a full event queue can end
+  the session after a viewer came back. The queue fills only while a drag
+  waits on a control socket the device stopped reading; the quit came after
+  a whole grace with no viewer; `quit()` gives up when the server stops.
+- Test isolation. `SCTERM_WEB_HOSTS` is emptied in the four host tests
+  (`TestWebRefusesARebindingName`, `TestWebRefusalSuggestsTheAddressReached`,
+  `TestWebReportsANameOnceInAnyForm` and `TestWebRefusesEveryMethod`), in
+  `TestWebLoopbackRefusesThisComputersName` (this computer's name
+  in the list broke it) and in the two stop-before-run tests (an ignored
+  entry's notice fell into their capture). The run that
+  `TestWebRunStartsTheFollowerOnlyWhenItShould` starts reads it, but the
+  test's result does not depend on it. `isolatePulse` in
+  `TestWebExitsTwoWhenTheDeviceIsLost` and `TestWebStreamEndSaysBye`;
+  `webLinesUntil` isolates its run (`webLinesHere` does not, for the test
+  that brings its own `pactl`). `setStderr` swaps `os.Stderr` under
+  `notices.mu`, for all five capture helpers, so a leftover web viewer's
+  notice no longer races a capture. The follower test has a positive
+  control: with a working sink, `pactl` must run within its 20 ticks.
+  `SCTERM_TEST_NO_PRESENCE` (in docs/DEVELOPMENT.md), set by `mainCommand`
+  and `TestCommandLineExitStatus`, makes main in a child note its presence
+  searches in a file instead of searching the network.
+- docs/DEVELOPMENT.md says which tests catch a race only under `-race` and
+  how to run them. CI is unchanged. Here: `go test ./...` 30.4 s, `go test
+  -race ./...` 69.6 s, `go test -race -run TestWeb .` 21.0 s.
+- Browser: `player.css`'s header says that in touch mode only ⋯ and the
+  wheel bring the chrome up; `player.js` says "the bar's controls". The page
+  suite fades the chrome before the Tab, so the Tab must bring it back.
+- Tests, new: `window_stop_test.go` (3 tests, a stand-in browser),
+  `TestWebStopBeforeRunFreesItsPort`, `TestWebRefusedViewerCountsAsAViewer`,
+  `TestStderrCapturesAreOrderedWithNotices` (needs `-race`) and
+  `TestChildMainSearchesNoNetwork`.
+- Intake: merged three ways into the worktree over parts 33 to 37 (the
+  builder's base was `40cb1a0`); `exit_test.go` and `tui_notice_test.go`,
+  which part 37 also changes, merged cleanly, and the other 16 files are
+  the builder's.
+- Verification (builder's tree, base `40cb1a0`, iso.env, bwrap, go1.27.1,
+  node v26.11.1): gofmt, vet, build, `git diff --check` clean. `go test
+  -count=1 -v ./...`: 450 pass, 3 skip, 0 fail (base 443, 3, 0). Node: page
+  286 checks (base 285), the other suites as before. New tests x20: 140 of
+  140; under `-race` x5: 35 of 35; 31 touched tests `-race` x3: 93 of 93.
+  `-race -shuffle` on the root package: base seeds 1, 2, 3 and 4 each fail
+  with the capture race; this part's seeds 1 to 8 pass with no race. On the
+  base code the new tests fail: window 3 of 3 (base plus the seam only),
+  hadClient 1 of 1, capture 5 of 5 subtests (`-race`), presence 1 of 1; the
+  port test passes there (it pins base's code) and fails without `run()`'s
+  `ln.Close()`. Go mutants: 17 of 18 caught; MD2, which drops
+  `webLinesUntil`'s `isolatePulse`, survives, because today's callers
+  isolate themselves. The two page mutants are caught: MF1, and MF2, which
+  is a guess at part 32's V2 (keys no longer bring the chrome back after
+  the end).
+  `SCTERM_WEB_HOSTS` set to `evil.example`, `http://evil.example` or
+  `cachyos`: base fails 4, 2 and 1 tests, this part none. A runWeb that
+  finds `pactl` itself and never stops its follower ran the session's
+  `pactl` 52 times with the base tests, 0 with this part's.
+- Review round 1 (NEEDS CHANGES, wording only): `run()`'s comment said it
+  returned without printing after a stop, but `allowedNames` warns of
+  ignored `SCTERM_WEB_HOSTS` entries before that check (the stop-before-run
+  tests pass because they empty the variable); the mutant count left out
+  MD2; the `hadClient` sentence needed the order it depends on; and two
+  smaller wordings. It found the code sound: no browser can start once
+  `killWindow` has looked, `setStderr` cannot deadlock, no non-test file
+  reads an `SCTERM_TEST_` variable, and the isolation holds; every
+  fail-before and mutant claim reproduced. Left for later, from its
+  suggestions: a stop still reports a window it closed as a browser that
+  failed (`watchWindow` could stay quiet once `closing` is set);
+  `setWindow` is used only by tests; the presence swap lives in one child
+  entry; the capture test counts a race once per process.
+- Round 2 changes only `run()`'s comment in `web.go` and corrects the
+  sentences above.
+- Verification, snapshot round 2 (`/tmp/opencode/review-38c`, on round 1's
+  base), every Go command inside the bwrap sandbox with `iso.env`: gofmt,
+  vet, the build and `git diff --check`; `go test ./...` (462 top-level
+  tests pass and 3 skip); `-race -count=3` on 112 related tests; the 7 new
+  tests 20 times and 5 times under `-race`; the docs checker finds 10 links
+  in docs/DEVELOPMENT.md and no problem, and the docs tests pass; the whole
+  module, in the desktop-like sandbox, connects to none of its decoy
+  sockets, while the positive control reaches two.
+- Review round 2 (NEEDS CHANGES, wording only): the Not run list named a
+  desktop-like sandbox with decoy sockets, which the snapshot checks used
+  (the item came from the builder's text, written before them); the
+  `hadClient` sentence left out the window's watcher, which reads
+  `hadClient` again once the browser has exited (`watchWindow`): with a
+  browser that ignores SIGTERM, a refusal stored after `killWindow` looked
+  let the watcher remove the log (the review's overlay test); `run()`'s
+  comment had one line of 92 columns; the mutant count named only the Go
+  mutants. It found round 1's findings resolved, the new comment exact,
+  and every figure of round 2's bullets reproduced; `go test ./...` passed
+  with `SCTERM_WEB_HOSTS=http://evil.example` too. Suggestions taken: the
+  four host tests named; `git diff --check` and the hashes run again after
+  the snapshot is re-packed.
+- Round 3 changes this entry and the wrapping of `run()`'s comment, and
+  moves the part onto part 37's second round, which also changes
+  `exit_test.go`: that file is merged three ways.
+- Verification, snapshot round 3 (`/tmp/opencode/review-38d`, on part 37's
+  second round), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (463
+  top-level tests pass and 3 skip); `-race -count=3` on 112 related tests;
+  the 7 new tests 20 times and 5 times under `-race`; the docs checker
+  finds 10 relative links in docs/DEVELOPMENT.md and no problem, and the
+  docs tests pass; the whole module, in the desktop-like sandbox, connects
+  to none of its decoy sockets, while the positive control reaches two.
+  Every file of the part but the handoff equals the worktree's, and this
+  entry is the worktree's.
+- Review round 3 (PASS), with two nits, both corrected above: the
+  `hadClient` sentence held only while the window was still open when the
+  stop looked for it (a window that exited by itself and was reported keeps
+  its log, and in the watcher's case the watcher removes the log, not the
+  stop), and the snapshot bullet said every file of the part equals the
+  worktree's, which the handoff does not. It found round 2's findings
+  resolved, the merge of `exit_test.go` exact, and every figure reproduced.
+  Left for later, from its suggestions: `snap-38d.sh` could check that
+  `web.go` is the same in both bases, and name the handoff as the
+  exception in its message.
+- Round 4 changes only this entry, and moves the part unchanged onto part
+  37's third round, which changes none of its files but the handoff.
+- Verification, snapshot round 4 (`/tmp/opencode/review-38e`, on part 37's
+  third round), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (465
+  top-level tests pass and 3 skip, two more than round 3's, from parts 33
+  and 37); `-race -count=3` on 112 related tests; the 7 new tests 20 times
+  and 5 times under `-race`; the docs checker finds 10 relative links in
+  docs/DEVELOPMENT.md and no problem, and the docs tests pass; the whole
+  module, in the desktop-like sandbox, connects to none of its decoy
+  sockets, while the positive control reaches two. The runs against older
+  code were not repeated, as the part's files are round 3's bytes. Every
+  file of the part but the handoff and `screenshot_test.go` (which part 39
+  also changes) equals the worktree's, and this entry is the worktree's.
+- Review round 4 (PASS), with two nits, both corrected above: the
+  `hadClient` sentence's last claims failed in one order (the stop takes
+  the window, the browser fails by itself and its watcher reports it, a
+  viewer is refused, and the stop then reads `hadClient` and removes the
+  log just reported; the review's probe held the stop between taking the
+  window and reading `hadClient`), and the round-4 bullet said part 37's
+  third round changes none of this part's files, though it changes the
+  handoff. It found round 3's nits resolved, every file but the handoff
+  round 3's bytes, and every figure of the round-4 bullet reproduced.
+  Suggestions taken: why nothing orders the refusal and the reads, and
+  the other half of round 3's suggestion above.
+- Round 5 changes only this entry, and moves the part unchanged onto part
+  37's fourth round, which changes none of its files but the handoff.
+- Verification, snapshot round 5 (`/tmp/opencode/review-38f`, on part 37's
+  fourth round), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (465
+  top-level tests pass and 3 skip); `-race -count=3` on 112 related tests;
+  the 7 new tests 20 times and 5 times under `-race`; the docs checker
+  finds 10 relative links in docs/DEVELOPMENT.md and no problem, and the
+  docs tests pass; the whole module, in the desktop-like sandbox, connects
+  to none of its decoy sockets, while the positive control reaches two.
+  The runs against older code were not repeated, as the part's code and
+  docs are round 3's bytes. Every file of the part but the handoff and
+  `screenshot_test.go` (which part 39 also changes) equals the worktree's,
+  and this entry is the worktree's. These checks ran before this bullet
+  was written; the snapshot was then rebuilt with it, the same files.
+- Review round 5 (PASS), with one nit, corrected above: the sentence on a
+  refusal recorded after both reads left out a browser that hands the
+  mirror over to a running one, whose log the watcher removes whatever
+  `hadClient` says (the exit report's handover branch; the review's probe,
+  with the stop's read taken while the browser still ran). It found round
+  4's nits resolved, only the handoff changed since round 4, and every
+  figure of the round-5 snapshot bullet reproduced. With the fix, round 6
+  also says the late case generally, and that the watcher waits only for
+  the browser.
+- Round 6 changes only this entry, and moves the part unchanged onto part
+  37's fifth round (`/tmp/opencode/review-37e`), which changes none of its
+  files but the handoff.
+- Verification, snapshot round 6 (`/tmp/opencode/review-38g`, on part 37's
+  fifth round): the same checks as round 5's, with the same results: 465
+  top-level tests pass and 3 skip, the related, new and docs checks pass,
+  and the whole module connects to none of its decoy sockets, while the
+  positive control reaches two.
+- Review round 6 (BLOCKED on part 37): part 37's fifth round, this
+  snapshot's base, needed changes, so the tree could not land as reviewed,
+  and the Round 6 bullet's "part 37 as committed" was not true (corrected
+  above). It found nothing to change in this part: the files, the delta
+  and this entry's corrections right, and every check reproduced. It noted
+  that round 5's findings file lists no suggestions, so the bullet that
+  called the two wordings above its suggestions now says only that round 6
+  made them. Its suggestion, taken: a move names part 37's round until
+  part 37 has landed.
+- Round 7 changes only this entry, and moves the part unchanged onto part
+  37's sixth round, which changes none of its files but the handoff.
+- Review round 7 (PASS), with no findings: the files, the delta and this
+  entry right, the base exactly part 37's sixth round, and every check
+  reproduced. Part 37's sixth round then needed changes.
+- Round 8 changes only this entry, and moves the part unchanged onto part
+  37's seventh round, which changes none of its files but the handoff.
+- Review round 8 (PASS), with no findings: the files, the delta and this
+  entry right, the base exactly part 37's seventh round, and every check
+  reproduced. Its suggestions, and the last move review's, concern the
+  scripts that build the snapshots, which now count an entry's changed
+  lines right. Part 37's seventh round then needed changes.
+- Round 9 changes only this entry, and moves the part unchanged onto part
+  37's eleventh round, which changes none of its files but the handoff.
+- Not run: a real browser, Firefox, `--window` on a desktop, a device, the
+  terminal UI and CI. The real presence search ran only in the sandbox (no
+  route).
+
 ## Update (2026-10-21: QoL overhaul, part 37: terminal and command-line loose ends)
 
 - Device text no longer reaches the terminal raw in three more places, each

@@ -29,6 +29,16 @@ go vet ./...
 go test ./...
 ```
 
+Some tests catch a data race only under Go's race detector, which CI does not use. Among them
+are the browser display's tests of a stop that comes while the server starts (the order under
+`srvMu`), of the frame buffers that its viewers share, and of its list of viewers. When you
+change the browser display, run its tests under the detector too, or the whole module with
+`go test -race ./...`:
+
+```sh
+go test -race -run TestWeb .
+```
+
 `go test ./...` also runs the browser player's test suites when `node` is installed, and skips
 them when it is not (`web_client_test.go`). The suites load the real `web/player.js` and
 `web/pcm-worklet.js`, with the DOM and the AudioWorklet replaced by stubs, so they test the code
@@ -64,10 +74,12 @@ peerctl --home /tmp/pattern serve --port 27411 --invite-host 127.0.0.1
 SCTERM_PEER_INVITATION="127.0.0.1:27411 XXXX-XXXX-XXXX-XXXX" go test ./peer -run Interop -v
 ```
 
-`SCTERM_TEST_MAIN_ARGS`, `SCTERM_TEST_CLEANUP_LOG`, `SCTERM_TEST_LOST_DEVICE`,
-`SCTERM_TEST_SESSION_END`, `SCTERM_TEST_INPUT_LOOP`, `SCTERM_TEST_DOCTOR` and
-`SCTERM_TEST_UPDATE` are set by tests for the child processes they start. Do not set them
-yourself.
+`SCTERM_TEST_MAIN_ARGS`, `SCTERM_TEST_NO_PRESENCE`, `SCTERM_TEST_CLEANUP_LOG`,
+`SCTERM_TEST_LOST_DEVICE`, `SCTERM_TEST_SESSION_END`, `SCTERM_TEST_INPUT_LOOP`,
+`SCTERM_TEST_DOCTOR` and `SCTERM_TEST_UPDATE` are set by tests for the child processes they
+start. Do not set them yourself. With `SCTERM_TEST_NO_PRESENCE`, main in a child process that
+cannot reach its paired device does not search the network for it (multicast DNS), and notes
+each search in the file that the variable names.
 
 ## Debug logging
 

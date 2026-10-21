@@ -116,6 +116,7 @@ func machineName(t *testing.T) string {
 // 403 that says to open the page by the address it reached, or to name it in
 // SCTERM_WEB_HOSTS, and the name is reported once, however often it comes.
 func TestWebRefusesARebindingName(t *testing.T) {
+	t.Setenv(webHostsEnv, "")
 	startNotices(t)
 	h := newWebTestHarness(t, config{web: true}, false)
 	host := "evil.example:" + strconv.Itoa(h.srv.port)
@@ -249,6 +250,7 @@ func TestWebServesTheNamesItStartsWith(t *testing.T) {
 // the one the request reached, so one the server listens on: here 127.0.0.2,
 // not 127.0.0.1.
 func TestWebRefusalSuggestsTheAddressReached(t *testing.T) {
+	t.Setenv(webHostsEnv, "")
 	startNotices(t)
 	srv := serveAt(t, "127.0.0.2")
 	addr := net.JoinHostPort("127.0.0.2", strconv.Itoa(srv.port))
@@ -305,6 +307,7 @@ func TestWebServesItsOwnNames(t *testing.T) {
 // .local, like any other name: someone on the network who answers for that
 // name could point it at 127.0.0.1 and serve a page of their own under it.
 func TestWebLoopbackRefusesThisComputersName(t *testing.T) {
+	t.Setenv(webHostsEnv, "") // a developer's own list could name this computer
 	startNotices(t)
 	h := newWebTestHarness(t, config{web: true}, false)
 	machine := machineName(t)
@@ -444,6 +447,7 @@ func TestWebReportsEachRefusedNameOnce(t *testing.T) {
 // TestWebReportsANameOnceInAnyForm: a refused name is reported once, whatever
 // its case, final dot or port.
 func TestWebReportsANameOnceInAnyForm(t *testing.T) {
+	t.Setenv(webHostsEnv, "")
 	startNotices(t)
 	h := newWebTestHarness(t, config{web: true}, false)
 	for _, host := range []string{"evil.example", "Evil.Example", "evil.example.", "EVIL.EXAMPLE:1",
@@ -472,6 +476,7 @@ func TestWebReportCutsALongName(t *testing.T) {
 // TestWebRefusesEveryMethod: a request addressed to another name is refused
 // whatever its method, not only GET.
 func TestWebRefusesEveryMethod(t *testing.T) {
+	t.Setenv(webHostsEnv, "")
 	startNotices(t)
 	h := newWebTestHarness(t, config{web: true}, false)
 	for _, method := range []string{"HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} {

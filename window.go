@@ -403,8 +403,12 @@ user_pref("browser.fullscreen.autohide", true);
 // openWindow launches the browser window and returns immediately: the process
 // outlives nothing important (the server is the parent), and window mode ends
 // webLeaveGrace after the last client disconnects, unless a client (a reloaded
-// page) connects again first.
+// page) connects again first. Once a stop has begun it opens nothing (see
+// startWindow).
 func (s *webServer) openWindow(url string) error {
+	if s.closing.Load() {
+		return nil
+	}
 	w, h := s.windowGeometry()
 	bc, err := findBrowser(url, w, h)
 	if err != nil {
@@ -434,19 +438,20 @@ func (s *webServer) openWindow(url string) error {
 	if logFile != nil {
 		cmd.Stdout, cmd.Stderr = logFile, logFile
 	}
-	if err := cmd.Start(); err != nil {
-		if logFile != nil {
-			logFile.Close()
-		}
+	started, err := s.startWindow(cmd, logPath)
+	if logFile != nil {
+		logFile.Close() // a browser that started holds its own descriptor now
+	}
+	if !started {
 		if bc.tempDir != "" {
 			os.RemoveAll(bc.tempDir)
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		removeFile(logPath) // a stop has begun: no window, nothing to explain
+		return nil
 	}
-	if logFile != nil {
-		logFile.Close() // the browser holds its own descriptor now
-	}
-	s.setWindow(cmd, logPath)
 	if bc.name == "firefox" {
 		if os.Getenv("SCTERM_FIREFOX_KIOSK") != "" {
 			fmt.Fprintf(stderrWriter(), "scterm: window: firefox kiosk (%s)\n", bc.path)
@@ -633,6 +638,29 @@ func (s *webServer) setWindow(cmd *exec.Cmd, logPath string) {
 	s.winMu.Lock()
 	s.win, s.winLog = cmd, logPath
 	s.winMu.Unlock()
+}
+
+// windowStart starts the browser's process: cmd.Start, or in tests a stand-in.
+var windowStart = (*exec.Cmd).Start
+
+// startWindow starts cmd, the browser window, and remembers it as setWindow
+// does, unless a stop has begun, and reports whether it started it. A stop
+// closes only the window it finds (killWindow), so a window started after it
+// looked would outlive scterm and hold the private profile's lock. The stop
+// sets closing before it looks for the window under winMu, and winMu is held
+// here from the check until the window is remembered, so either the stop
+// finds the window or the window never starts.
+func (s *webServer) startWindow(cmd *exec.Cmd, logPath string) (bool, error) {
+	s.winMu.Lock()
+	defer s.winMu.Unlock()
+	if s.closing.Load() {
+		return false, nil
+	}
+	if err := windowStart(cmd); err != nil {
+		return false, err
+	}
+	s.win, s.winLog = cmd, logPath
+	return true, nil
 }
 
 func (s *webServer) clearWindow(cmd *exec.Cmd) {

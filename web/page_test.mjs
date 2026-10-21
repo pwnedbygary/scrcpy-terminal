@@ -959,16 +959,20 @@ button("screenshot").fire("click");
 check("while Shot still saves the last frame, and flashes", [(E.screen.blobs || 0) - blobs,
   button("screenshot").classList.contains("done")], [1, true]);
 // Tab is the browser's: from Reconnect it moves the focus to ☰, then into the
-// bar. The stand-in does not move the focus itself, and the chrome is already
-// up here (that a Tab brings it up is checked in a browser only).
+// bar. The stand-in does not move the focus itself. The chrome fades first, so
+// the Tab has to bring it back.
+fade();
+fade();
+check("with nothing in the bar focused, the chrome fades after the end too", [E.hud.classList.contains("idle"), E.bar.inert],
+  [true, true]);
 key({ key: "Tab", code: "Tab", target: doc.activeElement });
 menuBtn.focus();
 key({ key: "Tab", code: "Tab", target: menuBtn });
 button("back").focus();
 fade();
 fade();
-check("Tab is the browser's now, and keyboard focus on the bar holds the chrome up: fading would make the bar " +
-  "inert and drop the focus to the page", [E.hud.classList.contains("idle"), E.bar.inert, focusOn()],
+check("Tab is the browser's now: it brings the chrome back, and keyboard focus on the bar holds it up: fading " +
+  "would make the bar inert and drop the focus to the page", [E.hud.classList.contains("idle"), E.bar.inert, focusOn()],
   [false, false, "bar:back"]);
 
 E["conn-retry"].fire("click");
