@@ -139,6 +139,7 @@ type videoFrame struct {
 	cw   int // canvas dims (rgb length = cw*ch*4)
 	ch   int
 	fps  float64
+	refs atomic.Int32 // the web sink's holders of rgb (see webServer.frame)
 }
 
 func newStreamState(sess *session, cfg config, ctrl *controller) *streamState {

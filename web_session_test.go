@@ -2,10 +2,14 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os/exec"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -363,5 +367,249 @@ func TestWSCloseBoundsARacingWrite(t *testing.T) {
 	case <-closed:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the close never finished")
+	}
+}
+
+// churnDial opens a viewer's socket and waits for the server to accept the
+// handshake. Unlike dialWS it may run off the test's goroutine.
+func churnDial(host string) (net.Conn, error) {
+	conn, err := net.Dial("tcp", host)
+	if err != nil {
+		return nil, err
+	}
+	key := base64.StdEncoding.EncodeToString([]byte("scterm-test-key"))
+	req := "GET /ws HTTP/1.1\r\nHost: " + host + "\r\n" +
+		"Upgrade: websocket\r\nConnection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: " + key + "\r\nSec-WebSocket-Version: 13\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	status, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil || !strings.Contains(status, "101") {
+		conn.Close()
+		return nil, fmt.Errorf("handshake: %q, %v", strings.TrimSpace(status), err)
+	}
+	return conn, nil
+}
+
+// TestWebViewerCountFollowsTheList: the viewer count is stored with the list
+// it counts, under the same lock, so whoever holds that lock finds the two
+// agree, and viewers arriving and leaving together cannot leave the count
+// stale. Before, each connect and each leave stored the count after letting go
+// of the lock: for a moment the count lagged the list, and the later of two
+// stores could carry the older length for good. Eight viewers at a time come
+// and go while a checker takes the lock whenever it can and compares. The old
+// gap is a few instructions wide, so this is a stress test, not a
+// deterministic one.
+func TestWebViewerCountFollowsTheList(t *testing.T) {
+	h := newWebTestHarness(t, config{web: true}, false)
+	s := h.srv
+	stop := make(chan struct{})
+	found := make(chan string, 1)
+	checked := make(chan struct{})
+	go func() {
+		defer close(checked)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if !s.clientsMu.TryLock() {
+				continue
+			}
+			n, count := len(s.clients), s.nClients.Load()
+			s.clientsMu.Unlock()
+			if int64(n) != count {
+				found <- fmt.Sprintf("%d viewers on the list and a count of %d", n, count)
+				return
+			}
+		}
+	}()
+	stopChecker := sync.OnceFunc(func() { close(stop); <-checked })
+	defer stopChecker()
+	errs := make(chan error, 8)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 25 {
+				conn, err := churnDial(h.url())
+				if err != nil {
+					errs <- err
+					return
+				}
+				conn.Close()
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	waitClients(t, s, 0)
+	stopChecker()
+	select {
+	case m := <-found:
+		t.Fatalf("while viewers came and went, the server had %s", m)
+	default:
+	}
+}
+
+// hijackOnCue is the ResponseWriter of a WebSocket handshake whose upgrade
+// completes only when the test closes cue.
+type hijackOnCue struct {
+	conn net.Conn
+	cue  chan struct{}
+}
+
+func (w *hijackOnCue) Header() http.Header         { return http.Header{} }
+func (w *hijackOnCue) Write(b []byte) (int, error) { return len(b), nil }
+func (w *hijackOnCue) WriteHeader(int)             {}
+
+func (w *hijackOnCue) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	<-w.cue
+	return w.conn, bufio.NewReadWriter(bufio.NewReader(w.conn), bufio.NewWriter(w.conn)), nil
+}
+
+// lateViewer starts a viewer's handshake on s whose upgrade completes when
+// upgrade is called; upgrade returns the viewer's end once the server has
+// answered the handshake. served is closed when the server's handler returns.
+func lateViewer(t *testing.T, s *webServer) (upgrade func() *testClient, served <-chan struct{}) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	viewer, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { viewer.Close() })
+	conn, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	r, err := http.NewRequest(http.MethodGet, "http://"+serverHost(s)+"/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+	r.Header.Set("Sec-WebSocket-Key", base64.StdEncoding.EncodeToString([]byte("scterm-test-key")))
+	r.Header.Set("Sec-WebSocket-Version", "13")
+	w := &hijackOnCue{conn: conn, cue: make(chan struct{})}
+	done := make(chan struct{})
+	go func() { s.handleWS(w, r); close(done) }()
+	cue := sync.OnceFunc(func() { close(w.cue) })
+	t.Cleanup(cue)
+
+	upgrade = func() *testClient {
+		t.Helper()
+		cue()
+		if err := viewer.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		br := bufio.NewReader(viewer)
+		status, err := br.ReadString('\n')
+		if err != nil || !strings.Contains(status, "101") {
+			t.Fatalf("the late handshake was answered %q, %v", strings.TrimSpace(status), err)
+		}
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				t.Fatalf("the late handshake's headers: %v", err)
+			}
+			if strings.TrimRight(line, "\r\n") == "" {
+				break
+			}
+		}
+		return &testClient{t: t, conn: viewer, br: br,
+			ws: &wsConn{conn: viewer, br: br, bw: bufio.NewWriter(viewer), client: true, writeTimeout: 5 * time.Second}}
+	}
+	return upgrade, done
+}
+
+// TestWebLateViewerGetsTheBye: a viewer whose upgrade completes once the stop
+// has taken its list of viewers to close, or after the stop, is told the
+// session is over and closed, like the viewers the stop found. Before, it was
+// added to the list after the stop had copied it: no bye, never closed.
+func TestWebLateViewerGetsTheBye(t *testing.T) {
+	const reason = "Quit from the browser."
+	served := func(t *testing.T, served <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-served:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the late viewer's handler never returned")
+		}
+	}
+	t.Run("while the stop says bye to the others", func(t *testing.T) {
+		h := newWebTestHarness(t, config{web: true}, false)
+		other := helloClient(t, h.url())
+		so := onlyClient(t, h.srv)
+		upgrade, done := lateViewer(t, h.srv)
+		letBye := stall(t, &so.ws.wmu) // the stop now waits to write the other viewer's bye
+		stopped := make(chan struct{})
+		go func() { h.srv.stopWith(reason); close(stopped) }()
+		eventually(t, "the stop is closing the viewers it found", so.closed.Load)
+		late := upgrade()
+		served(t, done)
+		letBye()
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the stop never returned")
+		}
+		for name, cl := range map[string]*testClient{"the late viewer": late, "the other viewer": other} {
+			if got := cl.byeBeforeClose(3 * time.Second)["reason"]; got != reason {
+				t.Errorf("%s: bye reason %q, want %q", name, got, reason)
+			}
+		}
+		if n := h.srv.clientCount(); n != 0 {
+			t.Errorf("%d viewers still listed after the stop, want 0", n)
+		}
+	})
+	t.Run("after the stop", func(t *testing.T) {
+		h := newWebTestHarness(t, config{web: true}, false)
+		upgrade, done := lateViewer(t, h.srv)
+		h.srv.stopWith(reason)
+		late := upgrade()
+		served(t, done)
+		if got := late.byeBeforeClose(3 * time.Second)["reason"]; got != reason {
+			t.Errorf("bye reason %q, want %q", got, reason)
+		}
+		if n := h.srv.clientCount(); n != 0 {
+			t.Errorf("%d viewers listed after the stop, want 0", n)
+		}
+	})
+}
+
+// TestWebWindowEndsWithAFullEventQueue: the end of a --window session reaches
+// the app even when the app's event queue is full as the grace runs out: the
+// quit waits for room. Before, it was dropped, and the session outlived its
+// window.
+func TestWebWindowEndsWithAFullEventQueue(t *testing.T) {
+	const grace = 50 * time.Millisecond
+	s, a := newWindowServer(t, grace)
+	page := helloClient(t, serverHost(s))
+	for len(a.events) < cap(a.events) {
+		a.events <- inputEvent{kind: evTick}
+	}
+	page.conn.Close()
+	waitClients(t, s, 0)
+	eventually(t, "the grace has run out", func() bool {
+		s.clientsMu.Lock()
+		defer s.clientsMu.Unlock()
+		return s.leaveTimer == nil
+	})
+	// The timer has had ample time to try to queue the quit.
+	time.Sleep(100 * time.Millisecond)
+	if !quitWithin(a, 2*time.Second) {
+		t.Fatal("the --window session's quit was lost to a full event queue")
 	}
 }

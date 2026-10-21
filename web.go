@@ -255,8 +255,13 @@ type webServer struct {
 	// for leaveGrace (webLeaveGrace; tests shorten it). Guarded by clientsMu.
 	leaveGrace time.Duration
 	leaveTimer *time.Timer
+	// stopBye is the bye of the stop, set when it takes its list of viewers to
+	// close: a viewer whose upgrade completes later gets it from handleWS.
+	// Guarded by clientsMu.
+	stopBye string
 
-	// frame pool: slots returned by clients as soon as they are encoded/sent
+	// frame pool: a frame's buffer comes back once its last holder is done
+	// with it (see frame), an output buffer once it is sent
 	poolMu sync.Mutex
 	pool   [4][]byte
 
@@ -280,6 +285,9 @@ type webServer struct {
 	// frames are written and the window is gone.
 	stopped chan struct{}
 
+	// nClients is len(clients) for readers that do not take clientsMu. It is
+	// stored under clientsMu with every change to the list, so it can never be
+	// left behind by two changes at once.
 	nClients atomic.Int64
 	// hadClient is true once any viewer has connected, ever. It is what tells
 	// a browser that died before it could display anything (a failure worth
@@ -606,12 +614,13 @@ func (s *webServer) stopWith(reason string) {
 	if s.ln != nil {
 		_ = s.ln.Close()
 	}
+	bye := byeMessage(reason)
 	s.clientsMu.Lock()
 	clients := append([]*webClient(nil), s.clients...)
+	s.stopBye = bye
 	s.cancelLeave()
 	s.clientsMu.Unlock()
 	// All at once, so a viewer that stopped reading delays only its own bye.
-	bye := byeMessage(reason)
 	var wg sync.WaitGroup
 	for _, c := range clients {
 		wg.Go(func() { c.closeWith(bye) })
@@ -638,9 +647,13 @@ func (s *webServer) audioErrString() string {
 // blocks (a client whose mailbox is still full loses its oldest frame).
 //
 // Buffer ownership, which is what keeps this allocation-free and race-free:
-// the sink owns the buffer until a client queues it in its mailbox; the
-// client's sender owns it until it has encoded/written it; whoever removes a
-// frame from a mailbox returns its buffer to the pool exactly once.
+// every client is handed the same frame, so its buffer is shared, and f.refs
+// counts who still holds it: the sink while it hands the frame out, and each
+// client from when its mailbox takes the frame until its sender has encoded or
+// copied it, or a newer frame or the client's close drops it from the mailbox.
+// Each holder lets go once, through releaseFrame, and the last to let go
+// returns the buffer to the pool: once per frame, and never while a client can
+// still read it.
 func (s *webServer) frame(f *videoFrame) {
 	if f == nil {
 		return
@@ -650,52 +663,58 @@ func (s *webServer) frame(f *videoFrame) {
 	clients := s.clients
 	s.clientsMu.Unlock()
 
-	queued := false
+	// The sink's own hold: a client that sends the frame before the rest have
+	// been offered it must not free the buffer under them.
+	f.refs.Add(1)
 	for _, c := range clients {
 		if c.closed.Load() {
 			continue
 		}
-		if c.offer(f) {
-			queued = true
-		}
+		c.offer(f)
 	}
-	if !queued {
-		s.poolPut(f.rgb)
-	}
+	s.releaseFrame(f)
 }
 
-// offer hands one frame to a client. It reports whether the frame is now owned
-// by that client's mailbox (false: the sink must recycle it).
-func (c *webClient) offer(f *videoFrame) bool {
+// offer hands one frame to a client, whose mailbox then holds it (see frame).
+func (c *webClient) offer(f *videoFrame) {
 	if c.closed.Load() {
-		return false
+		return
 	}
 	c.frameMu.Lock()
 	if c.closed.Load() {
 		c.frameMu.Unlock()
-		return false
+		return
 	}
+	f.refs.Add(1)
 	old := c.frame
 	c.frame = f
 	c.frameMu.Unlock()
 	if old != nil {
-		// We just took it out of the mailbox, so we own it now.
-		c.srv.poolPut(old.rgb)
+		// Dropped from the mailbox unsent: that was the mailbox's hold.
+		c.srv.releaseFrame(old)
 	}
 	select {
 	case c.frameReady <- struct{}{}:
 	default:
 	}
-	return true
 }
 
-// takeFrame returns the newest frame (the caller then owns its buffer).
+// takeFrame returns the newest frame. The caller takes over the mailbox's hold
+// on it, and lets go with releaseFrame.
 func (c *webClient) takeFrame() *videoFrame {
 	c.frameMu.Lock()
 	f := c.frame
 	c.frame = nil
 	c.frameMu.Unlock()
 	return f
+}
+
+// releaseFrame lets go of one hold on f (see frame). The last holder returns
+// the buffer to the pool.
+func (s *webServer) releaseFrame(f *videoFrame) {
+	if f.refs.Add(-1) == 0 {
+		s.poolPut(f.rgb)
+	}
 }
 
 // pushPCM is the stream PCM tap: fan out to clients that want audio.
@@ -849,6 +868,14 @@ func (s *webServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.clientsMu.Lock()
+	// A stop that has already taken its list of viewers to close would never
+	// close this one, so it gets that stop's bye here. One added before is on
+	// the list: the stop takes the list and sets stopBye under clientsMu.
+	if bye := s.stopBye; bye != "" {
+		s.clientsMu.Unlock()
+		_ = ws.CloseWith(bye)
+		return
+	}
 	s.nextID++
 	c := &webClient{
 		srv:         s,
@@ -862,9 +889,9 @@ func (s *webServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clients = append(s.clients[:len(s.clients):len(s.clients)], c)
 	n := len(s.clients)
+	s.nClients.Store(int64(n))
 	s.cancelLeave()
 	s.clientsMu.Unlock()
-	s.nClients.Store(int64(n))
 	s.hadClient.Store(true)
 
 	logOnce(fmt.Sprintf("scterm: web client %d connected (%d total)\n", c.id, n))
@@ -890,7 +917,7 @@ func (c *webClient) closeWith(last string) {
 	_ = c.ws.CloseWith(last)
 	c.frameMu.Lock()
 	if c.frame != nil {
-		c.srv.poolPut(c.frame.rgb)
+		c.srv.releaseFrame(c.frame)
 		c.frame = nil
 	}
 	c.frameMu.Unlock()
@@ -907,6 +934,7 @@ func (c *webClient) closeWith(last string) {
 		}
 	}
 	n := len(s.clients)
+	s.nClients.Store(int64(n))
 	// Window mode: the window *is* the session. When its last viewer has been
 	// gone for leaveGrace there is nothing left to display, so stop; a reload
 	// comes back sooner than that.
@@ -914,7 +942,6 @@ func (c *webClient) closeWith(last string) {
 		s.leaveLater()
 	}
 	s.clientsMu.Unlock()
-	s.nClients.Store(int64(n))
 	logOnce(fmt.Sprintf("scterm: web client %d disconnected (%d left)\n", c.id, n))
 }
 
@@ -946,11 +973,15 @@ func (s *webServer) cancelLeave() {
 	}
 }
 
+// quit ends the session once its grace has run out: through the app's loop
+// when there is one, waiting for room in its event queue (it runs on the
+// timer's own goroutine, and a dropped quit would leave the session running
+// without its window), or by stopping the server.
 func (s *webServer) quit() {
 	if s.app != nil {
 		select {
 		case s.app.events <- inputEvent{kind: evQuit}:
-		default:
+		case <-s.done:
 		}
 		return
 	}
@@ -1003,7 +1034,7 @@ func (c *webClient) sendFrame(f *videoFrame) {
 		c.encErrors.Add(1)
 		s.logLimited("scterm: web: frame buffer %d bytes cannot fill canvas %dx%d (%d bytes)\n",
 			len(f.rgb), cv.cw, cv.ch, need)
-		s.poolPut(f.rgb)
+		s.releaseFrame(f)
 		return
 	}
 
@@ -1013,18 +1044,18 @@ func (c *webClient) sendFrame(f *videoFrame) {
 		format = webFormatRaw
 		buf = s.poolGet(webHeaderLen + len(f.rgb))
 		copy(buf[webHeaderLen:], f.rgb)
-		s.poolPut(f.rgb)
+		s.releaseFrame(f)
 	} else {
 		format = webFormatJPEG
 		size := s.encoderMaxSize(cv)
 		if size <= 0 {
-			s.poolPut(f.rgb)
+			s.releaseFrame(f)
 			return
 		}
 		buf = s.poolGet(webHeaderLen + size)
 		// encodeWith records the encode cost itself (inside the encoder lock).
 		n, err := s.encodeWith(cv, f.rgb, buf, webHeaderLen)
-		s.poolPut(f.rgb)
+		s.releaseFrame(f)
 		if err != nil || n <= 0 {
 			if err != errJencTooSmall {
 				c.encErrors.Add(1)

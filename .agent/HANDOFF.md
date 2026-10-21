@@ -7,6 +7,133 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 25: browser viewers share frames safely)
+
+- With two or more browser viewers, every viewer that took a video frame put
+  its buffer back in the pool when it was done with it, so one buffer could
+  go back more than once. It could then be handed out twice, with two
+  senders writing into it at once, or while a JPEG viewer was still encoding
+  from it, and a page could get a damaged picture (the part-18 entry's
+  `-race` probe found the races in `sendFrame`; this part's load test also
+  saw payloads that were not the frame's). Now each frame counts its holders
+  (`videoFrame.refs`, the only change in `stream.go`): `frame()` holds it
+  while it hands it out, each viewer's mailbox takes its own hold in
+  `offer()`, and `releaseFrame()` puts the buffer back only when the last
+  hold goes. A viewer lets go once its sender has encoded or copied the
+  frame (before the socket write, as before, so a slow socket keeps no frame
+  buffer out of the pool) or refused it (too short for its canvas, or with
+  no encoder to be had for it), when a newer frame replaces it in the
+  mailbox, or when the viewer closes with it still waiting. `frame()` still
+  allocates nothing and never waits.
+- The viewer count (`nClients`) is stored inside the locked section that
+  changes the list, in `handleWS` and `closeWith`, so two viewers coming or
+  going together can no longer leave it stale.
+- A viewer whose WebSocket upgrade finishes after `stopWith` has taken its
+  list used to be added to the list anyway, so it got no bye and its socket
+  stayed open until the process exited. `stopWith` now records its bye
+  (`stopBye`, under `clientsMu`, in the same locked section that copies the
+  list), and `handleWS` closes such a viewer at once with that bye and then
+  the close frame, so its page shows "Session ended" with the reason. A
+  viewer that finishes its upgrade before the list is taken, while the stop
+  is still in `http.Shutdown`, is on the list and gets the bye as before.
+- `quit()`, which the `--window` leave timer calls, now waits for room in
+  the app's event queue, or for the server to stop, instead of dropping the
+  quit when the queue is full; a dropped quit left the session running with
+  no window.
+- This closes the shared-buffer, stale-count, late-viewer and dropped-quit
+  items the part-18 entry left alone.
+- Verification, in the builder's tree (part 17, and part 18 as first
+  reviewed; part 18's code has not changed since): gofmt, `go vet ./...`,
+  the build, `go test -count=1 ./...`, and `-race -count=3` on the web, bye,
+  second-stop, WebSocket, window-kill and encoder tests (47 tests, 141
+  passes, no races); the seven new tests 20 times each, plain and under
+  `-race` (140 of 140 each). New tests: `web_share_test.go`
+  (`TestWebSharedFrameGoesBackOnce`, with a frame sent, a frame too short
+  for its canvas and, from round 2, a frame no encoder can be opened for;
+  `TestWebHeldFrameStaysOutOfThePool`, `TestWebFrameAllocatesNothing`,
+  `TestWebSharedFramesUnderLoad`, and, from round 2,
+  `TestWebRawSenderCopiesBeforeLettingGo`) and, in
+  `web_session_test.go`, `TestWebViewerCountFollowsTheList`,
+  `TestWebLateViewerGetsTheBye` and `TestWebWindowEndsWithAFullEventQueue`.
+  Seven fail on the base files on behaviour; `TestWebFrameAllocatesNothing`
+  passes there too, as a guard (the base allocated nothing either). The
+  deterministic tests hold a real lock at a chosen point, with no test
+  hooks: the encoder's lock or a viewer's `cfgMu` stops a sender inside or
+  before its work on the frame, its socket's `wmu` stops
+  it after it is done with the frame, and a viewer's `frameMu` stops
+  `frame()` before it reaches that viewer; the late-viewer test holds a
+  viewer's `wmu` to hold the stop, and runs `handleWS` through a fake
+  hijacker. The load test (three JPEG viewers and one raw viewer at 480×1080,
+  200 frames) compares every payload byte for byte with the raw pixels or
+  one reference JPEG, which holds because the JPEG encoder gave the same
+  bytes for the same pixels in 50 encodes (a probe), so it also catches
+  damage inside the C encoder that `-race` cannot see; on the base files it
+  failed in 10 of 10 processes with `-race` and 10 of 10 without, and the
+  count test in 20 of 20. Of the builder's 13 mutations, 12 are caught: the
+  no-encoder path's release, which round 1 of this entry called untestable,
+  fails the round-2 case (a 70000×2 frame is wider than libavcodec's JPEG
+  encoder takes, so no encoder opens; its buffer went into 3 pool slots),
+  and only recording the bye in its own locked section just after the list
+  copy survives (that the bye is published with the list is reasoned, not
+  tested). The review's mutation that lets the raw sender go before it
+  copies the frame fails `TestWebRawSenderCopiesBeforeLettingGo` under
+  `-race` in 8 of 8 processes (a race report, and the sent frame showing
+  the test's write) and passes without `-race` in 8 of 8, since the copy is
+  done before the test writes; the code as it is passes that test under
+  `-race` in 8 of 8 with no race report. Round 2, on `8641ad7` with this
+  part: gofmt, vet, the build, `go test ./...` (the root package: 258
+  top-level tests pass, 1 skip), `-race -count=3` on the same selection
+  (144 passes over 48 tests, no races), and the eight new tests 20 times
+  each, plain and under `-race`. Round 3, on `33d89a8` with this part:
+  gofmt, vet, the build, `go test ./...` (311 top-level tests pass and 3
+  skip; in the root package 284 pass and one skips), `-race -count=3` on
+  the same selection (144 passes over 48 tests, no races), and the eight
+  new tests 20 times each, plain and under `-race`. Against HEAD's `web.go`
+  and `stream.go` seven of them fail and `TestWebFrameAllocatesNothing`
+  passes; the no-encoder mutation fails only the round-2 case; the review's
+  raw-sender mutation fails in 8 of 8 processes under `-race`, each with a
+  race report, and the code as it is fails in none. Round 4, on `f1c25f3`
+  (part 21's docs commit, which changes none of this part's files) with
+  this part: gofmt, vet, the build, `go test ./...` (312 top-level tests
+  pass and 3 skip; the one more is part 21's README test; in the root
+  package 285 pass and one skips) and `-race -count=3` on the same
+  selection (144 passes over 48 tests, no races).
+  Not run: a real browser or device, a real `--window` session, and
+  the late viewer against the real `http.Server.Shutdown` (the test
+  completes the upgrade through a fake hijacker; its timing against
+  `Shutdown` is reasoned). Frame rate, latency and CPU were not measured.
+- Review round 1 found this entry calling the no-encoder path untestable,
+  the locks the tests hold described wrongly, a test comment's premise
+  wrong for a `bytes.Clone`d buffer (its capacity is rounded up, so a raw
+  output could fit in it), and nothing catching a raw sender that lets go
+  before its copy. Round 2 adds the case and the test above, builds that
+  buffer at its exact size, and corrects this entry; the production code is
+  as first reviewed.
+- Review round 2 passed the code and the tests. It found the comment above
+  `TestWebSharedFrameGoesBackOnce` calling all its viewers raw, though the
+  round-2 case's are JPEG viewers, and this entry giving the root package's
+  test count as that of `go test ./...`. Round 3 corrects both, takes its
+  comment suggestions (the raw-sender test relies on `-race`; the file's
+  header names the frame lock; the 65500-pixel limit is libavcodec's), and
+  is rebuilt on `33d89a8`, as the round-2 snapshot's handoff predates
+  part 22's entry.
+- Review round 3 passed this part on `33d89a8`. Part 21's docs commit then
+  landed with its entry where this one goes, so round 4 rebuilds this file
+  on `f1c25f3`, with this entry above part 21's.
+- Left alone, for later changes: `sendStatus` reads stream fields (the frame
+  rate and the video size) that the demux goroutine writes without
+  synchronisation, a race the web tests never reach because they run no
+  stream; every JPEG viewer still encodes the same frame again (encoding
+  once per frame would save CPU); `stopWith` does not wait for a refused
+  late viewer's bye, so if the process exits at once that page may see the
+  socket drop instead; a refused late viewer does not count as a viewer
+  that connected (`hadClient`), so a `--window` whose first connection
+  lands during a stop may be reported as having shown nothing; once the
+  leave grace has run out, `quit()` waits for room in the event queue for
+  as long as the app's loop is stuck (the queue fills after about 4 s), and
+  a viewer that comes back meanwhile does not take the quit back, which a
+  check of the list while it waits would; its `s.done` way out has no test.
+
 ## Update (2026-10-21: QoL overhaul, part 21: the docs)
 
 - `README.md` is reorganised for a first-time user: what scterm is,
