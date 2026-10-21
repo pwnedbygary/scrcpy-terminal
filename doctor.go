@@ -528,11 +528,11 @@ func doctorWebPort(addr string, port int) doctorLine {
 		ln.Close()
 		return doctorLine{doctorOK, "web", fmt.Sprintf("port %d on %s is free", port, addr), ""}
 	}
-	const another = "choose another port with --web-port PORT (0 picks a free one)"
 	if errors.Is(err, syscall.EADDRINUSE) {
-		return doctorLine{doctorWarn, "web", fmt.Sprintf("port %d on %s is in use", port, addr), "stop the program that uses it, or " + another}
+		detail, todo := webPortInUse(addr, port)
+		return doctorLine{doctorWarn, "web", detail, todo}
 	}
-	return doctorLine{doctorWarn, "web", fmt.Sprintf("cannot listen on port %d on %s (%v)", port, addr, err), another}
+	return doctorLine{doctorWarn, "web", fmt.Sprintf("cannot listen on port %d on %s (%v)", port, addr, err), webPortAnother}
 }
 
 // doctorWebHosts reads SCTERM_WEB_HOSTS as the browser display does

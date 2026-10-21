@@ -7,6 +7,192 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 34: the web port is checked before the device)
+
+- With `--web` or `--window`, also with `--peer`, main now listens on the
+  browser display's address and port right after the flags are checked
+  and the version line is printed, before any device or peer work: before
+  `findDevice`, `newSession` and `start`, and before `newPeerSession`, its
+  identity and its chooser. A port it cannot use ends the run there, with
+  one line and exit status 1, where it used to end it only once the device
+  had started. The display then serves that listener: main sets the web
+  server's `ln` after `newApp`, and `run()` serves `s.ln` when it is set,
+  and listens itself, through the `webListen` seam, only when it is not.
+  `--web-port 0` still prints and opens the port the kernel picked, and
+  `allowedNames` reads the served listener. Runs without `--web` or
+  `--window` are unchanged. `listenWeb` (web.go) opens the listener and
+  `webListenError` says why it cannot.
+- Messages, after `scterm dev`: `scterm: web: port 6969 on 127.0.0.1 is
+  in use: stop the program that uses it, or choose another port with
+  --web-port PORT (0 picks a free one)` (EADDRINUSE, in scterm doctor's
+  words, now shared through `webPortInUse` and `webPortAnother`);
+  `scterm: web: port 80 on 127.0.0.1 needs privileges that scterm does not
+  have: choose another port with --web-port PORT (0 picks a free one)`
+  (EACCES); `scterm: web: 192.0.2.1 is not an address of this computer:
+  --web-addr takes one of its addresses, 0.0.0.0 for all of them, or the
+  default, 127.0.0.1` (EADDRNOTAVAIL); anything else keeps
+  `web: listen on ADDR:PORT: ERR`. scterm doctor's output is unchanged.
+- Tests: `TestWebPortIsCheckedBeforeTheDevice` (exit_test.go) runs main
+  in a child process, through the `SCTERM_TEST_MAIN_ARGS` entry, with a
+  fake adb that notes its calls and a scratch HOME, SCTERM_HOME and
+  XDG_RUNTIME_DIR. With the port held, `--web`, `--window` and
+  `--peer SOMENAME --web` exit 1 with the in-use line, run no adb and
+  leave SCTERM_HOME empty. With it free, the run reaches `adb devices`,
+  holds the port while the fake adb waits at a FIFO, and fails with
+  today's "no device found" line. The child runs in its own process
+  group, killed after 30 s. `TestWebServesTheListenerItIsGiven`
+  (web_test.go): `run()` given a listener serves it, never calls
+  `webListen`, prints its port and serves the host name its address
+  allows. `TestWebPortErrorsSayWhatToDo` (new web_port_test.go): each
+  message, from real errors (a held port, 192.0.2.1, port 1023 when not
+  root and `ip_unprivileged_port_start` is above it, port 70000) and from
+  built ones.
+- Verification, in the builder's tree (`/tmp/opencode/dev-34`, base
+  7e00821, under dev-29's `iso.env`): gofmt and `go vet ./...` clean,
+  `go build` ok, `go test -count=1 ./...` 405 top-level tests pass and 3
+  skip (378 and 1 in the root package; the base gives 402 and 3);
+  `-race -count=5` on the new tests with `TestDoctorChecksTheWebPort` and
+  `TestCommandLineExitStatus`, `-race -count=3` on
+  `TestWeb|TestCommandLine|TestSession` and on `TestDoctor`, and the new
+  tests `-count=20` (60 of 60) pass. The Markdown check of README.md and
+  docs/ARCHITECTURE.md finds 33 links and no problem. Against the base's
+  main.go, web.go, app.go and doctor.go (`go test -overlay`) the first two
+  new tests fail as they should (the old late errors, adb run, an identity
+  written, the port free during the device lookup, `run()` listening
+  again), and web_port_test.go does not build (`undefined: listenWeb`).
+  11 of 11 mutations are caught: the early check removed, moved after
+  `findDevice`, skipped for `--window` or for `--peer`, a check that
+  closes the port again, `run()` listening again or not reading the given
+  port, the names ignoring its address, the in-use hint wrong, the shared
+  words changed, and EACCES and EADDRNOTAVAIL swapped.
+- Taken into the worktree: the files as built, with the README merged
+  three ways onto part 33's lines (the merge changed exactly this part's
+  lines). Part 30's third round was then merged into the worktree's
+  `doctor.go`, adding exactly round 3's lines; this part's lines there are
+  unchanged.
+- Verification, snapshot (`/tmp/opencode/review-34`, on part 33's
+  snapshot), with `iso.env`: gofmt, vet, the build and `git diff --check`;
+  `go test ./...` (417 top-level tests pass and 3 skip); `-race -count=3`
+  on the 84 `TestWeb*`, `TestCommandLine*`, `TestSession*` and
+  `TestDoctor*` tests; the 3 new tests with `TestCommandLineExitStatus`,
+  `TestWebAddrNameIsServed` and `TestDoctorChecksTheWebPort` 20 times and
+  5 times under `-race`; with the base's `main.go`, `web.go` and
+  `doctor.go` laid over and `web_port_test.go` left out (it does not build
+  there), `TestWebPortIsCheckedBeforeTheDevice` and
+  `TestWebServesTheListenerItIsGiven` fail; the docs checker finds 33
+  links and no problem in README.md and docs/ARCHITECTURE.md, and the docs
+  tests pass; and the whole module, in the desktop-like bwrap sandbox
+  described in part 30's entry, connects to none of its decoy sockets.
+- Left alone: app.go (no change needed); scterm doctor's wording for other
+  errors (it checks only 127.0.0.1:6969); `validateConfig` still does not
+  range-check `--web-port`, so `--web-port 70000` now fails early, with
+  today's text. A browser that connects during device start-up, such as a
+  page left open that reconnects, now waits in the accept queue and is
+  served once the display starts, where it was refused and retried
+  (`TestWebRequestDuringStartUpIsServed` shows it with a raw request;
+  `player.js` has no connect timeout; not tried in a browser).
+- Review round 1 (NEEDS CHANGES), resolved in round 2. MEDIUM: no test ran
+  main's two new lines, so main handing its listener to the web server
+  (`app.web.ln = webLn`) or passing `--web-addr` to `listenWeb` could each
+  go with the whole package passing; and the reason this entry gave, the
+  safety rules, did not hold, since the loopback fake peer target takes
+  main past start-up without a device. NIT: the README promised what to do
+  for any port scterm cannot listen on, though only the three named causes
+  get advice. Suggestions: the queued-request and inheritance checks, a log
+  line for the skipped 192.0.2.1 case, and the checks inside bwrap.
+- Round 2, tests (web_port_test.go): `TestWebServesThePortMainHeld` runs
+  main in a child process with `--peer "Pixel 8" --web --video=false
+  --audio=false` against the loopback fake target, paired in a scratch
+  SCTERM_HOME, with PULSE_SERVER naming no server and autospawn off, and
+  fetches the page from the address main prints: on a fixed port, with
+  `--web-port 0`, and with `--web-addr 127.0.0.2` while the same port is
+  held on 127.0.0.1. `TestWebRequestDuringStartUpIsServed` connects and
+  asks while the target holds back its welcome: no answer for 700 ms, then
+  the page. `TestWebListenerIsNotInheritedByADB` reads the fake adb's open
+  files while main holds the port: no socket (handed one on purpose, it
+  lists one). `startMain` and the new `startMainLines` share `mainCommand`
+  (exit_test.go), and `TestWebPortErrorsSayWhatToDo` logs when the
+  192.0.2.1 case is built only. The README now says that the line says
+  why, and what to do for the causes it lists.
+- Round 2 also fixes a data race the new test found under `-race`, older
+  than this part: `run()` set `s.http` on its goroutine while `stopWith`,
+  on the app loop's, read it and shut it down, ordered by nothing when a
+  signal ended the session (the in-process tests stop through a channel
+  after `ready`, which orders the two). Under the race detector each such
+  session exited with status 66. Before this part, `run()` set `s.ln` the
+  same way. Now `run()` builds the server, publishes it and the listener
+  under `srvMu`, and gives up, closing the listener and printing nothing,
+  when a stop has begun; `stopWith` reads both under `srvMu`.
+  `TestWebStopBeforeRunServesNothing` and `TestWebStopFromAnotherGoroutine`
+  (web_test.go) pin it, the second with stops from at once to about 2 ms
+  in, for the race detector.
+- Verification, round 2, in the worktree, each Go command inside the bwrap
+  sandbox with `iso.env`: gofmt and vet; the 5 new tests, also 20 times and
+  5 times under `-race`, and `startMain`'s callers; `-race -count=3` on the
+  browser-server tests; mutants, each failing a test: main not handing over
+  its listener (the fixed-port and 127.0.0.2 cases and the request test),
+  main ignoring `--web-addr` (the 127.0.0.2 case), the listener inherited
+  by adb (close-on-exec cleared), `stopWith` without `srvMu` (under
+  `-race`: the child-process test, and the in-process one in 5 of 5 runs),
+  and a `run()` that serves after a stop; round 1's `web.go` fails the
+  stop-before-run test, and under `-race` both stop tests and the
+  child-process test (all three of its cases); with the base's `main.go`,
+  `web.go` and `doctor.go` laid over, the request test (main never
+  listened during start-up) and the stop-before-run test fail, and the
+  other three pass. These runs, except the five in-process runs of
+  `stopWith` without `srvMu`, came before the last edit of
+  `TestWebStopFromAnotherGoroutine`, the one that spreads its stops over
+  about 2 ms (before that edit, the test did not catch the missing lock);
+  the snapshot checks below, and the review's mutant runs, used the final
+  tests.
+- Verification, snapshot round 2 (`/tmp/opencode/review-34b`, on part 33's
+  second round), each Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (423
+  top-level tests pass and 3 skip); `-race -count=3` on the 89 `TestWeb*`,
+  `TestCommandLine*`, `TestSession*` and `TestDoctor*` tests; the 8 new
+  tests, with `TestCommandLineExitStatus` and
+  `TestSessionEndExitsWithItsStatus` next to them, 20 times and 5 times
+  under `-race`; with the base's `main.go`, `web.go` and `doctor.go` laid
+  over and `web_port_test.go` cut to the new tests, the early-check,
+  request and stop-before-run tests fail and the other three pass; round
+  1's `web.go` fails the stop-before-run test, and under `-race` that
+  test, the in-process stop test and the child-process test; the docs
+  checker finds 33 links and no problem, and the docs tests pass; the
+  whole module, in the desktop-like sandbox, connects to none of its
+  decoys, which the positive control reaches twice.
+- Review round 2 (PASS), with two nits. First, this entry said round 1's
+  `web.go` fails both stop tests without `-race`, where only the
+  stop-before-run test does; round 3 corrects that above and adds the
+  snapshot's checks. Second, no test pins `run()` closing its own listener
+  when it gives up (only in-process tests listen themselves; left for
+  later). Also left for later: a stop that lands between `run()`
+  publishing its server and `openWindow` can still open a `--window`
+  browser after `killWindow` ran (older than this part), so this part's
+  comment "Once a stop has begun, run serves nothing" says more than the
+  code does; the web tests' race checks run only by hand (a read or
+  publish without `srvMu` passes every plain run); and this part's
+  child-process peer tests, if one could not reach its fake target, would
+  run a real one-second presence search on the LAN.
+- Round 3 changes only this entry, and moves the part unchanged onto part
+  33's third round.
+- Verification, snapshot round 3 (`/tmp/opencode/review-34c`, on part 33's
+  third round): the same checks as for round 2's snapshot gave the same
+  results.
+- Review round 3 (NEEDS CHANGES), on this entry only: the note that the
+  round-2 runs came before the last test edit left out the five in-process
+  runs of `stopWith` without `srvMu`, made after it; the presence-search
+  item was listed as older than this part, though the child-process peer
+  tests are this part's, as is the comment the window item quotes; and the
+  round-2 snapshot bullet called the 8 new tests and their two neighbours
+  10 new and changed tests. All three are corrected above.
+- Round 4 changes only this entry, and moves the part unchanged onto part
+  33's fourth round.
+- Not run: scterm against a device, a real browser or a window (safety
+  rules). Main runs past start-up only in peer mode, against the loopback
+  fake target, so the adb path past the device lookup is checked by
+  reading (the hand-off is one line after both paths). The node suites
+  were not run: web/ is unchanged.
+
 ## Update (2026-10-21: QoL overhaul, part 33: scterm update follow-ups)
 
 - `scterm update` keeps the previous binary as `<path>.old` before it prints

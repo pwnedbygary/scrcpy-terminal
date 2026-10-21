@@ -126,9 +126,12 @@ scterm --web
 ```
 
 scterm prints the address, `http://127.0.0.1:6969/` by default. Open it in a web browser.
-`--web-port` changes the port (0 picks a free one). The terminal stays a normal terminal and
-shows log lines; Ctrl+C there ends scterm. Several browsers can watch at once. Closing a tab
-does not end the session, but Quit on the page does.
+`--web-port` changes the port (0 picks a free one). scterm listens on the port before it
+connects to the device, so a port that is in use, or that it cannot listen on, stops scterm at
+once, with a line that says why, and for the usual causes, listed under Troubleshooting, what
+to do. The terminal stays a normal terminal and shows log lines; Ctrl+C there ends scterm.
+Several browsers can watch at once. Closing a tab does not end the session, but Quit on the
+page does.
 
 Sound plays in the browser, and the speakers of the computer that runs scterm stay silent
 (`--audio-dup` plays it in both places, and on the device too; on Android 11 and 12 it then
@@ -473,6 +476,18 @@ connection it was waiting for.
 
 Resize the terminal, or wait for the next full redraw. `--repaint-interval 60` redraws more
 often. Refresh video (Alt+K) asks the device for a new keyframe.
+
+### The browser display does not start
+
+With `--web` or `--window`, scterm listens on its address and port before it connects to the
+device. When it cannot, it says why, exits with status 1, and for these causes says what to do:
+
+- `port 6969 on 127.0.0.1 is in use`: another program, often another scterm, listens there.
+  Stop it, or choose another port with `--web-port PORT` (0 picks a free one).
+- `port 80 on 127.0.0.1 needs privileges that scterm does not have`: ports below 1024 usually
+  do. Choose another port with `--web-port`.
+- `192.0.2.1 is not an address of this computer`: `--web-addr` takes one of its addresses,
+  `0.0.0.0` for all of them, or the default, `127.0.0.1`.
 
 ### The window does not open
 

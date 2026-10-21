@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -302,4 +304,161 @@ func TestCommandLineExitStatus(t *testing.T) {
 				strings.Join(tc.args, " "), status, first, stderr.String(), tc.status, tc.stdout, tc.stderr)
 		}
 	}
+}
+
+// TestWebPortIsCheckedBeforeTheDevice: with --web or --window, scterm listens
+// on the browser display's port before it touches a device. A port in use ends
+// the run with status 1 and one line that says so and what to do, before
+// scterm runs adb or reads its pairings (where a peer run first makes its
+// identity), so before any browser opens. With the port free, the run gets to
+// the device lookup and fails there as before, and scterm holds the port while
+// it looks. Each runs main in a child process with a scratch home and only a
+// fake adb, which notes each call, on PATH.
+func TestWebPortIsCheckedBeforeTheDevice(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	port := strconv.Itoa(held.Addr().(*net.TCPAddr).Port)
+	inUse := "scterm dev\nscterm: web: port " + port + " on 127.0.0.1 is in use: " +
+		"stop the program that uses it, or choose another port with --web-port PORT (0 picks a free one)\n"
+	for _, args := range [][]string{
+		{"--web", "--web-port", port},
+		{"--window", "--web-port", port},
+		{"--peer", "SOMENAME", "--web", "--web-port", port},
+	} {
+		dir := t.TempDir()
+		adbLog := filepath.Join(dir, "adb.log")
+		cmd, stderr := startMain(t, args, scratchEnv(t, dir, fakeADB(t, dir, adbLog, "")))
+		if status := childStatus(cmd.Wait()); status != 1 || stderr.String() != inUse {
+			t.Errorf("scterm %s: status %d, stderr %q; want 1, %q", strings.Join(args, " "), status, stderr.String(), inUse)
+		}
+		if calls, err := os.ReadFile(adbLog); err == nil {
+			t.Errorf("scterm %s ran adb before it checked the port: %q", strings.Join(args, " "), calls)
+		}
+		if made, _ := os.ReadDir(filepath.Join(dir, "scterm")); len(made) > 0 {
+			t.Errorf("scterm %s wrote to SCTERM_HOME before it checked the port: %v", strings.Join(args, " "), made)
+		}
+	}
+
+	held.Close()
+	dir := t.TempDir()
+	adbLog, gate := filepath.Join(dir, "adb.log"), filepath.Join(dir, "gate")
+	if err := syscall.Mkfifo(gate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd, stderr := startMain(t, []string{"--web", "--web-port", port}, scratchEnv(t, dir, fakeADB(t, dir, adbLog, gate)))
+	ended := make(chan error, 1)
+	go func() { ended <- cmd.Wait() }()
+	// Once it has noted a call, the fake adb waits at the gate: scterm is then
+	// looking for the device, and must hold the port.
+	for asked := false; !asked; {
+		select {
+		case err := <-ended:
+			t.Fatalf("scterm --web --web-port %s ended (%v) before it ran adb; stderr %q", port, err, stderr.String())
+		case <-time.After(10 * time.Millisecond):
+			calls, _ := os.ReadFile(adbLog)
+			asked = len(calls) > 0
+		}
+	}
+	if probe, err := net.Listen("tcp", "127.0.0.1:"+port); err == nil {
+		probe.Close()
+		t.Errorf("port %s was free while scterm looked for the device; scterm must hold it from before", port)
+	} else if !errors.Is(err, syscall.EADDRINUSE) {
+		t.Errorf("listening on port %s while scterm looked for the device: %v; want it in use", port, err)
+	}
+	// Opened for reading and writing, a FIFO does not wait for its other end.
+	g, err := os.OpenFile(gate, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.Close()
+	if _, err := g.WriteString("go\n"); err != nil {
+		t.Fatal(err)
+	}
+	noDevice := "scterm dev\nscterm: no device found: connect one with USB debugging turned on " +
+		"(or over Wi-Fi with adb pair and adb connect), or use --peer for the scterm Android app\n"
+	if status := childStatus(<-ended); status != 1 || stderr.String() != noDevice {
+		t.Errorf("scterm --web --web-port %s, the port free: status %d, stderr %q; want 1, %q", port, status, stderr.String(), noDevice)
+	}
+	if calls, _ := os.ReadFile(adbLog); string(calls) != "devices\n" {
+		t.Errorf("scterm --web --web-port %s, the port free, ran adb with %q; want devices, once", port, calls)
+	}
+}
+
+// startMain starts main in a child process, through the entry at the top of
+// TestCommandLineExitStatus, with args and only the environment env. The child
+// and what it starts are killed after 30 seconds, or at the end of the test.
+func startMain(t *testing.T, args, env []string) (*exec.Cmd, *strings.Builder) {
+	t.Helper()
+	cmd := mainCommand(t, args, env)
+	stderr := new(strings.Builder)
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return cmd, stderr
+}
+
+// mainCommand is the command that startMain starts.
+func mainCommand(t *testing.T, args, env []string) *exec.Cmd {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCommandLineExitStatus$")
+	cmd.Env = append([]string{"SCTERM_TEST_MAIN_ARGS=" + strings.Join(args, "\n")}, env...)
+	if dir, ok := os.LookupEnv("GOCOVERDIR"); ok {
+		// Under go test -cover the child warns on stderr without it.
+		cmd.Env = append(cmd.Env, "GOCOVERDIR="+dir)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	return cmd
+}
+
+// childStatus is the exit status of a child process that ended with err, as
+// Wait returns it, or -1 when it did not exit (a signal killed it).
+func childStatus(err error) int {
+	var exit *exec.ExitError
+	switch {
+	case errors.As(err, &exit):
+		return exit.ExitCode()
+	case err != nil:
+		return -1
+	}
+	return 0
+}
+
+// scratchEnv is an environment for a child process of main that reaches
+// nothing of this computer's: PATH is path, and the home, SCTERM_HOME and
+// XDG_RUNTIME_DIR are new, empty directories in dir.
+func scratchEnv(t *testing.T, dir, path string) []string {
+	t.Helper()
+	home, peers, xdg := filepath.Join(dir, "home"), filepath.Join(dir, "scterm"), filepath.Join(dir, "xdg")
+	for _, d := range []string{home, peers, xdg} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return []string{"PATH=" + path, "HOME=" + home, "SCTERM_HOME=" + peers, "XDG_RUNTIME_DIR=" + xdg}
+}
+
+// fakeADB makes, in dir, a directory for PATH that holds only an adb, which
+// notes each call in log and lists no device. With gate, a FIFO, it waits for
+// a line on gate once it has noted a call.
+func fakeADB(t *testing.T, dir, log, gate string) string {
+	t.Helper()
+	script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\n"
+	if gate != "" {
+		script += "read line < '" + gate + "'\n"
+	}
+	script += "printf 'List of devices attached\\n\\n'\n"
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "adb"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return bin
 }

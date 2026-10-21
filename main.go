@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 )
 
@@ -92,6 +93,18 @@ func main() {
 	// it (useful for bug reports).
 	logOnce(fmt.Sprintf("scterm %s\n", version))
 
+	// The browser display listens before any device or peer is touched, so
+	// that a port it cannot use ends the run at once; the display then serves
+	// this listener.
+	var webLn net.Listener
+	if cfg.web {
+		ln, err := listenWeb(cfg.webAddr, cfg.webPort)
+		if err != nil {
+			fatal(err)
+		}
+		webLn = ln
+	}
+
 	var sess *session
 	if cfg.usePeer {
 		s, err := newPeerSession(cfg.peerQuery, cfg)
@@ -121,6 +134,9 @@ func main() {
 	cleanupStaleStreams()
 
 	app := newApp(sess, cfg)
+	if cfg.web {
+		app.web.ln = webLn
+	}
 	err := app.run()
 	app.shutdown()
 	endSession(sess, err)

@@ -17,6 +17,11 @@ Both send the same stream format, so everything after the connection is the same
 
 ## Starting a session over adb
 
+With `--web` or `--window`, scterm first listens on the browser display's address and port
+(`listenWeb` in `web.go`), before it touches a device; in peer mode, before it connects. A port
+in use, a port that needs privileges, or an address that is not this computer's ends the run
+there, with exit status 1, and the browser display later serves that listener. Then:
+
 1. scterm picks the device: `-s`, else `ANDROID_SERIAL`, else the only device that
    `adb devices` lists as ready. When several are ready, it asks for `-s`; when none is, it
    explains the state of the first device it found (`adb.go`).

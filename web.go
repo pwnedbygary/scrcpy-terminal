@@ -36,6 +36,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode"
 )
@@ -246,8 +247,13 @@ type webServer struct {
 	app      *app // nil in headless web mode (--no-tui with --web)
 	headless bool
 
-	ln   net.Listener
-	http *http.Server
+	// ln and http are what run serves. main sets ln before run starts; run
+	// sets http, and ln when it listens itself, under srvMu, which stopWith
+	// takes to read them: a stop can come from another goroutine at any
+	// time, a signal's for one.
+	srvMu sync.Mutex
+	ln    net.Listener
+	http  *http.Server
 
 	clientsMu sync.Mutex
 	// clients is copy-on-write: frame and pushPCM walk a snapshot of it
@@ -513,18 +519,60 @@ func newWebServer(cfg config, sess *session, stream *streamState, audio *audioSi
 // loopback whatever address it is asked for.
 var webListen = net.Listen
 
+// listenWeb opens the browser display's listener on addr ("" is 127.0.0.1)
+// and port, or says why it cannot and what to do.
+func listenWeb(addr string, port int) (net.Listener, error) {
+	if addr == "" {
+		addr = "127.0.0.1"
+	}
+	ln, err := webListen("tcp", net.JoinHostPort(addr, fmt.Sprintf("%d", port)))
+	if err != nil {
+		return nil, webListenError(addr, port, err)
+	}
+	return ln, nil
+}
+
+// webListenError says why the browser display cannot listen on port on addr,
+// from err, the error of listening there, and what to do about it.
+func webListenError(addr string, port int, err error) error {
+	switch {
+	case errors.Is(err, syscall.EADDRINUSE):
+		detail, todo := webPortInUse(addr, port)
+		return fmt.Errorf("web: %s: %s", detail, todo)
+	case errors.Is(err, syscall.EACCES):
+		return fmt.Errorf("web: port %d on %s needs privileges that scterm does not have: %s", port, addr, webPortAnother)
+	case errors.Is(err, syscall.EADDRNOTAVAIL):
+		return fmt.Errorf("web: %s is not an address of this computer: "+
+			"--web-addr takes one of its addresses, 0.0.0.0 for all of them, or the default, 127.0.0.1", addr)
+	}
+	return fmt.Errorf("web: listen on %s:%d: %w", addr, port, err)
+}
+
+// webPortAnother says how to choose another port for the browser display.
+const webPortAnother = "choose another port with --web-port PORT (0 picks a free one)"
+
+// webPortInUse says that port on addr is in use, and what to do about it, as
+// the browser display and scterm doctor both say it.
+func webPortInUse(addr string, port int) (detail, todo string) {
+	return fmt.Sprintf("port %d on %s is in use", port, addr), "stop the program that uses it, or " + webPortAnother
+}
+
 // run starts the HTTP server, prints the URL, optionally opens a browser
-// window, and blocks until the server is shut down.
+// window, and blocks until the server is shut down. It serves s.ln when that
+// is set, as main sets it, and otherwise listens itself. Once a stop has
+// begun, run serves nothing.
 func (s *webServer) run(openWindow bool) error {
 	host := s.addr
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	ln, err := webListen("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", s.port)))
-	if err != nil {
-		return fmt.Errorf("web: listen on %s:%d: %w", host, s.port, err)
+	ln := s.ln
+	if ln == nil {
+		var err error
+		if ln, err = listenWeb(host, s.port); err != nil {
+			return err
+		}
 	}
-	s.ln = ln
 	// Record the real port (0 = pick any free port).
 	if ta, ok := ln.Addr().(*net.TCPAddr); ok {
 		s.port = ta.Port
@@ -538,11 +586,19 @@ func (s *webServer) run(openWindow bool) error {
 	mux.HandleFunc("/pcm-worklet.js", s.handleWorklet)
 	mux.HandleFunc("/ws", s.handleWS)
 
-	s.http = &http.Server{
+	srv := &http.Server{
 		Handler:           s.hostCheck(mux, s.allowedNames(ln)),
 		ReadHeaderTimeout: 5 * time.Second,
 		// No WriteTimeout: /ws hijacks the connection and owns it afterwards.
 	}
+	s.srvMu.Lock()
+	if s.closing.Load() {
+		s.srvMu.Unlock()
+		ln.Close()
+		return nil
+	}
+	s.ln, s.http = ln, srv
+	s.srvMu.Unlock()
 
 	url := fmt.Sprintf("http://%s/", net.JoinHostPort(host, fmt.Sprintf("%d", s.port)))
 	if host == "0.0.0.0" || host == "::" {
@@ -557,7 +613,7 @@ func (s *webServer) run(openWindow bool) error {
 	s.stream.addPCMTap(s.pushPCM)
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- s.http.Serve(ln) }()
+	go func() { serveErr <- srv.Serve(ln) }()
 
 	// One goroutine applies control events in order; see webinput.go.
 	go s.runDispatcher()
@@ -616,13 +672,16 @@ func (s *webServer) stopWith(reason string) {
 	}
 	defer close(s.stopped)
 	close(s.done)
-	if s.http != nil {
+	s.srvMu.Lock()
+	srv, ln := s.http, s.ln
+	s.srvMu.Unlock()
+	if srv != nil {
 		ctx, cancel := timeoutContext(2 * time.Second)
-		_ = s.http.Shutdown(ctx)
+		_ = srv.Shutdown(ctx)
 		cancel()
 	}
-	if s.ln != nil {
-		_ = s.ln.Close()
+	if ln != nil {
+		_ = ln.Close()
 	}
 	bye := byeMessage(reason)
 	s.clientsMu.Lock()

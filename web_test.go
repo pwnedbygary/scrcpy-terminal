@@ -1,10 +1,15 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestComputeWebCanvas covers the letterbox geometry shared by the scaler, the
@@ -131,6 +136,102 @@ func TestWebAddrNameIsServed(t *testing.T) {
 			if got := webHostAllowed(host, names); got != want {
 				t.Errorf("with --web-addr Mirror.Box.lan on %s, %q allowed = %v, want %v", ip, host, got, want)
 			}
+		}
+	}
+}
+
+// TestWebServesTheListenerItIsGiven: given a listener, as main gives it the one
+// it opened before it touched a device, the server serves that listener and
+// does not listen again. It prints, and --window opens, that listener's port,
+// which the kernel picked for --web-port 0, and it accepts the names that suit
+// that listener's address (allowedNames): here 192.0.2.10, an address on the
+// network, where this computer's host name is served too.
+func TestWebServesTheListenerItIsGiven(t *testing.T) {
+	t.Setenv(webHostsEnv, "")
+	listen, hostname := webListen, osHostname
+	t.Cleanup(func() { webListen, osHostname = listen, hostname })
+	webListen = func(network, address string) (net.Listener, error) {
+		t.Errorf("the server listened again, on %s", address)
+		return nil, errors.New("listened again")
+	}
+	osHostname = func() (string, error) { return "Scterm-Box", nil }
+	startNotices(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	cfg := config{web: true, webAddr: "127.0.0.1", webPort: 0}
+	srv := newWebServer(cfg, &session{deviceName: "testphone"}, &streamState{cfg: cfg}, nil, nil, nil)
+	srv.ln = addrListener{ln, &net.TCPAddr{IP: net.IPv4(192, 0, 2, 10), Port: port}}
+	ran := make(chan error, 1)
+	go func() { ran <- srv.run(false) }()
+	select {
+	case <-srv.ready:
+	case err := <-ran:
+		t.Fatalf("the server ended before it served: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the server never started serving")
+	}
+	t.Cleanup(srv.stop)
+	if want := fmt.Sprintf("http://127.0.0.1:%d/", port); srv.port != port || srv.url != want {
+		t.Errorf("the server is on port %d and prints %s; want port %d and %s", srv.port, srv.url, port, want)
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	for _, host := range []string{addr, "scterm-box:" + strconv.Itoa(port)} {
+		resp, body := askAs(t, addr, "/", host, "", false)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(body, `<canvas id="screen"`) {
+			t.Errorf("GET / as %q: status %d, want the page", host, resp.StatusCode)
+		}
+	}
+}
+
+// TestWebStopBeforeRunServesNothing: a stop that comes before the server is
+// up, as a signal at start-up does, leaves run nothing to do: run returns nil
+// at once, prints no address and leaves the listener closed.
+func TestWebStopBeforeRunServesNothing(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{web: true, webAddr: "127.0.0.1"}
+	srv := newWebServer(cfg, &session{deviceName: "testphone"}, &streamState{cfg: cfg}, nil, nil, nil)
+	srv.ln = ln
+	srv.stop()
+	var ran error
+	if out := captureStderr(t, func() { ran = srv.run(false) }); ran != nil || out != "" {
+		t.Errorf("run after a stop: %v, and printed %q; want nil and nothing", ran, out)
+	}
+	if c, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second); err == nil {
+		c.Close()
+		t.Error("the listener still took a connection after the stop")
+	}
+}
+
+// TestWebStopFromAnotherGoroutine: a stop can come at any time from another
+// goroutine, a signal's, while run sets the server up. The stops come from at
+// once to about 2 ms in, so before and after the server is up; the race
+// detector checks that each is ordered with run, and run returns either way.
+func TestWebStopFromAnotherGoroutine(t *testing.T) {
+	for i := range 20 {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := config{web: true, webAddr: "127.0.0.1"}
+		srv := newWebServer(cfg, &session{deviceName: "testphone"}, &streamState{cfg: cfg}, nil, nil, nil)
+		srv.ln = ln
+		ran := make(chan error, 1)
+		go func() { ran <- srv.run(false) }()
+		time.Sleep(time.Duration(i) * 100 * time.Microsecond)
+		srv.stop()
+		select {
+		case err := <-ran:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("run did not return after the stop")
 		}
 	}
 }
