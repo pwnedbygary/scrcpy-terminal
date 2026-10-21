@@ -7,6 +7,125 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 32: follow-ups to part 19's reviews)
+
+- Keyboard focus on a control of the chrome now holds the HUD and the bar
+  up only once the session has ended, when the keys are the browser's.
+  During a session Tab, Enter and Space go to the device, so the bar's
+  Controls button, which gets the focus back when Esc closes a sheet it
+  opened, no longer keeps the chrome up for the rest of the session: the
+  chrome fades 2.5 s on, and the inert bar takes the focus with it. The
+  sheet still gives the focus back to whatever opened it (part 14).
+  Moving the focus to ☰ instead was not chosen: ☰ never fades, so its
+  focus ring would stay over the picture, and the bar's Controls button
+  would be the one opener the focus does not come back to.
+- In touch mode a key no longer brings up the HUD and the bar, whether a
+  soft keyboard's (key "Unidentified", keyCode 229, aimed at `#ime`) or a
+  hardware keyboard's, so the next tap is not taken by a bar button. ⋯
+  still shows the bar, and with a mouse keys show the chrome as before.
+- `pcm-worklet.js` counts one underrun for each block the stream cannot
+  fill, on the frame-for-frame and the resampling paths alike: a new
+  `starve()` pads the rest of the block with silence and counts once. It
+  counted one per block that started empty but one per missing frame
+  inside a block, and with a ratio other than 1 one per frame for as
+  long as the stream was stopped, because the resampler keeps its last
+  frame for the next burst. The HUD's `u<N>` and the telemetry now mean
+  the same at every rate, one per block: with the stream stopped,
+  headless Chrome counts 375 a second at 48 kHz and 345 at 44.1 kHz
+  (44,160 there before). A block is 128 frames in the worklet and 2,048
+  in the plain-http fallback, so those two paths' counts still differ.
+  The sound is unchanged: the old and new rings, fed the same random
+  bursts, gave identical samples and ring state over 120,000 blocks.
+- A sound chip whose words change and come back within 6 s (A, B, A) now
+  shows for 6 s from their return: `showSound` clears its timer when the
+  words change (`soundTimer`), where a guard on the words let the first
+  A's timer through.
+- Alt+M with the sound muted and its start failed unmutes, as the chip
+  ("Sound off · Alt+M", which outranks "Sound failed") says; the next
+  Alt+M retries. That was already so, and is now pinned.
+- New checks pin what part 19's reviews found unpinned: a press on the
+  picture after a bye leaves the focus on Reconnect; a mouse taking over
+  drops ⋯'s hold; a finger on Close shows the bar again while ⋯ holds
+  it; a coarse pointer at load starts with the bar down and inert;
+  returning to the tab shows the chrome with a mouse and not in touch
+  mode; the picture keeps clear of the side insets; the fade timer waits
+  out an open sheet.
+- Docs: `player.css`'s header says the chrome also shows at page load and
+  on returning to the tab, and that on a touch screen taps and keys do not
+  bring it up (⋯ does); the README says a swipe that starts between the
+  bar's buttons passes through the bar, to the device where the picture
+  is under it.
+- Checks changed on purpose. Page: "2.5 s on, it still has the keyboard
+  focus…" and "for as long as it has it" became "its keyboard focus does
+  not hold the chrome during a session…", and the hold after a bye is
+  checked instead; "a press on the picture is for the device, and takes
+  the focus off the page's buttons" became "☰, never inert, keeps the
+  focus through a fade; a press on the picture…", set up on ☰ instead of
+  the bar's Controls button, whose focus now goes with the fading bar;
+  the touch section's "a key still shows the chrome…" became "back in
+  touch mode, a key does not bring it up…", its hover half moving to "a
+  finger on the picture puts it away, though the finger's :hover is left
+  on the bar". Worklet: running dry at 44.1 kHz must count exactly 7
+  underruns (one per short block), not just some, and `play()` fills its
+  output with NaN so that a frame left unwritten shows. Audio: `page()`
+  takes `coarse`, a phone's pointer.
+- Verification, in the builder's tree (`/tmp/opencode/dev-32`, base
+  bb396d9, under dev-29's `iso.env`, which has no sound server): gofmt,
+  `go vet ./...`, `go test -count=1 ./...` (391 top-level tests pass, 3
+  skip), `-race` on part 19's web filter (74 tests), the Markdown check
+  of README (31 links), and the node suites: input 130, worklet 41,
+  pointer 17, conn 61, page 285 and audio 182 checks (130, 35, 17, 61,
+  276 and 175 on the base). Against the base files the new checks fail
+  as they should: worklet 4, page 2, audio 1; the new pins pass there.
+  Mutations: this part's 15 of 15 are caught, part 19's 34 of 34, and
+  the second reviewer's 23 of the 27 that still apply (R6, R14, R17 and
+  R22 are not; R6 changes only the queued figure while starved, and R22
+  cannot change behaviour, since `chrome()` returns before it would).
+  Headless Chrome 155 on a served copy of the page with a fake socket:
+  13 of 13 pass; the base page fails 6, all on what this part changes.
+- Verification in the snapshot (`/tmp/opencode/review-32`, whose base is
+  141cd3e with part 29's reviewed files, since part 29 lands first; under
+  the same `iso.env`): gofmt and `go vet ./...` clean, `go build` ok,
+  `go test -count=1 -v ./...` 378 top-level tests pass and 3 skip (part
+  30's doctor tests are not in this base), the node suites give the
+  counts above, and `-race` on part 19's web filter passes (74 tests).
+  Against the base's `player.js`, `player.css` and `pcm-worklet.js` the
+  new tests fail as above (worklet 4, page 2, audio 1; input, conn and
+  pointer pass). The README's Markdown check finds 31 links and no
+  problem. The whole root package, run in a sandbox set up like a
+  desktop session for sound (a decoy socket where the session's sound
+  server would listen, PULSE_SERVER unset, `iso.env`'s fake adb first on
+  PATH and its scratch HOME), made no connection to the decoy.
+- Review round 1 passed it, with five nits, fixed in round 2: this entry
+  left out the changed ☰ check and the browser-less checks below; the
+  sound chip's clause in `chromeHeld` could no longer decide anything (a
+  bye hides the chip and moves the focus to Reconnect), so it is gone;
+  `player.css`'s header said only ⋯ shows the chrome on a touch screen,
+  though the wheel still does; the comment on `pictureDown` said the
+  blur is skipped only while Reconnect has the focus, where it is skipped
+  whenever the session has ended; and a check's name said Tab brings the
+  chrome up, which the stand-in page cannot show (it was up already). The
+  round also moved the part onto part 29's fourth round, which changed
+  none of this part's files.
+- Correction to part 19's entry: its checks did not run "under a scratch
+  sound server"; dev-29's `iso.env` points PULSE_SERVER at a socket that
+  nothing listens on, so they ran with no sound server at all. And not
+  all eight web files are the builder's bytes: `player.css`'s header
+  comment changed in review round 2.
+- Not verified: real phones and their soft keyboards (CDP key events in
+  Chrome's mobile emulation only); screen readers, for which the focus
+  now leaves with a fading bar during a session; Firefox and Safari;
+  real 44.1 kHz audio hardware. Returning to the tab, the fade timer
+  waiting out a sheet, the side insets and Alt+M with the sound muted and
+  failed were checked by the node suites only, not in a browser.
+- Left alone: in touch mode the wheel still shows the chrome, while a key
+  does not, after a bye too, so a hardware keyboard reaches the bar only
+  through ⋯ there (not pinned); ☰ keeps a focus ring after Esc closes a
+  sheet it opened, until a press on the picture; the ring still does not
+  re-buffer after starving (part 12), and while resampling it reports one
+  frame queued once the stream stops; R14 (the failed chip before any
+  sound) and R17 (the faded bar's buttons, in CSS) stay unpinned.
+
 ## Update (2026-10-21: QoL overhaul, part 29: terminal sound without pactl, and on a running sound card)
 
 - The terminal display's sound now opens without `pactl`. scterm gave

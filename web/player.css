@@ -1,6 +1,7 @@
 /* scterm web display: the canvas owns the window; the HUD and the action bar
-   only appear when the mouse, the wheel or a key is used (on a touch screen,
-   when ⋯ is pressed), so a --window run looks like a device, not a web page. */
+   only appear at page load, on returning to the tab, and when the mouse, the
+   wheel or a key is used (on a touch screen, taps and keys do not bring them
+   up; ⋯ does), so a --window run looks like a device, not a web page. */
 
 /* ---------------------------------------------------------------------------
    the page's colours, shapes, spacing and type, used by every rule below

@@ -579,13 +579,19 @@ key({ key: "Escape", code: "Escape", target: doc.activeElement });
 check("and to the bar's Controls button, when that opened it", [isOpen(), focusOn()], [false, "bar:toolbar"]);
 check("which is shown again, with the HUD, now that the sheet is shut",
   [E.bar.classList.contains("idle"), E.bar.inert, E.hud.classList.contains("idle")], [false, false, false]);
+n = live.sent.length;
+key({ key: "a", code: "KeyA", target: doc.activeElement });
 fade();
-check("2.5 s on, it still has the keyboard focus: the chrome stays, as fading would make the bar inert " +
-  "and drop the focus to the page", [E.hud.classList.contains("idle"), E.bar.inert, focusOn()], [false, false, "bar:toolbar"]);
+check("its keyboard focus does not hold the chrome during a session, when Tab, Enter and Space go to the device: " +
+  "a key goes there, and 2.5 s on the chrome fades, the inert bar taking the focus with it",
+  [sent(n), E.hud.classList.contains("idle"), E.bar.inert, focusOn()], [["text"], true, true, "BODY"]);
+poke();
+menuBtn.focus();
 fade();
-check("for as long as it has it", [E.hud.classList.contains("idle"), focusOn()], [false, "bar:toolbar"]);
+const onMenu = focusOn();
 click();
-check("a press on the picture is for the device, and takes the focus off the page's buttons", focusOn(), null);
+check("☰, never inert, keeps the focus through a fade; a press on the picture is for the device, " +
+  "and takes the focus off the page's buttons", [onMenu, focusOn()], ["menu-btn", null]);
 fade();
 check("then the chrome fades out after 2.5 s as before, the bar inert; ☰ stays, never inert",
   [E.hud.classList.contains("idle"), E.bar.classList.contains("idle"), E.bar.inert, menuBtn.inert], [true, true, true, false]);
@@ -911,6 +917,8 @@ console.log("once the session has ended, what still works");
 // The session has just ended, with the focus on Reconnect. Only what needs no
 // device still runs, from its chord as from its button: the controls sheet,
 // and a screenshot of the last frame.
+click();
+check("a press on the picture leaves the focus on Reconnect, where Enter presses it", focusOn(), "conn-retry");
 let blobs = E.screen.blobs || 0;
 ev = key({ key: "/", code: "Slash", altKey: true, target: doc.activeElement });
 check("Alt+/ opens the controls sheet, as ☰ does", [ev.prevented, isOpen()], [true, true]);
@@ -950,6 +958,18 @@ blobs = E.screen.blobs || 0;
 button("screenshot").fire("click");
 check("while Shot still saves the last frame, and flashes", [(E.screen.blobs || 0) - blobs,
   button("screenshot").classList.contains("done")], [1, true]);
+// Tab is the browser's: from Reconnect it moves the focus to ☰, then into the
+// bar. The stand-in does not move the focus itself, and the chrome is already
+// up here (that a Tab brings it up is checked in a browser only).
+key({ key: "Tab", code: "Tab", target: doc.activeElement });
+menuBtn.focus();
+key({ key: "Tab", code: "Tab", target: menuBtn });
+button("back").focus();
+fade();
+fade();
+check("Tab is the browser's now, and keyboard focus on the bar holds the chrome up: fading would make the bar " +
+  "inert and drop the focus to the page", [E.hud.classList.contains("idle"), E.bar.inert, focusOn()],
+  [false, false, "bar:back"]);
 
 E["conn-retry"].fire("click");
 w = ws();
@@ -1014,6 +1034,16 @@ const touchAt = (type, target, x = 50, y = 50) =>
 click();
 fade();
 check("with a mouse, the chrome fades as before, and ⋯ is not shown", [chromeShown(), barBtn.hidden], [[false, false, true], true]);
+poke();
+menuBtn.fire("click");
+fade();
+touchAt("pointerdown", closeBtn);
+closeBtn.fire("click");
+touchAt("pointerup", closeBtn);
+check("a sheet opened while the chrome was up and shut 2.5 s on by a finger, which brings nothing up: the chrome is back",
+  [isOpen(), chromeShown()], [false, [true, true, false]]);
+fade();
+check("and fades on time, since its timer waited out the sheet", chromeShown(), [false, false, true]);
 n = w.sent.length;
 touchAt("pointerdown", E.screen);
 touchAt("pointermove", E.screen, 90, 70);
@@ -1037,22 +1067,43 @@ button("home").fire("click");
 touchAt("pointerup", button("home"));
 check("a finger on one of its buttons runs it, and the bar stays", [now2().slice(n), chromeShown()],
   [["home"], [true, true, false]]);
+E.bar.hovered = true; // what a finger touched keeps :hover after it lifts
 touchAt("pointerdown", E.screen);
 touchAt("pointerup", E.screen);
-check("a finger on the picture puts it away", [chromeShown(), barBtn.getAttribute("aria-expanded")],
-  [[false, false, true], "false"]);
+check("a finger on the picture puts it away, though the finger's :hover is left on the bar",
+  [chromeShown(), barBtn.getAttribute("aria-expanded")], [[false, false, true], "false"]);
+E.bar.hovered = false;
 barBtn.fire("click");
 barBtn.fire("click");
 check("as does ⋯ again", [chromeShown(), barBtn.getAttribute("aria-expanded")], [[false, false, true], "false"]);
-key({ key: "a", code: "KeyA", target: doc.body });
-E.bar.hovered = true;
+fireDoc("visibilitychange");
+check("coming back to the tab does not bring it up", chromeShown(), [false, false, true]);
+barBtn.fire("click");
+touchAt("pointerdown", barSheet);
+barSheet.fire("click");
+touchAt("pointerup", barSheet);
+check("the bar's Controls button, shown by ⋯, opens the sheet, with the bar hidden behind it",
+  [isOpen(), chromeShown()], [true, [true, false, false]]);
+touchAt("pointerdown", closeBtn);
+closeBtn.fire("click");
+touchAt("pointerup", closeBtn);
 fade();
-check("a key still shows the chrome, which fades; a finger's :hover left on the bar does not hold it",
-  chromeShown(), [false, false, true]);
-E.bar.hovered = false;
+check("a finger on Close shows the bar again, and it stays: ⋯ still holds it", [isOpen(), chromeShown()],
+  [false, [true, true, false]]);
 poke();
 check("a mouse takes over: ⋯ goes, and the chrome comes up as before", [barBtn.hidden, chromeShown()],
   [true, [true, true, false]]);
+fade();
+check("and ⋯'s hold goes with touch mode: the chrome fades as a mouse's does", chromeShown(), [false, false, true]);
+fireDoc("visibilitychange");
+check("with a mouse, coming back to the tab shows it, as loading the page does", chromeShown(), [true, true, false]);
+touchAt("pointerdown", E.screen);
+touchAt("pointerup", E.screen);
+key({ key: "Unidentified", code: "", keyCode: 229, target: E.ime });
+key({ key: "a", code: "KeyA", target: doc.body });
+check("back in touch mode, a key does not bring it up, from a phone's own keyboard (key Unidentified, aimed at its " +
+  "hidden field) or any other: the next tap there would run a bar button", chromeShown(), [false, false, true]);
+poke();
 
 console.log("a mouse resting on the bar");
 E.bar.hovered = true;
@@ -1140,6 +1191,16 @@ ctx.getComputedStyle = (e) => (e === E.screen ? { top: "47px", right: "0px", bot
 delete ctx.getComputedStyle;
 check("under a notch, it fits what the safe area leaves: 390x763, so 343x763",
   [E.screen.style.width, E.screen.style.height], ["343px", "763px"]);
+doc.documentElement.clientWidth = 844;
+doc.documentElement.clientHeight = 390;
+E.screen.width = 2400;
+E.screen.height = 1080;
+ctx.getComputedStyle = (e) => (e === E.screen ? { top: "0px", right: "47px", bottom: "21px", left: "47px" } : {});
+(winListeners.resize || []).forEach((fn) => fn({}));
+delete ctx.getComputedStyle;
+check("turned to landscape, with the safe area 47 px in from each side and 21 from the bottom: 750x369 is left, " +
+  "so a 2400x1080 picture is 750x338",
+  [E.screen.style.width, E.screen.style.height], ["750px", "338px"]);
 
 console.log("the page's head, and its looks");
 const head = (/<head>([^]*?)<\/head>/.exec(html) || ["", ""])[1];

@@ -101,6 +101,7 @@ console.log("buffering");
   p.process([], [[left, right]]);
   check("under the target it plays silence", left.every((v) => v === 0), true);
   check("and has not started", p.started, false);
+  check("which is not an underrun", p.underruns, 0);
 }
 
 console.log("sizes and edge cases");
@@ -151,6 +152,23 @@ console.log("underruns");
   check("a starved block is silence", left.every((v) => v === 0), true);
   check("and is counted as an underrun", p.underruns, before + 1);
 }
+{
+  // Five bursts are 4800 frames: 37 blocks, and 64 frames of a 38th.
+  const p = new P(OPTIONS);
+  for (let i = 0; i < 5; i++) p.port.onmessage({ data: { pcm: burst(i) } });
+  for (let b = 0; b < 37; b++) p.process([], [[new Float32Array(128), new Float32Array(128)]]);
+  const tail = new Int16Array(burst(4)).slice(2 * (BURST_FRAMES - 64));
+  const before = p.underruns;
+  const left = new Float32Array(128).fill(1), right = new Float32Array(128).fill(1);
+  p.process([], [[left, right]]);
+  const played = Array.from(left.slice(0, 64), (v) => Math.round(v * 32768));
+  const silent = left.slice(64).every((v) => v === 0) && right.slice(64).every((v) => v === 0);
+  check("a block that runs dry partway plays the stream's last 64 frames, then silence",
+    [played, silent], [Array.from({ length: 64 }, (_, k) => tail[2 * k]), true]);
+  check("and is one underrun, not one for each frame it lacked", p.underruns - before, 1);
+  p.process([], [[new Float32Array(128), new Float32Array(128)]]);
+  check("as is the next block, with nothing to play", p.underruns - before, 2);
+}
 
 console.log("a context that does not run at 48 kHz");
 {
@@ -168,7 +186,7 @@ console.log("a context that does not run at 48 kHz");
     p.port.onmessage({ data: { pcm: ramp(frames) } });
     const out = [];
     for (let b = 0; b < blocks; b++) {
-      const l = new Float32Array(128), r = new Float32Array(128);
+      const l = new Float32Array(128).fill(NaN), r = new Float32Array(128).fill(NaN); // a frame left unwritten shows
       p.process([], [[l, r]]);
       for (let i = 0; i < 128; i++) out.push([l[i] * 32768, r[i] * 32768]);
     }
@@ -185,9 +203,24 @@ console.log("a context that does not run at 48 kHz");
   }
   const { p, out } = play(48000 / 44100, 40, 4608);
   const top = Math.max(...out.map(([l]) => l));
-  check("running dry, it plays the stream up to its last frames, then silence, counted as underruns, never NaN",
+  check("running dry, it plays the stream up to its last frames, then silence, never NaN, and keeps the last frame",
     [top > 4606 && top <= 4607, out.slice(-10).every(([l, r]) => l === 0 && r === 0),
-      out.every(([l, r]) => Number.isFinite(l) && Number.isFinite(r)), p.underruns > 0, p.count], [true, true, true, true, 1]);
+      out.every(([l, r]) => Number.isFinite(l) && Number.isFinite(r)), p.count], [true, true, true, 1]);
+  // Only stream frame 0 is 0, so a silent frame after the first is a frame the
+  // stream could not fill. Output frame i plays stream position i * 48000/44100,
+  // which needs a frame after it, so below 4607: frames 0 to 4232 play, block
+  // 33 runs short at its frame 9 (4233 = 33 * 128 + 9), and blocks 34 to 39 are empty.
+  const short = [...new Set(out.flatMap(([l, r], i) => (i > 0 && l === 0 && r === 0 ? [Math.floor(i / 128)] : [])))];
+  check("one underrun for each block that ran short, not one for each frame", [short, p.underruns],
+    [[33, 34, 35, 36, 37, 38, 39], 7]);
+  const stopped = [1, 48000 / 44100, 48000 / 96000].map((ratio) => {
+    const q = play(ratio, 80, 4608).p;
+    const before = q.underruns;
+    for (let b = 0; b < 100; b++) q.process([], [[new Float32Array(128), new Float32Array(128)]]);
+    return q.underruns - before;
+  });
+  check("a stream that has stopped counts the same at 48, 44.1 and 96 kHz: 100 blocks of silence, 100 underruns",
+    stopped, [100, 100, 100]);
   p.port.onmessage({ data: { pcm: ramp(4608) } });
   const l = new Float32Array(128), r = new Float32Array(128);
   p.process([], [[l, r]]);

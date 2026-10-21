@@ -1992,6 +1992,7 @@ const NOTE_MS = 6000;
 let soundShown;
 let soundAct = "";
 let soundFresh = false; // the chip's words are new: it shows without the HUD
+let soundTimer = 0;     // ends soundFresh NOTE_MS after the words last changed
 let compatNote = "due"; // "due", then "shown" for NOTE_MS, then "done"
 let soundDismissed = false;
 function showSound() {
@@ -2017,9 +2018,9 @@ function showSound() {
   if (key !== soundShown) {
     soundShown = key;
     soundFresh = !!chip;
+    clearTimeout(soundTimer);
     if (chip && chip.act !== "unlock") {
-      setTimeout(() => {
-        if (soundShown !== key) return;
+      soundTimer = setTimeout(() => {
         soundFresh = false;
         showSound();
       }, NOTE_MS);
@@ -2112,15 +2113,17 @@ window.addEventListener("resize", () => {
 
 // The chrome: the HUD, the action bar and a quiet sound chip. With a mouse,
 // keys or the wheel it shows and fades out CHROME_IDLE_MS after the last of
-// them, but not while the pointer rests on the bar or one of the chrome's
-// controls has the keyboard focus. A finger does not bring it up: a tap or a
-// drag on the picture is for the device, and a bar that came up under it
-// would take the next tap. On a touch screen the ⋯ button beside ☰ shows it
-// until ⋯ is pressed again or the picture is touched. ☰ is always shown and
-// never inert. The bar is inert while faded, so it cannot be tabbed into, but
-// not while the controls sheet is open: closing the sheet can give the focus
-// back to the bar's Controls button, and an inert button cannot take it. The
-// bar stays hidden behind the sheet, however the sheet was opened.
+// them, but not while the pointer rests on the bar or, once the session has
+// ended, one of the chrome's controls has the keyboard focus. A finger does
+// not bring it up, nor, while the page is used by touch, does a key (a soft
+// keyboard sends them too): a tap or a drag on the picture is for the device,
+// and a bar that came up under it would take the next tap. On a touch screen
+// the ⋯ button beside ☰ shows it until ⋯ is pressed again or the picture is
+// touched. ☰ is always shown and never inert. The bar is inert while faded,
+// so it cannot be tabbed into, but not while the controls sheet is open:
+// closing the sheet can give the focus back to the bar's Controls button, and
+// an inert button cannot take it. The bar stays hidden behind the sheet,
+// however the sheet was opened.
 const CHROME_IDLE_MS = 2500;
 let chromeOn = false;
 let chromePinned = false; // ⋯ showed it, and no timer puts it away
@@ -2165,14 +2168,16 @@ function fadeChrome() {
   chrome(false);
 }
 // chromeHeld: a mouse rests on the bar (a finger leaves :hover behind it), or
-// a control of the bar or the sound chip has the keyboard focus, which an
-// inert bar would drop to the page.
+// the session has ended and a control of the bar has the keyboard focus,
+// which an inert bar would drop to the page. During a session Tab, Enter and
+// Space go to the device, so a focused button cannot be worked from the
+// keyboard, and the focus goes with the bar when it fades.
 function chromeHeld() {
   const bar = document.getElementById("bar");
   if (bar && !touchMode && matches(bar, ":hover")) return true;
   const a = document.activeElement;
-  if (!a || a === document.body) return false;
-  if (!(bar && bar.contains(a)) && a !== els.soundChip) return false;
+  if (!net.ended || !a || a === document.body) return false;
+  if (!(bar && bar.contains(a))) return false;
   try {
     return a.matches(":focus-visible");
   } catch (e) {
@@ -2191,10 +2196,11 @@ function setTouchMode(on) {
   if (!on) chromePinned = false;
   if (els.barBtn) els.barBtn.hidden = !on || !toolbar.buttons.length;
 }
-// A press of the picture is for the device. It takes the keyboard focus off
-// the page's buttons (the canvas takes none), so that the chrome can fade
-// and Enter is not left on a button, unless the session has ended and the
-// focus is on Reconnect; and a finger puts away the chrome ⋯ brought up.
+// A press of the picture is for the device. During a session it takes the
+// keyboard focus off the page's buttons (the canvas takes none), so that no
+// focus ring is left on one; once the session has ended the keys are the
+// browser's, and the focus stays where it is (on Reconnect, at first). A
+// finger also puts away the chrome ⋯ brought up.
 function pictureDown(touch) {
   const a = document.activeElement;
   if (a && a !== document.body && a !== els.ime && !net.ended && a.blur) a.blur();
@@ -2209,7 +2215,7 @@ function onPointer(ev) {
 }
 window.addEventListener("pointermove", onPointer);
 window.addEventListener("pointerdown", onPointer);
-window.addEventListener("keydown", pokeHud);
+window.addEventListener("keydown", () => { if (!touchMode) pokeHud(); });
 window.addEventListener("wheel", pokeHud);
 if (els.barBtn) {
   els.barBtn.addEventListener("click", () => {

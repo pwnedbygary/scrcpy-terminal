@@ -241,7 +241,8 @@ function fakeEl(tag, cls, hidden) {
 // page loads every script index.html lists, in its order, into one global
 // scope, the way a browser does: a script that throws is reported and the
 // next one still runs. The page is the one the server serves, with the action
-// catalog in it; opts.unserved loads index.html as it is on disk instead.
+// catalog in it; opts.unserved loads index.html as it is on disk instead, and
+// opts.coarse is a phone's, where matchMedia("(pointer: coarse)") matches.
 function page(opts = {}) {
   const html = opts.unserved ? read("index.html") : servedIndex();
   const g = { console: opts.console || console };
@@ -283,6 +284,7 @@ function page(opts = {}) {
   });
   if (!opts.noAudio) g.AudioContext = FakeAC;
   if (!opts.noWorkletNode) g.AudioWorkletNode = FakeWorkletNode;
+  if (opts.coarse) g.matchMedia = (q) => ({ matches: q === "(pointer: coarse)" });
   vm.createContext(g);
   p.scripts = [...html.matchAll(/<script src="\/([^"]+)"><\/script>/g)].map((m) => m[1]);
   for (const name of p.scripts) {
@@ -863,6 +865,25 @@ console.log("the page when the sound will not start");
   check("and this time the sound plays, and the chip goes", [p.pcm.running, p.chip()], [true, null]);
   check("never two contexts at once", p.w.maxLive, 1);
 }
+{
+  // Alt+M mutes before any sound has come, and its key press is the gesture
+  // whose start then fails: muted outranks failed on the chip.
+  const p = page({ addModule: () => Promise.reject(new Error("404")) });
+  p.open();
+  const altM = () => p.w.fire("keydown", { code: "KeyM", key: "m", altKey: true });
+  altM();
+  p.audio(burst(0));
+  await tick();
+  check("muted, and then the sound failed to start: the chip says Sound off",
+    [p.pcm.failed, p.pcm.localGain, p.w.made, p.chip()], [true, 0, 1, "Sound off · Alt+M"]);
+  altM();
+  await tick();
+  check("Alt+M unmutes, as the chip says, rather than retrying: no new context, and the chip now says Sound failed",
+    [p.pcm.localGain, p.w.made, p.chip()], [1, 1, "Sound failed · Alt+M"]);
+  altM();
+  await tick();
+  check("so the next Alt+M retries, inside its key press", [p.w.made, p.w.madeIn[1], p.pcm.localGain], [2, "keydown", 1]);
+}
 console.log("a chip that stays");
 {
   const p = page();
@@ -890,6 +911,26 @@ console.log("a chip that stays");
   check("a key brings the HUD up, and the chip with it", !!sound && sound.classList.contains("idle"), false);
   if (chipEl) chipEl.fire("click", {});
   check("where a tap on it still unmutes", [p.pcm.localGain, p.chip()], [1, null]);
+}
+{
+  const p = page();
+  p.open();
+  p.audio(burst(0));
+  p.tap("pointerup", { pointerType: "touch" });
+  await tick();
+  const chipEl = p.els.get("sound-chip");
+  const quiet = () => !!chipEl && chipEl.classList.contains("quiet");
+  const altM = () => p.w.fire("keydown", { code: "KeyM", key: "m", altKey: true });
+  const first = p.timers.length;
+  altM();
+  const second = p.timers.length;
+  altM();
+  altM();
+  p.timers.slice(first, second).forEach((t) => t.fn && t.ms === 6000 && t.fn());
+  check("words that go and come back within 6 s (Sound off, nothing, Sound off) are not made quiet by the first " +
+    "words' timer", [p.chip(), quiet()], ["Sound off · Alt+M", false]);
+  p.timers.slice(second).forEach((t) => t.fn && t.ms === 6000 && t.fn());
+  check("but 6 s after they came back", [p.chip(), quiet()], ["Sound off · Alt+M", true]);
 }
 {
   const p = page();
@@ -963,6 +1004,18 @@ console.log("the page in a browser without the Fullscreen API");
   const full = p.els.get("sheet-full");
   check("there is no Full screen button: not in the bar, nor in the sheet",
     [p.els.get("bar").children.some((c) => c.textContent === "Full screen"), !full || full.hidden], [false, true]);
+}
+console.log("the page on a phone");
+{
+  const p = page({ coarse: true });
+  const idle = (id) => p.els.get(id).classList.contains("idle");
+  check("a coarse pointer at load: the HUD, the bar and a quiet chip start down, the bar inert, and ⋯ shows",
+    [p.errors, idle("hud"), idle("bar"), p.els.get("bar").inert, idle("sound"), p.els.get("bar-btn").hidden],
+    [[], true, true, true, true, false]);
+  p.open();
+  p.audio(burst(0));
+  await tick();
+  check("while Tap for sound shows without them", p.chip(), "Tap for sound");
 }
 
 // ---------------------------------------------------------------------------

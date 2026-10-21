@@ -147,8 +147,9 @@ saves the last picture.
 On a phone or tablet, a tap or a swipe on the picture goes to the device and does not bring up
 the action bar. The ⋯ button next to ☰ shows the bar until you press ⋯ again or touch the
 picture. The bar is one row: swipe sideways on its buttons for the rest of them (a swipe that
-starts between buttons goes to the device). The page keeps its buttons clear of a notch. A
-pinch outside the picture zooms the page; a pinch on the picture does nothing.
+starts between buttons passes through the bar, to the device where the picture is under it).
+The page keeps its buttons clear of a notch. A pinch outside the picture zooms the page; a pinch
+on the picture does nothing.
 
 > **Warning:** by default only this computer can open the page. With `--web-addr 0.0.0.0`, or
 > any address that is not a loopback address, anyone who can reach the port can see the screen

@@ -83,9 +83,7 @@ class SctermPCM extends SctermPCMBase {
     const frames = left.length;
 
     if (!this.started || this.count === 0) {
-      left.fill(0);
-      if (right !== left) right.fill(0);
-      if (this.started && this.count === 0) this.underruns++;
+      this.starve(left, right, 0);
       return;
     }
     if (this.ratio !== 1) {
@@ -95,10 +93,8 @@ class SctermPCM extends SctermPCMBase {
 
     for (let i = 0; i < frames; i++) {
       if (this.count === 0) {
-        this.underruns++;
-        left[i] = 0;
-        right[i] = 0;
-        continue;
+        this.starve(left, right, i);
+        return;
       }
       const r = this.read * 2;
       left[i] = this.buf[r];
@@ -106,6 +102,17 @@ class SctermPCM extends SctermPCMBase {
       this.read = (this.read + 1) % this.max;
       this.count--;
     }
+  }
+
+  // starve plays silence from frame `from` to the end of the block: nothing
+  // arrives while a block plays. A block the stream could not fill is one
+  // underrun, however many frames it lacked, so the count means the same
+  // whether or not the ring resamples; before playback starts it is only
+  // buffering.
+  starve(left, right, from) {
+    left.fill(0, from);
+    if (right !== left) right.fill(0, from);
+    if (this.started) this.underruns++;
   }
 
   // resample plays the stream at `ratio` stream frames per output frame, each
@@ -119,10 +126,8 @@ class SctermPCM extends SctermPCMBase {
         this.count--;
       }
       if (this.count < 2) {
-        this.underruns++;
-        left[i] = 0;
-        right[i] = 0;
-        continue;
+        this.starve(left, right, i);
+        return;
       }
       const a = this.read * 2;
       const b = ((this.read + 1) % this.max) * 2;
