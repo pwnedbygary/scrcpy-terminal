@@ -7,6 +7,36 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 2: one press per key in the browser)
+
+- Keys sent through `sendKey` (the plain keycode keys such as Backspace,
+  Enter and the arrows, Ctrl+letter, and Ctrl or Alt with a keycode key)
+  reached the device twice: a key op went out on keydown and again on keyup,
+  and the server turns each key op into a full press (Backspace deleted two
+  characters, Ctrl+A selected all and then typed "a"); held, those keys never
+  repeated. Now one op per keydown, auto-repeats are forwarded as presses,
+  and the key-up sends nothing, except for PrintScreen: Windows delivers only
+  its key-up, so a key-up with no key-down before it is the press. That press
+  goes without modifiers, as the key-up op always did. Bare, Shift and Alt
+  F-keys, Alt chords, Esc and typed text already behaved and are unchanged.
+- Bare modifier and lock keys are no longer sent. On Windows and Linux a lock
+  key went out on both edges and cancelled itself. On macOS a Caps Lock tap
+  is one event (key-down when it turns on, key-up when it turns off), so the
+  device's caps lock followed the host's; it now stays as it is. What the
+  device did with that state is untested; typed letters reach it as
+  keycodes with their own Shift state (`webinput.go` `asciiKey`). A bare
+  Meta tap (two Meta presses, and more around every Cmd chord) has no
+  replacement.
+- The `web/player.js` and `web/input_test.mjs` comments that the part 1
+  entry lists as still open now name `actions.go`.
+- Verification: `node web/input_test.mjs` 110 passed. Against the base
+  `player.js` six new cases fail (one press for Backspace and for Ctrl+A,
+  repeats, bare keys, PrintScreen down and up, Shift+PrintScreen down and
+  up). The PrintScreen key-up-only case failed against the first version of
+  this change, which dropped that press, and the modified key-up-only case
+  fails against the second, which sent the modifiers. The Go web tests
+  pass.
+
 ## Update (2026-10-20: QoL overhaul, part 1: shared action catalog)
 
 - Branch `overhaul` from `62d6cfa`; one independently reviewed commit per

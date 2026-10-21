@@ -252,6 +252,70 @@ console.log("hotkeys from a phone keyboard");
 }
 
 // ---------------------------------------------------------------------------
+// 7b. one press per key: the server turns every key op into a down+up pair
+// ---------------------------------------------------------------------------
+console.log("one press per key");
+{
+  const h = harness();
+  const press = (o, down) => h.input.key(Object.assign({ preventDefault() {} }, o), down);
+  const backspace = { code: "Backspace", key: "Backspace" };
+  press(backspace, true);
+  press(backspace, false);
+  check("Backspace down and up is one key op", h.net.sent, [{ op: "key", code: 67, meta: 0 }]);
+  h.net.sent.length = 0;
+  const ctrlA = { code: "KeyA", key: "a", ctrlKey: true };
+  press(ctrlA, true);
+  press(ctrlA, false);
+  check("Ctrl+A down and up is one press with CTRL", h.net.sent, [{ op: "key", code: 29, meta: 0x1000 }]);
+  h.net.sent.length = 0;
+  press(backspace, true);
+  press(Object.assign({ repeat: true }, backspace), true);
+  press(Object.assign({ repeat: true }, backspace), true);
+  press(backspace, false);
+  const bs = { op: "key", code: 67, meta: 0 };
+  check("a held key repeats on the device", h.net.sent, [bs, bs, bs]);
+  h.net.sent.length = 0;
+  const bare = [
+    { code: "ShiftLeft", shiftKey: true }, { code: "ShiftRight", shiftKey: true },
+    { code: "ControlLeft", ctrlKey: true }, { code: "ControlRight", ctrlKey: true },
+    { code: "AltLeft", altKey: true }, { code: "AltRight", altKey: true },
+    { code: "MetaLeft", metaKey: true }, { code: "MetaRight", metaKey: true },
+    { code: "CapsLock" }, { code: "NumLock" }, { code: "ScrollLock" },
+  ];
+  let prevented = 0;
+  const counted = (o, down) => h.input.key(Object.assign({ preventDefault() { prevented++; } }, o), down);
+  for (const k of bare) {
+    counted(Object.assign({ key: k.code }, k), true);
+    counted({ code: k.code, key: k.code }, false);
+  }
+  check("bare modifier and lock keys send nothing", h.net.sent, []);
+  check("and the page still keeps both edges of each", prevented, bare.length * 2);
+  h.net.sent.length = 0;
+  const print = { code: "PrintScreen", key: "PrintScreen" };
+  press(print, false);
+  check("a PrintScreen key-up with no key-down (Windows) is one press",
+    h.net.sent, [{ op: "key", code: 120, meta: 0 }]);
+  h.net.sent.length = 0;
+  press(print, true);
+  press(print, false);
+  check("PrintScreen down and up is still one press", h.net.sent, [{ op: "key", code: 120, meta: 0 }]);
+  h.net.sent.length = 0;
+  press(print, false);
+  check("a PrintScreen key-up-only press after a full one is one press",
+    h.net.sent, [{ op: "key", code: 120, meta: 0 }]);
+  h.net.sent.length = 0;
+  press(Object.assign({ shiftKey: true, altKey: true }, print), false);
+  check("a modified PrintScreen key-up with no key-down goes without modifiers",
+    h.net.sent, [{ op: "key", code: 120, meta: 0 }]);
+  h.net.sent.length = 0;
+  const shiftPrint = Object.assign({ shiftKey: true }, print);
+  press(shiftPrint, true);
+  press(shiftPrint, false);
+  check("Shift+PrintScreen down and up is one press with SHIFT",
+    h.net.sent, [{ op: "key", code: 120, meta: 0x01 }]);
+}
+
+// ---------------------------------------------------------------------------
 // 8. the IME sink types what the phone keyboard composed, exactly once
 // ---------------------------------------------------------------------------
 console.log("IME text");
@@ -421,7 +485,7 @@ console.log("terminal key parity");
 // ---------------------------------------------------------------------------
 console.log("mnemonic chords");
 {
-  // The same table as the terminal (appkeys.go appMnemonicOps). A phone
+  // The same table as the terminal (actions.go appMnemonicOps). A phone
   // keyboard has Ctrl and Alt but no F-row, so these are the primary bindings.
   const MNEMONICS = {
     KeyH: "home", KeyB: "back", KeyT: "appswitch", KeyP: "power",

@@ -383,6 +383,16 @@ const KEYCODES = {
   Power: 26, WakeUp: 224, Sleep: 223,
 };
 
+// Keys that never travel on their own. Modifiers reach the device as the meta
+// state of the key they modify, so a bare Shift, Ctrl, Alt or Meta tap sends
+// nothing. Lock keys are not forwarded at all: browsers report a tap as one
+// event on macOS and two elsewhere, so the device's lock state is left alone.
+const BARE_MODIFIER_KEYS = new Set([
+  "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight",
+  "AltLeft", "AltRight", "MetaLeft", "MetaRight",
+  "CapsLock", "NumLock", "ScrollLock",
+]);
+
 // The app-level keys, identical to the terminal's (input.go fKeyMap +
 // appkeys.go mapAppFKey): F1 home, F2 menu, F3 recents, F4 power, F5 vol-,
 // F6 vol+, F7 mute, F8 rotate, F9 notifications, F10 settings, F11 collapse,
@@ -412,7 +422,7 @@ const CTRL_BROWSER_KEYS = new Set(["KeyW", "KeyT", "KeyN", "KeyR", "KeyQ"]);
 
 // Alt+<letter> mnemonic device actions. This is the primary binding on a phone
 // keyboard (Unexpected Keyboard has Ctrl and Alt, but no F-key row), and the
-// TUI uses exactly the same table (appkeys.go appMnemonicOps) — so Alt+H is
+// TUI uses exactly the same table (actions.go appMnemonicOps) — so Alt+H is
 // Home whether you are in a terminal, a browser tab or --window. Keep the two
 // tables in step: web_keymap_test.go parses this one and compares.
 //
@@ -508,6 +518,7 @@ class Input {
     this.tapAt = 0;
     this.softKeys = false;
     this.kbRetry = false; // a pointerdown retry is armed for the IME
+    this.printScreenDown = false;
   }
 
   sendPos(op, extra) {
@@ -752,6 +763,10 @@ class Input {
     // offers: soft keyboards routinely leave `code` empty, which used to make
     // every hotkey below unreachable from one.
     const name = codeOf(ev);
+    if (BARE_MODIFIER_KEYS.has(name)) {
+      ev.preventDefault();
+      return;
+    }
 
     // F1..F12 mean exactly what they mean in the terminal (input.go's fKeyMap +
     // mapAppFKey). They used to be sent to Android as the F1..F12 keycodes
@@ -884,12 +899,24 @@ class Input {
     }
   }
 
+  // sendKey presses `code` once per keydown. The server turns every key op into
+  // a full down+up pair, so the key-up sends nothing, and a held key's
+  // auto-repeats are forwarded as further presses: the device has already seen
+  // the key released and cannot repeat it itself. PrintScreen is the
+  // exception: Windows delivers only its key-up, so a key-up that no key-down
+  // preceded is the press. It goes without modifiers, so a host chord such as
+  // Alt+PrintScreen reaches the device as a plain PrintScreen.
   sendKey(code, down, ev) {
-    if (!down) {
-      this.net.send({ op: "key", code: code, meta: 0 });
+    if (code === KEYCODES.PrintScreen) {
+      const sawDown = this.printScreenDown;
+      this.printScreenDown = down;
+      if (!down) {
+        if (!sawDown) this.net.send({ op: "key", code: code, meta: 0 });
+        return;
+      }
+    } else if (!down) {
       return;
     }
-    if (ev.repeat) return; // the device handles repeats itself
     let meta = 0;
     if (ev.shiftKey) meta |= 0x01;
     if (ev.altKey) meta |= 0x02;
