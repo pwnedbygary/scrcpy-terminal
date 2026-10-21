@@ -118,7 +118,10 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   starts playing once 96 ms is buffered, keeps at most 240 ms, and plays silence when the
   buffer runs dry. Browsers allow an AudioWorklet only on https or localhost. On a plain http
   page from another computer, a ScriptProcessorNode drains the same ring in blocks of 2048
-  frames (about 43 ms), which adds a little delay.
+  frames (about 43 ms), which adds a little delay. The page asks for a 48 kHz audio context;
+  when the browser runs it at another rate anyway, the ring resamples, with linear
+  interpolation, instead of playing the stream slow or fast until the ring overflows or runs
+  dry.
 - The page sends a `hello` message with its size and `caps:"audio"` each time it connects. The
   server makes a new client for each connection, so the hello must be sent again after every
   reconnect.

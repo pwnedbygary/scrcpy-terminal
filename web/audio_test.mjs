@@ -77,7 +77,9 @@ class FakeNode {
 // opts.worklet: false is a page without AudioWorklet (plain http): the context
 // has no audioWorklet, while the AudioWorkletNode constructor stays defined, as
 // in Chromium; opts.noWorkletNode also leaves that undefined, as in Firefox.
-// opts.addModule(n) and opts.failNew(n) make the nth attempt fail.
+// opts.addModule(n) and opts.failNew(n) make the nth attempt fail. opts.rate
+// is the rate the context runs at whatever it was asked for, as an older
+// Safari's webkitAudioContext does (it takes no options).
 function audio(w, opts) {
   class FakeAC {
     constructor(options) {
@@ -87,6 +89,7 @@ function audio(w, opts) {
       w.live++;
       w.maxLive = Math.max(w.maxLive, w.live);
       this.options = options;
+      this.sampleRate = opts.rate || (options && options.sampleRate) || 44100;
       this.state = "suspended";
       this.onstatechange = null;
       this.destination = new FakeNode("destination");
@@ -112,6 +115,10 @@ function audio(w, opts) {
       w.resumedIn.push(w.event);
       if (w.active) this.run();
       return Promise.resolve();
+    }
+    suspend() {
+      w.suspends++;
+      return Promise.resolve().then(() => this.set("suspended"));
     }
     close() {
       if (this.state === "closed") return Promise.reject(new Error("InvalidStateError"));
@@ -147,7 +154,7 @@ function audio(w, opts) {
 // dispatched like a browser's: activation first, then capture, then bubble.
 function state(g) {
   const w = {
-    made: 0, live: 0, maxLive: 0, closed: 0, resumes: 0, modules: [], ctxs: [],
+    made: 0, live: 0, maxLive: 0, closed: 0, resumes: 0, suspends: 0, modules: [], ctxs: [],
     worklets: [], sps: [], posted: [], madeIn: [], resumedIn: [],
     active: false, event: "", listeners: [],
   };
@@ -224,6 +231,9 @@ function fakeEl(tag, cls, hidden) {
     setPointerCapture() {}, focus() {}, blur() {},
     appendChild(c) { this.children.push(c); return c; },
     setAttribute(k, v) { this[k] = String(v); },
+    removeAttribute(k) { delete this[k]; },
+    contains(x) { return x === this || this.children.includes(x); },
+    matches: () => false,
     remove() {},
   };
 }
@@ -356,9 +366,16 @@ console.log("one start, however many callers");
 }
 
 // ---------------------------------------------------------------------------
-// 2. a failed start is closed, and only a gesture tries again
+// 2. a failed start is closed, and only a retry from the chip or Alt+M tries
+//    again: not the packets, and not every tap and key
 // ---------------------------------------------------------------------------
 console.log("a failed start");
+// retry stands for the sound chip's click handler, or Alt+M's key: it calls
+// unlock() inside that event.
+const retry = (w, pcm, type, ev) => {
+  w.listeners.push({ type, fn: () => pcm.unlock(), capture: false, once: true });
+  w.fire(type, ev);
+};
 {
   // The first attempt cannot load the worklet module; later ones can.
   const w = world({ addModule: (n) => (n === 1 ? Promise.reject(new Error("404")) : Promise.resolve()) });
@@ -375,9 +392,16 @@ console.log("a failed start");
   }
   await tick();
   check("twenty packets later nothing was retried", w.made, 1);
-  check("the gestures are still listened for", unlocks(w, pcm), ALL_UNLOCKS);
+  check("and no gesture is listened for: each tap and key would only build and close another context",
+    unlocks(w, pcm), []);
   w.fire("pointerup", { pointerType: "touch" });
-  check("a tap tries again, inside the tap", w.madeIn[1], "pointerup");
+  w.fire("touchend", {});
+  w.fire("click", {});
+  w.fire("keydown", { key: "a", code: "KeyA" });
+  await tick();
+  check("so taps and keys build nothing", w.made, 1);
+  retry(w, pcm, "click", {});
+  check("the chip's retry tries again, inside its click", w.madeIn[1], "click");
   await tick();
   check("and this time the sound plays", [pcm.ready, pcm.failed, pcm.running], [true, false, true]);
   check("never two contexts at once", w.maxLive, 1);
@@ -391,11 +415,12 @@ console.log("a failed start");
   await tick();
   check("a context that cannot be created is a failed start too", [pcm.failed, pcm.ctx], [true, null]);
   w.fire("keydown", { key: "a", code: "KeyA", repeat: true });
-  await tick();
-  check("a key held down does not retry on every repeat", w.made, 1);
   w.fire("keydown", { key: "a", code: "KeyA" });
   await tick();
-  check("a key press does", w.made, 2);
+  check("a key, held down or pressed, does not retry it", w.made, 1);
+  retry(w, pcm, "keydown", { key: "m", code: "KeyM", altKey: true });
+  check("Alt+M does, inside its key press", w.madeIn[1], "keydown");
+  await tick();
   check("successfully", [pcm.ready, pcm.running], [true, true]);
 }
 
@@ -577,6 +602,49 @@ console.log("without AudioWorklet: the compatibility path");
 }
 
 // ---------------------------------------------------------------------------
+// 5b. a context that runs at another rate than the 48 kHz stream
+// ---------------------------------------------------------------------------
+console.log("a context at another rate");
+{
+  const w = world({ rate: 48000 });
+  const pcm = new w.Pcm();
+  await pcm.start();
+  await tick();
+  check("asked for 48 kHz", w.ctxs[0] && w.ctxs[0].options.sampleRate, 48000);
+  const opts = w.worklets[0] ? w.worklets[0].options.processorOptions : {};
+  check("and running at it, the worklet plays the stream frame for frame",
+    [pcm.rate, opts.ratio === undefined || opts.ratio === 1], [48000, true]);
+}
+{
+  const w = world({ rate: 44100 });
+  const pcm = new w.Pcm();
+  await pcm.start();
+  await tick();
+  const opts = w.worklets[0] ? w.worklets[0].options.processorOptions : {};
+  check("a context that runs at 44.1 kHz anyway is read back", pcm.rate, 44100);
+  check("and the worklet resamples: 48000/44100 stream frames to each frame it plays", opts.ratio, 48000 / 44100);
+  check("with the same ring otherwise", [opts.targetFrames, opts.maxFrames], [4608, 11520]);
+}
+{
+  const w = world({ rate: 44100, worklet: false });
+  const pcm = new w.Pcm();
+  if (typeof pcm.changed === "function") pcm.changed();
+  w.fire("pointerup", { pointerType: "touch" });
+  await tick();
+  const sp = w.sps[0];
+  if (sp) {
+    for (let s = 0; s < 10; s++) pcm.play(burst(s * 7));
+    await tick();
+    drain(sp, 2 * sp.bufferSize, 2);
+    const used = 10 * FRAMES - pcm.stats.queued;
+    check("so does the compatibility path: two blocks of 2048 frames at 44.1 kHz take 4458 frames of the stream",
+      Math.abs(used - Math.round(2 * sp.bufferSize * 48000 / 44100)) <= 1, true);
+  } else {
+    check("so does the compatibility path", "no ScriptProcessorNode", "a ScriptProcessorNode");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 6. what the sound chip says
 // ---------------------------------------------------------------------------
 console.log("the sound chip");
@@ -603,6 +671,14 @@ console.log("the sound chip");
     check("no Web Audio, audio arriving", say({ mode: "none", running: false }), "No sound in this browser");
     check("no Web Audio, no audio either: nothing to say", say({ mode: "none", running: false, heard: false }), null);
     check("no Web Audio, note dismissed", say({ mode: "none", running: false, dismissed: true }), null);
+    const failed = chip(Object.assign({}, playing, { running: false, failed: true }));
+    check("a start that failed: say so, with the chord that retries it",
+      failed && [failed.text, failed.act, failed.keys], ["Sound failed · Alt+M", "retry", "Alt+M"]);
+    check("muted outranks it", say({ running: false, failed: true, muted: true }), "Sound off · Alt+M");
+    check("muted names its chord too", (chip(Object.assign({}, playing, { muted: true })) || {}).keys, "Alt+M");
+    check("a session that has ended: nothing to say, whatever else",
+      [say({ ended: true, running: false }), say({ ended: true, muted: true }), say({ ended: true, failed: true }),
+        say({ ended: true, mode: "none" })], [null, null, null, null]);
   }
 }
 
@@ -749,6 +825,146 @@ console.log("the page in a browser without Web Audio");
   check("until dismissed", p.chip(), null);
 }
 
+// clickOn clicks one of the page's elements, as the event being handled:
+// what the page starts in it starts inside the click.
+const clickOn = (p, el) => {
+  p.w.event = "click";
+  if (el) el.fire("click", {});
+  p.w.event = "";
+};
+console.log("the page when the sound will not start");
+{
+  // Two starts fail to load the worklet; the third works.
+  const p = page({ addModule: (n) => (n <= 2 ? Promise.reject(new Error("404")) : Promise.resolve()) });
+  p.open();
+  p.audio(burst(0));
+  await tick();
+  const chipEl = p.els.get("sound-chip");
+  check("the chip says the sound failed, and names the chord that retries it",
+    [p.chip(), chipEl && chipEl["aria-keyshortcuts"]], ["Sound failed · Alt+M", "Alt+M"]);
+  check("no gesture is listened for", unlocks(p.w, p.pcm), []);
+  p.tap("pointerdown", { pointerType: "touch" });
+  p.tap("pointerup", { pointerType: "touch" });
+  p.w.fire("touchend", {});
+  p.w.fire("click", {});
+  p.w.fire("keydown", { code: "KeyA", key: "a" });
+  p.w.fire("keydown", { code: "Enter", key: "Enter" });
+  await tick();
+  check("so taps, clicks and keys no longer build and close a context each", p.w.made, 1);
+  p.w.active = true;
+  clickOn(p, chipEl);
+  await tick();
+  check("a tap on the chip tries again, inside the tap (and fails again here)", [p.w.made, p.w.madeIn[1], p.chip()],
+    [2, "click", "Sound failed · Alt+M"]);
+  p.w.fire("keydown", { code: "KeyM", key: "m", altKey: true });
+  await tick();
+  check("Alt+M tries again, inside its key press, rather than muting what never played",
+    [p.w.made, p.w.madeIn[2], p.pcm.localGain], [3, "keydown", 1]);
+  check("and this time the sound plays, and the chip goes", [p.pcm.running, p.chip()], [true, null]);
+  check("never two contexts at once", p.w.maxLive, 1);
+}
+console.log("a chip that stays");
+{
+  const p = page();
+  p.open();
+  p.audio(burst(0));
+  p.tap("pointerup", { pointerType: "touch" });
+  await tick();
+  const chipEl = p.els.get("sound-chip");
+  const sound = p.els.get("sound");
+  const quiet = () => !!chipEl && chipEl.classList.contains("quiet");
+  const n = p.timers.length;
+  p.w.fire("keydown", { code: "KeyM", key: "m", altKey: true });
+  check("Alt+M: the chip says how to undo it, and names that chord for assistive technology",
+    [p.chip(), chipEl && chipEl["aria-keyshortcuts"]], ["Sound off · Alt+M", "Alt+M"]);
+  check("it shows for a while even without the HUD", quiet(), false);
+  p.timers.slice(n).forEach((t) => t.fn && t.ms === 2500 && t.fn());
+  check("(the HUD has faded, with its #sound flag)", !!sound && sound.classList.contains("idle"), true);
+  p.timers.slice(n).forEach((t) => t.fn && t.ms === 6000 && t.fn());
+  check("then it is quiet: shown only along with the HUD, so it does not sit over the picture's corner " +
+    "taking taps meant for the device", [p.chip(), quiet()], ["Sound off · Alt+M", true]);
+  const css = read("player.css");
+  check("which player.css hides, and lets taps through, while the HUD is hidden",
+    /#sound\.idle #sound-chip\.quiet \{[^}]*opacity: 0;[^}]*pointer-events: none;/.test(css), true);
+  p.w.fire("keydown", { code: "KeyX", key: "x" });
+  check("a key brings the HUD up, and the chip with it", !!sound && sound.classList.contains("idle"), false);
+  if (chipEl) chipEl.fire("click", {});
+  check("where a tap on it still unmutes", [p.pcm.localGain, p.chip()], [1, null]);
+}
+{
+  const p = page();
+  p.open();
+  p.audio(burst(0));
+  await tick();
+  const chipEl = p.els.get("sound-chip");
+  p.timers.forEach((t) => t.fn && t.fn());
+  check("while Tap for sound, which any tap takes away, is never quiet",
+    [p.chip(), !!chipEl && chipEl.classList.contains("quiet")], ["Tap for sound", false]);
+}
+{
+  const p = page({ noAudio: true });
+  p.open();
+  p.audio(burst(0));
+  await tick();
+  const chipEl = p.els.get("sound-chip");
+  p.timers.forEach((t) => t.fn && t.ms === 6000 && t.fn());
+  check("No sound in this browser is quiet after a while too: nothing has to dismiss it",
+    [p.chip(), !!chipEl && chipEl.classList.contains("quiet")], ["No sound in this browser", true]);
+}
+console.log("the page's sound when the session ends");
+{
+  const bye = (p) => p.ws.onmessage({ data: JSON.stringify({ op: "bye", reason: "scterm stopped." }) });
+  const p = page();
+  p.open();
+  p.audio(burst(0));
+  await tick();
+  check("Tap for sound, before any gesture", p.chip(), "Tap for sound");
+  bye(p);
+  await tick();
+  check("after a bye the chip does not ask for a tap: there is nothing to hear", p.chip(), null);
+  check("and nothing is listened for", unlocks(p.w, p.pcm), []);
+  const resumes = p.w.resumes;
+  p.w.fire("keydown", { code: "KeyA", key: "a" });
+  p.tap("pointerup", { pointerType: "touch" });
+  await tick();
+  check("so a key or a tap starts nothing", [p.w.resumes - resumes, p.pcm.running], [0, false]);
+  // pressPicture is a mouse press on the canvas itself, whose own listener
+  // asks the context to resume (the first tap is the gesture).
+  const pressPicture = (x) => {
+    x.w.event = "pointerdown";
+    x.els.get("screen").fire("pointerdown", { pointerId: 2, pointerType: "mouse", button: 0, clientX: 10, clientY: 10 });
+    x.tap("pointerdown", { pointerId: 2, pointerType: "mouse" });
+    x.w.event = "";
+  };
+  pressPicture(p);
+  await tick();
+  check("nor a click on the picture, which asks the context itself", [p.w.resumes - resumes, p.pcm.running], [0, false]);
+  const q = page();
+  q.open();
+  q.audio(burst(0));
+  q.tap("pointerup", { pointerType: "touch" });
+  await tick();
+  check("sound playing", q.pcm.running, true);
+  bye(q);
+  await tick();
+  check("a bye suspends it", [q.w.suspends, q.pcm.running, q.chip(), unlocks(q.w, q.pcm)], [1, false, null, []]);
+  const resumed = q.w.resumes;
+  pressPicture(q);
+  await tick();
+  check("and a click on the last frame does not resume it", [q.w.resumes - resumed, q.pcm.running], [0, false]);
+  clickOn(q, q.els.get("conn-retry"));
+  check("and Reconnect, a click, resumes it inside the click", q.w.resumedIn[q.w.resumedIn.length - 1], "click");
+  await tick();
+  check("so it plays again with the new session", q.pcm.running, true);
+}
+console.log("the page in a browser without the Fullscreen API");
+{
+  const p = page();
+  const full = p.els.get("sheet-full");
+  check("there is no Full screen button: not in the bar, nor in the sheet",
+    [p.els.get("bar").children.some((c) => c.textContent === "Full screen"), !full || full.hidden], [false, true]);
+}
+
 // ---------------------------------------------------------------------------
 // 9. markup and style
 // ---------------------------------------------------------------------------
@@ -768,8 +984,12 @@ console.log("markup and style");
   check("but not while hidden", /#sound-chip\.off \{[^}]*visibility: hidden/.test(css), true);
   check("in the top right corner, away from the menu button and the centred card",
     rule !== null && /top:/.test(rule[1]) && /right:/.test(rule[1]) && !/left:/.test(rule[1]) && !/50%/.test(rule[1]), true);
-  check("its motion respects prefers-reduced-motion",
-    /@media \(prefers-reduced-motion: reduce\) \{[^}]*#sound-chip[^}]*transition: none/.test(css), true);
+  // A rule in the reduced-motion block that turns transitions off for the
+  // chip, by name or for every element.
+  const reduced = /@media \(prefers-reduced-motion: reduce\) \{([^]*?)\n\}/.exec(css);
+  const still = (sel) => !!reduced && [...reduced[1].matchAll(/([^{}]+)\{([^}]*)\}/g)].some(([, sels, body]) =>
+    /transition: none/.test(body) && sels.split(",").map((s) => s.trim()).some((s) => s === "*" || s === sel));
+  check("its motion respects prefers-reduced-motion", still("#sound-chip"), true);
   check("the old one-shot pointerdown start is gone",
     /addEventListener\("pointerdown", \(\) => pcm\.start\(\)/.test(src), false);
 }

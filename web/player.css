@@ -1,5 +1,71 @@
-/* scterm web display: the canvas owns the window; the HUD only appears when
-   the pointer moves, so a --window run looks like a device, not a web page. */
+/* scterm web display: the canvas owns the window; the HUD and the action bar
+   only appear when the mouse, the wheel or a key is used (on a touch screen,
+   when ⋯ is pressed), so a --window run looks like a device, not a web page. */
+
+/* ---------------------------------------------------------------------------
+   the page's colours, shapes, spacing and type, used by every rule below
+   --------------------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+
+  --bg: #000;
+  --fg: #e8e8e8;
+  /* Secondary text (the HUD's help row, the status card's detail): 4.5:1 or
+     better on --panel, even over a white picture. */
+  --fg-dim: #aeb4ba;
+  --fg-row: #d5d5dc;     /* the sheet's rows and gestures */
+  --accent: #ffc850;     /* the sheet's title */
+  --key: #9ecbff;        /* chords, gestures, and the focus ring */
+  --ok: #81c995;
+  --warn: #fdd663;
+  --bad: #f28b82;
+
+  /* What sits over the picture: the HUD, the toast, the status card, ☰, ⋯
+     and the sound chip. Dark enough that their text reads over white. */
+  --panel: rgba(16, 16, 20, .86);
+  --card: #17171c;       /* the controls sheet */
+  --btn: rgba(32, 32, 38, .92);
+  --btn-quiet: rgba(60, 60, 72, .9); /* Close, Full screen and Reconnect, on a card */
+  --btn-hover: rgba(58, 58, 68, .95);
+  --btn-press: rgba(90, 130, 220, .55);
+  --btn-done: rgba(60, 160, 90, .55);
+  --btn-armed: rgba(190, 60, 50, .75);
+  --line: rgba(255, 255, 255, .14);
+  --line-hover: rgba(255, 255, 255, .28);
+  --line-done: rgba(120, 230, 150, .7);
+  --line-armed: rgba(255, 150, 130, .85);
+
+  --radius-s: 4px;
+  --radius: 8px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+
+  --gap: 8px;
+  --edge: 12px;          /* floating controls from the window's edges */
+  --ctl: 34px;           /* ☰, ⋯ and the sound chip */
+  --tap: 0px;            /* the least a button measures each way */
+
+  --font: ui-monospace, SFMono-Regular, "DejaVu Sans Mono", Menlo, monospace;
+  --text-s: 11px;
+  --text: 12px;
+  --text-l: 14px;
+  --text-xl: 15px;
+
+  /* A notch or a home indicator: the page runs under them
+     (viewport-fit=cover), and what is on it keeps clear of them. */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+}
+
+/* A finger needs bigger targets: every button is at least 44 CSS px each way. */
+@media (pointer: coarse) {
+  :root {
+    --ctl: 44px;
+    --tap: 44px;
+  }
+}
 
 html, body {
   margin: 0;
@@ -7,9 +73,9 @@ html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #000;
-  color: #e8e8e8;
-  font: 12px/1.45 ui-monospace, SFMono-Regular, "DejaVu Sans Mono", Menlo, monospace;
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--text)/1.45 var(--font);
   -webkit-user-select: none;
   user-select: none;
   overscroll-behavior: none;
@@ -17,41 +83,80 @@ html, body {
 
 #screen {
   position: absolute;
-  inset: 0;
+  top: var(--safe-t);
+  right: var(--safe-r);
+  bottom: var(--safe-b);
+  left: var(--safe-l);
   margin: auto;
   display: block;
   /* width/height are set by View.fit() in player.js. The element is scaled to
-     the largest box that fits the window at the picture's own aspect ratio, so
-     the image is never distorted and never smaller than it needs to be: a
-     window of the capture's own shape (1280x720 for the default --max-size)
-     shows it 1:1 with no bars at all, and any other shape is fitted with black
-     on the shorter side.
+     the largest box that fits the window, less the safe-area insets above, at
+     the picture's own aspect ratio, so the image is never distorted and never
+     smaller than it needs to be: a window of the capture's own shape
+     (1280x720 for the default --max-size) shows it 1:1 with no bars at all,
+     and any other shape is fitted with black on the shorter side.
      Sizing the ELEMENT to that box, rather than filling the window with the
      element and letterboxing the bitmap inside it with object-fit, is what
      keeps the element's rect equal to the drawn picture -- pointer mapping
      measures that rect, so CSS-side letterboxing would leave it covering the
      bars too and offset every touch by their size. The black around the picture
-     is this page's background. */
+     is this page's background.
+     Before the first fit the canvas has its markup size, which must not
+     overflow a phone's window either: a page that can be zoomed is zoomed out
+     to show whatever overflows it. */
+  max-width: 100%;
+  max-height: 100%;
   image-rendering: auto;
-  background: #000;
+  background: var(--bg);
   cursor: none;
+  /* Every touch on the picture is the page's: no pan or pinch-zoom of the
+     page starts here, so drags and the three-finger tap reach the device even
+     though the page can be zoomed elsewhere. */
   touch-action: none;
 }
 
-#screen.grabbed { cursor: none; }
+/* ---------------------------------------------------------------------------
+   buttons: one style for all of them, which the rules further down only size
+   and place. A button that sits on something else sets --btn-bg and
+   --btn-line rather than its background and border, so hovering and
+   pressing it still show.
+   --------------------------------------------------------------------------- */
+button {
+  appearance: none;
+  -webkit-appearance: none;
+  box-sizing: border-box;
+  min-width: var(--tap);
+  min-height: var(--tap);
+  margin: 0;
+  border: 1px solid var(--btn-line, var(--line));
+  border-radius: var(--radius);
+  background: var(--btn-bg, var(--btn));
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: transform .08s ease, background-color .12s ease, border-color .12s ease;
+}
+
+/* Hover only where there is a pointer that hovers: a finger leaves it behind. */
+@media (hover: hover) {
+  button:hover { background: var(--btn-hover); border-color: var(--line-hover); }
+}
+button:active { background: var(--btn-press); }
+button:focus-visible { outline: 2px solid var(--key); outline-offset: 2px; }
 
 #hud {
   position: fixed;
-  left: 0;
-  right: 0;
+  left: calc(var(--edge) + var(--safe-l));
+  right: calc(var(--edge) + var(--safe-r));
   /* Clear of the action bar (#bar), which shares the bottom strip and would
-     otherwise cover the stats. player.js measures the bar (it wraps to more
-     rows on narrow screens) and sets this offset; the value here is the
-     one-row fallback used before that measurement runs and when the bar is
-     absent. */
-  bottom: 48px;
+     otherwise cover the stats. player.js measures the bar and sets this
+     offset; the value here is the fallback used before that measurement runs
+     and when the bar is absent. */
+  bottom: calc(48px + var(--safe-b));
   padding: 6px 10px 7px;
-  background: linear-gradient(to top, rgba(0,0,0,.82), rgba(0,0,0,.45) 70%, rgba(0,0,0,0));
+  border-radius: var(--radius);
+  background: var(--panel);
   pointer-events: none;
   opacity: 1;
   transition: opacity .25s ease;
@@ -60,16 +165,18 @@ html, body {
 
 #hud.idle { opacity: 0; }
 
-#hud .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-#hud .row.help { margin-top: 3px; color: #9aa0a6; font-size: 11px; }
+#hud .row { display: flex; align-items: center; gap: var(--gap); flex-wrap: wrap; }
+#hud .row.help { margin-top: 3px; color: var(--fg-dim); font-size: var(--text-s); }
 #hud .row.help span { white-space: nowrap; }
-#hud .sep { color: #5f6368; }
+#hud .sep { color: var(--fg-dim); }
 #hud .spacer { flex: 1 1 auto; }
 
 /* ---------------------------------------------------------------------------
-   action bar: every device action as a button. It shares the HUD's idle fade,
-   and its tooltips carry the chord names, so the two cannot drift: a button's
-   title is the documentation for the keyboard binding next to it.
+   action bar: every device action as a button, in one row that scrolls
+   sideways where it does not fit. It shares the HUD's idle fade, and its
+   tooltips carry the chord names, so the two cannot drift: a button's title
+   is the documentation for the keyboard binding next to it. Only the buttons
+   take pointer events: a tap between them reaches the picture.
    --------------------------------------------------------------------------- */
 #bar {
   position: fixed;
@@ -77,38 +184,47 @@ html, body {
   right: 0;
   bottom: 0;
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
+  align-items: center;
   gap: 4px;
-  padding: 7px 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  padding: 7px calc(8px + var(--safe-r)) calc(7px + var(--safe-b)) calc(8px + var(--safe-l));
   background: linear-gradient(to top, rgba(0,0,0,.85), rgba(0,0,0,.5) 70%, rgba(0,0,0,0));
+  pointer-events: none;
   transition: opacity .25s ease, transform .25s ease;
 }
 
-#bar.idle { opacity: 0; transform: translateY(6px); pointer-events: none; }
+#bar::-webkit-scrollbar { display: none; }
+
+/* Centred while it fits, and from its start when it scrolls. */
+#bar > :first-child { margin-left: auto; }
+#bar > :last-child { margin-right: auto; }
+
+#bar.idle { opacity: 0; transform: translateY(6px); }
 
 #bar button {
-  appearance: none;
-  border: 1px solid rgba(255,255,255,.14);
+  flex: none;
+  pointer-events: auto;
   border-radius: 9px;
-  background: rgba(32,32,38,.92);
-  color: #e8e8e8;
-  font: inherit;
-  font-size: 11px;
+  font-size: var(--text-s);
   line-height: 1;
   padding: 7px 10px;
-  cursor: pointer;
-  touch-action: manipulation;
-  transition: transform .08s ease, background .12s ease, border-color .12s ease;
 }
 
-#bar button:hover { background: rgba(58,58,68,.95); border-color: rgba(255,255,255,.28); }
+#bar.idle button { pointer-events: none; }
+
 /* The press is the fun part: it visibly clicks, so a tap on a phone feels
    like a button and not a dead rectangle. */
-#bar button:active { transform: scale(.9); background: rgba(90,130,220,.55); }
-#bar button.done { background: rgba(60,160,90,.55); border-color: rgba(120,230,150,.7); }
+#bar button:active { transform: scale(.9); }
+#bar button.done { background: var(--btn-done); border-color: var(--line-done); }
 
-#bar .bar-sep { width: 1px; align-self: stretch; margin: 2px 3px; background: rgba(255,255,255,.12); }
+#bar .bar-sep { flex: none; width: 1px; align-self: stretch; margin: 2px 3px; background: rgba(255,255,255,.12); }
+
+@media (pointer: coarse) {
+  #bar button { font-size: var(--text); }
+}
 
 /* ---------------------------------------------------------------------------
    controls sheet (Alt+/): a modal dialog with a row for every action, a
@@ -118,6 +234,8 @@ html, body {
 #sheet {
   position: fixed;
   inset: 0;
+  box-sizing: border-box;
+  padding: var(--safe-t) var(--safe-r) var(--safe-b) var(--safe-l);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -132,12 +250,12 @@ html, body {
    grid to one column, whatever the screen. */
 .sheet-card {
   box-sizing: border-box;
-  width: min(560px, 92vw);
-  max-height: 86vh;
+  width: min(560px, calc(100% - 2 * var(--edge)));
+  max-height: calc(100% - 2 * var(--edge));
   overflow: auto;
   padding: 16px 18px 14px;
-  border-radius: 14px;
-  background: #17171c;
+  border-radius: var(--radius-l);
+  background: var(--card);
   border: 1px solid rgba(255,255,255,.12);
   box-shadow: 0 12px 40px rgba(0,0,0,.7);
 }
@@ -146,9 +264,9 @@ html, body {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 15px;
+  font-size: var(--text-xl);
   font-weight: 600;
-  color: #ffc850;
+  color: var(--accent);
   margin-bottom: 10px;
 }
 
@@ -160,33 +278,23 @@ html, body {
 }
 
 .sheet-row {
-  appearance: none;
+  --btn-line: rgba(255,255,255,.1);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 8px;
-  background: rgba(32,32,38,.92);
-  color: #d5d5dc;
-  font: inherit;
-  font-size: 12px;
+  color: var(--fg-row);
+  font-size: var(--text);
   text-align: left;
   padding: 6px 9px;
-  cursor: pointer;
-  touch-action: manipulation;
 }
-
-.sheet-row:hover { background: rgba(58,58,68,.95); border-color: rgba(255,255,255,.24); }
-.sheet-row:active { background: rgba(90,130,220,.55); }
-.sheet-row:focus-visible, #sheet-close:focus-visible { outline: 2px solid #9ecbff; outline-offset: 1px; }
 
 /* A Quit, on the bar or in the sheet, that was pressed once and waits for the
    second press. After the hover and press styles, which it must outlast: the
    pointer is still on the control. */
 #bar button.armed, .sheet-row.armed {
-  background: rgba(190,60,50,.75);
-  border-color: rgba(255,150,130,.85);
+  background: var(--btn-armed);
+  border-color: var(--line-armed);
   color: #fff;
 }
 
@@ -194,11 +302,11 @@ html, body {
 
 .sheet-card kbd {
   font: inherit;
-  font-size: 11px;
+  font-size: var(--text-s);
   font-weight: normal;
-  color: #9ecbff;
+  color: var(--key);
   border: 1px solid rgba(158,203,255,.3);
-  border-radius: 4px;
+  border-radius: var(--radius-s);
   padding: 0 4px;
   white-space: nowrap;
 }
@@ -208,24 +316,29 @@ html, body {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 5px 16px;
-  font-size: 12px;
+  font-size: var(--text);
 }
 
-.sheet-card dt { color: #9ecbff; white-space: nowrap; }
-.sheet-card dd { margin: 0; color: #d5d5dc; }
+.sheet-card dt { color: var(--key); white-space: nowrap; }
+.sheet-card dd { margin: 0; color: var(--fg-row); }
 
-#sheet-close {
-  appearance: none;
-  border: 1px solid rgba(255,255,255,.18);
-  border-radius: 8px;
-  background: rgba(60,60,72,.9);
-  color: #e8e8e8;
-  font: inherit;
+.sheet-foot { display: flex; gap: var(--gap); }
+
+#sheet-close, #sheet-full, #conn-retry {
+  --btn-bg: var(--btn-quiet);
+  --btn-line: rgba(255,255,255,.18);
   padding: 6px 14px;
-  cursor: pointer;
 }
 
-#sheet-close:hover { background: rgba(80,80,96,.95); }
+/* A short window: denser rows, so that the sheet fits without scrolling. */
+@media (max-height: 760px) {
+  .sheet-card { padding: 10px 16px 10px; }
+  .sheet-title { margin-bottom: 6px; }
+  .sheet-actions { gap: 2px 8px; margin-bottom: 8px; }
+  .sheet-row { padding: 3px 9px; }
+  .sheet-card dl { gap: 1px 16px; margin-bottom: 8px; }
+  #sheet-close, #sheet-full { padding: 4px 14px; }
+}
 
 /* ---------------------------------------------------------------------------
    pointer overlay: the visible answer to "where am I about to click?".
@@ -322,52 +435,59 @@ html, body {
   to   { transform: scale(1.8); opacity: 0; }
 }
 
-#state.ok { color: #81c995; }
-#state.warn { color: #fdd663; }
-#state.bad { color: #f28b82; }
+#state.ok { color: var(--ok); }
+#state.warn { color: var(--warn); }
+#state.bad { color: var(--bad); }
 
+/* A toast is as wide as its words, wrapping only where the window is
+   narrower. */
 #toast {
   position: fixed;
-  top: 12px;
+  top: calc(var(--edge) + var(--safe-t));
   left: 50%;
   transform: translateX(-50%);
+  box-sizing: border-box;
+  width: max-content;
+  max-width: calc(100vw - 2 * (var(--edge) + max(var(--safe-l), var(--safe-r))));
   padding: 5px 12px;
   border-radius: 6px;
-  background: rgba(20,20,20,.9);
-  color: #e8e8e8;
+  background: var(--panel);
+  color: var(--fg);
   box-shadow: 0 2px 10px rgba(0,0,0,.6);
   opacity: 0;
   transition: opacity .2s ease;
   pointer-events: none;
-  white-space: pre;
+  white-space: pre-wrap;
 }
 
 #toast.show { opacity: 1; }
 
-/* Floating menu button: opens the controls sheet. Sits just above the action
-   bar and fades with the rest of the chrome. */
-#menu-btn {
-  position: fixed;
-  top: 12px;
-  left: 12px;
-  width: 34px;
-  height: 34px;
-  padding: 0;
-  border: 1px solid rgba(255,255,255,.16);
-  border-radius: 10px;
-  background: rgba(28,28,34,.85);
-  color: #e8e8e8;
-  font: inherit;
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-  z-index: 15;
-  transition: opacity .25s ease, transform .08s ease, background .12s ease;
+/* On a narrow window a toast at the top would cover ☰, ⋯ or the sound chip,
+   so it shows below them. */
+@media (max-width: 760px) {
+  #toast { top: calc(var(--edge) + var(--safe-t) + var(--ctl) + var(--gap)); }
 }
 
-#menu-btn:hover { background: rgba(58,58,68,.95); }
-#menu-btn:active { transform: scale(.9); }
-#menu-btn.idle { opacity: 0; pointer-events: none; }
+/* Floating menu button (☰): opens the controls sheet. It is always shown and
+   can always take a click, a tap or the focus. On a touch screen ⋯ sits
+   beside it and shows the action bar, which a finger on the picture does not. */
+#menu-btn, #bar-btn {
+  --btn-bg: var(--panel);
+  --btn-line: rgba(255,255,255,.16);
+  position: fixed;
+  top: calc(var(--edge) + var(--safe-t));
+  width: var(--ctl);
+  height: var(--ctl);
+  padding: 0;
+  border-radius: var(--radius-m);
+  font-size: 16px;
+  line-height: 1;
+  z-index: 15;
+}
+
+#menu-btn { left: calc(var(--edge) + var(--safe-l)); }
+#bar-btn { left: calc(var(--edge) + var(--safe-l) + var(--ctl) + var(--gap)); }
+#menu-btn:active, #bar-btn:active { transform: scale(.9); }
 
 /* Phone soft-keyboard sink (three-finger tap). Kept rendered and focusable so
    the IME will come up, but invisible and unable to take pointer events. It
@@ -410,10 +530,10 @@ html, body {
   transform: translate(-50%, -50%);
   box-sizing: border-box;
   width: max-content;
-  max-width: min(420px, 86vw);
+  max-width: min(420px, calc(100vw - 2 * (var(--edge) + max(var(--safe-l), var(--safe-r)))));
   padding: 14px 18px;
-  border-radius: 14px;
-  background: rgba(23,23,28,.92);
+  border-radius: var(--radius-l);
+  background: var(--panel);
   border: 1px solid rgba(255,255,255,.12);
   box-shadow: 0 12px 40px rgba(0,0,0,.7);
   text-align: center;
@@ -423,61 +543,53 @@ html, body {
 
 #conn.off { opacity: 0; transition: none; }
 
-#conn-text { margin: 0; font-size: 14px; }
-#conn-detail { margin: 6px 0 0; color: #9aa0a6; }
+#conn-text { margin: 0; font-size: var(--text-l); }
+#conn-detail { margin: 6px 0 0; color: var(--fg-dim); }
 #conn-detail:empty { display: none; }
 
 #conn-retry {
   margin-top: 12px;
-  appearance: none;
-  border: 1px solid rgba(255,255,255,.18);
-  border-radius: 8px;
-  background: rgba(60,60,72,.9);
-  color: #e8e8e8;
-  font: inherit;
-  padding: 6px 14px;
-  cursor: pointer;
   pointer-events: auto;
-  touch-action: manipulation;
 }
-
-#conn-retry:hover { background: rgba(80,80,96,.95); }
 
 /* ---------------------------------------------------------------------------
    sound chip: this browser's own sound state, shown only while there is
-   something to do about it, and kept up while the HUD is hidden. Top right:
-   clear of the menu button (top left) and the status card (centre). Only the
-   chip takes pointer events, and only while it is shown (visibility).
+   something to do about it, and kept up while the HUD is hidden when it asks
+   for the tap that starts the sound, or for a while after it starts saying
+   something; then ("quiet") only along with the HUD. Top right: clear of ☰
+   and ⋯ (top left) and the status card (centre). Only the chip takes pointer
+   events, and only while it is shown.
    --------------------------------------------------------------------------- */
 #sound {
   position: fixed;
-  top: 12px;
-  right: 12px;
+  top: calc(var(--edge) + var(--safe-t));
+  right: calc(var(--edge) + var(--safe-r));
   pointer-events: none;
 }
 
 #sound-chip {
-  appearance: none;
-  height: 34px;
-  max-width: calc(100vw - 70px); /* never under the menu button */
+  --btn-bg: var(--panel);
+  --btn-line: rgba(255,255,255,.16);
+  height: var(--ctl);
+  /* never under ☰ or ⋯ */
+  max-width: calc(100vw - 2 * var(--edge) - var(--safe-l) - var(--safe-r) - 2 * (var(--ctl) + var(--gap)));
   overflow: hidden;
   text-overflow: ellipsis;
   padding: 0 14px;
-  border: 1px solid rgba(255,255,255,.16);
-  border-radius: 17px;
-  background: rgba(28,28,34,.85);
-  color: #e8e8e8;
-  font: inherit;
+  border-radius: 999px;
   white-space: nowrap;
-  cursor: pointer;
   pointer-events: auto;
-  touch-action: manipulation;
   transition: opacity .25s ease, visibility .25s;
 }
 
-#sound-chip:hover { background: rgba(58,58,68,.95); }
 #sound-chip.off { opacity: 0; visibility: hidden; }
+#sound.idle #sound-chip.quiet { opacity: 0; pointer-events: none; }
 
+/* Reduced motion: nothing slides, scales, fades or grows; states change at
+   once. */
 @media (prefers-reduced-motion: reduce) {
-  #screen.dim, #conn, #sound-chip { transition: none; }
+  *, *::before, *::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }

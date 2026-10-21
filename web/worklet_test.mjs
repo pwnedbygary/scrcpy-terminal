@@ -152,6 +152,49 @@ console.log("underruns");
   check("and is counted as an underrun", p.underruns, before + 1);
 }
 
+console.log("a context that does not run at 48 kHz");
+{
+  // A ramp: stream frame k is k on the left and -k on the right (over 32768),
+  // so a straight line between two frames is exact, and where in the stream a
+  // frame that was played came from can be read back from its value.
+  const ramp = (frames) => {
+    const buf = new ArrayBuffer(frames * 4);
+    const v = new Int16Array(buf);
+    for (let i = 0; i < frames; i++) { v[i * 2] = i; v[i * 2 + 1] = -i; }
+    return buf;
+  };
+  const play = (ratio, blocks, frames = 9600) => {
+    const p = new P({ processorOptions: { targetFrames: 4608, maxFrames: 11520, ratio } });
+    p.port.onmessage({ data: { pcm: ramp(frames) } });
+    const out = [];
+    for (let b = 0; b < blocks; b++) {
+      const l = new Float32Array(128), r = new Float32Array(128);
+      p.process([], [[l, r]]);
+      for (let i = 0; i < 128; i++) out.push([l[i] * 32768, r[i] * 32768]);
+    }
+    return { p, out };
+  };
+  for (const [rate, name] of [[44100, "44.1 kHz"], [96000, "96 kHz"]]) {
+    const ratio = 48000 / rate;
+    const { p, out } = play(ratio, 32);
+    check(`at ${name}, each frame played is the stream ${ratio.toFixed(4)} frames on from the last`,
+      out.every(([l], i) => Math.abs(l - i * ratio) < 0.01), true);
+    check(`on both channels`, out.every(([l, r]) => Math.abs(l + r) < 0.01), true);
+    check(`so 4096 frames played take ${Math.floor(4095 * ratio)} of the stream`, 9600 - p.count, Math.floor(4095 * ratio));
+    check("with no underrun", p.underruns, 0);
+  }
+  const { p, out } = play(48000 / 44100, 40, 4608);
+  const top = Math.max(...out.map(([l]) => l));
+  check("running dry, it plays the stream up to its last frames, then silence, counted as underruns, never NaN",
+    [top > 4606 && top <= 4607, out.slice(-10).every(([l, r]) => l === 0 && r === 0),
+      out.every(([l, r]) => Number.isFinite(l) && Number.isFinite(r)), p.underruns > 0, p.count], [true, true, true, true, 1]);
+  p.port.onmessage({ data: { pcm: ramp(4608) } });
+  const l = new Float32Array(128), r = new Float32Array(128);
+  p.process([], [[l, r]]);
+  check("when the stream comes back it goes on from the frame left over, into the new one",
+    [l[0] * 32768 > 0 && l[0] * 32768 < 4607, l[1] * 32768 > 0 && l[1] * 32768 < 2], [true, true]);
+}
+
 console.log("stats reporting");
 {
   scope.posted.length = 0;

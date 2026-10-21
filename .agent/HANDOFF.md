@@ -7,6 +7,180 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 19: the browser player on phones, its looks and its accessibility)
+
+- On a touch screen, a finger on the picture no longer brings up the HUD and
+  the action bar: a tap or a drag is for the device, and a bar that came up
+  under it could take the next tap. A new ⋯ button beside ☰ (`#bar-btn`,
+  `aria-controls="bar"`, `aria-expanded`) shows the bar until ⋯ is pressed
+  again or the picture is touched; that touch still reaches the device. ⋯
+  shows in touch mode: a coarse pointer at load, then whichever pointer
+  pressed last (a mouse that moves leaves touch mode). With a mouse, keys or
+  the wheel the chrome shows and fades as before (`CHROME_IDLE_MS`, 2.5 s),
+  but not while the mouse rests on the bar or a control of the chrome has the
+  keyboard focus. ☰ is always shown and never inert. The bar is inert while
+  faded, but not while the controls sheet is open; it stays hidden behind the
+  sheet however the sheet was opened, and shows again when the sheet closes
+  if the chrome is still up.
+- The bar is one row, centred while it fits, that scrolls sideways where it
+  does not (a wheel over it scrolls it). Only its buttons take clicks, so the
+  strip between and beside them passes clicks to the device. On a coarse
+  pointer every button is at least 44 px square (`--tap`).
+- The page lays itself out inside the safe area (`viewport-fit=cover`, and
+  `env(safe-area-inset-*)` for the bar, the HUD, ☰ and ⋯, the sound chip, the
+  toast, the status card, the sheet and the canvas), and the picture fits
+  what the safe area leaves.
+- The page can be zoomed again (`user-scalable=no` is gone). The picture
+  keeps `touch-action: none`, so pinches, drags and the three-finger tap on
+  it stay the page's, and a pinch outside it zooms the page. The canvas is
+  sized from the layout viewport, because a zoomable phone page grows
+  `innerWidth` and `innerHeight` to take in overflow; before, the canvas's
+  markup size overflowed a 390×844 window.
+- Full screen: a button at the end of the bar (after a separator) and one in
+  the sheet's footer, before Close, both absent where the browser has no
+  Fullscreen API (iPhone Safari). They call `requestFullscreen`, with webkit
+  fallbacks, carry `aria-pressed` and the title "Full screen" or "Leave full
+  screen (Esc)", follow `fullscreenchange` (so leaving by Esc shows), and a
+  refused request toasts "full screen is not available here". F11 stays the
+  device's Collapse panels.
+- Looks: `player.css` is rewritten around `:root` custom properties
+  (colours, radii, spacing, control size, type) with one shared button style,
+  so hover and press show on every button. Also `color-scheme: dark`, a 2 px
+  `:focus-visible` ring, one global `prefers-reduced-motion` rule, darker
+  panels with lighter dim text (the HUD's help row measured 6.11:1 over a
+  white picture in Chrome, 2.78:1 before), an inline `data:` SVG favicon (so
+  `/favicon.ico` is no longer asked for), the dead rules `#menu-btn.idle` and
+  `#screen.grabbed` removed, and denser sheet rows below 760 px of height, so
+  the sheet fits down to 1280×600.
+- The sound chip gaps the part-12 entry left are closed:
+  - A start that fails no longer builds and closes a context on every tap and
+    key: the gesture listeners stop, and the chip says "Sound failed ·
+    Alt+M". A click on it, or Alt+M, tries again (Alt+M retries rather than
+    muting sound that never played).
+  - The context's real rate is read back, and `processorOptions.ratio`
+    (48000 divided by that rate) makes the ring resample linearly, in the
+    worklet and in the compatibility path. In Chrome, with a context forced
+    to 44.1 kHz, the base page dropped 12,224 frames in 4 s and this one
+    none.
+  - The chip's keyboard path is its chord, named in its text and in
+    `aria-keyshortcuts`, since Tab and Enter belong to the device during a
+    session.
+  - Any chip but "Tap for sound" shows for 6 s when its words change, and
+    after that only along with the HUD and the bar. Hidden, it takes no taps,
+    so "Sound off · Alt+M" no longer sits over the picture's corner unmuting
+    taps meant for the device.
+  - On windows 760 px wide or narrower, the toast sits below ☰, ⋯ and the
+    chip.
+  - After a bye the chip shows nothing, nothing is listened for, and the
+    context is suspended; Reconnect resumes it inside its click. The canvas's
+    own `pcm.resume()` still resumed it after a bye (found in the builder's
+    real-browser run); `Pcm.resume()` now returns early once the session has
+    ended.
+- Leftovers from parts 8 and 14:
+  - After a bye, Alt+/ (the sheet) and Alt+S (the last picture) still work,
+    from chord and button alike (`ENDED_ACTIONS`). The other chords, Alt+M
+    and the F-keys are left to the browser, so F5 reloads (now pinned by a
+    test). Device buttons and sheet rows say "the session has ended" and do
+    not flash, and Quit asks for no second press. A paste after a bye is the
+    browser's, with no toast.
+  - Keyboard focus on ☰ or the bar no longer drops to the page when the
+    chrome fades, and a press on the picture takes the focus off the page's
+    buttons (except after a bye).
+  - A held toggle chord (Alt+G, F12, Alt+I, Alt+/, Alt+S, Alt+M) runs once
+    per press; device actions still repeat like a held key.
+  - The stale comments about an inert ☰ (`player.css`, `index.html`) are gone
+    with the rules they described.
+- The builder's judgement calls, kept:
+  - ⋯ is a handle of its own; ☰ keeps opening the sheet, as part 14 named and
+    wired it.
+  - A paste while the connection is lost (not after a bye) says "not
+    connected: nothing pasted" instead of claiming it pasted.
+  - The 760 px breakpoints sit a little above 736 px, so 1280×720 fits.
+  - A finger tap in the 4 px gap between two bar buttons lands on the nearer
+    button, because Chrome snaps a tap within about 10 px onto a clickable
+    element; the strip itself passes clicks through.
+- Existing checks changed on purpose. Page: "the chrome fades… ☰ inert" is
+  now "keyboard focus on the bar's Controls button holds the chrome; ☰ is
+  never inert"; the separators and the sheet's Tab ring include Full screen;
+  the Quit colour-order check refers to the shared button rules. Audio: "a
+  tap tries again", "the gestures are still listened for" and "a key press
+  does" pinned part 12's gap and are now their opposites. The per-element
+  reduced-motion checks are now the global rule (conn accepts a `*` rule).
+  The stand-in DOMs gained `contains`, `matches` (`:focus-visible` and
+  `:hover`), `removeAttribute`, scroll sizes and a Fullscreen API.
+- Docs: README (the phone paragraph with ⋯, the keys after a session ends,
+  the bar not fading under the mouse, Full screen with F11 and Esc, pinch
+  zoom, the "Sound failed" chip and the quiet chip) and ARCHITECTURE (the
+  ring resamples).
+- Incident: before the builder forced its headful Chrome runs onto a private
+  Xvfb display, up to three of them opened a Chrome window on the owner's
+  Wayland desktop (`WAYLAND_DISPLAY` was set), about 30 s each, between 02:13
+  and 02:27; the last one toggled full screen there. They showed only a
+  served copy of the page with a fake socket: no adb, device or scterm. The
+  builder's `browser/cdp.mjs` now refuses a headful run without an Xvfb
+  display, adds `--ozone-platform=x11` and drops `WAYLAND_DISPLAY`. Browser
+  runs for this project must be headless, or headful only on a private Xvfb
+  display with `WAYLAND_DISPLAY` unset.
+- Verification, in the builder's tree (`/tmp/opencode/dev-19`): gofmt,
+  `go vet ./...`, `go test -count=1 ./...`, `-race` on the 57 web tests, and
+  the node suites: input 130, worklet 35, pointer 17, conn 61, page 276 and
+  audio 175 checks, all passing (130, 25, 17, 61, 202 and 137 on the base).
+  Against the base production files the new checks fail as they should:
+  worklet 6, page 65, audio 29. 34 of 34 mutations are caught. Real
+  browsers, on a served copy of the page with a fake socket, new page against
+  base page: Chrome 155 phone emulation (390×844, touch) 26 passed and 0
+  failed against 5 and 18; Chrome desktop on Xvfb (mouse) 39/0 against
+  10/25; Chrome audio 12/0 against 3/9; an `--app` window with `window.go`'s
+  flags, headless 7/0 against 1/6, and on Xvfb 4/0; Firefox 157 17/0
+  against 4/12. Taken into the worktree, `player.js` conflicted only in the
+  comment above the chrome code, which part 14's last review round had
+  reworded and this part replaces; the worktree had changed none of the
+  other files since the builder's base, so all eight files are the builder's
+  bytes, and the six node suites pass there with the same counts. On the
+  review snapshot, which sits on parts 26 and 28 as reviewed, under a scratch
+  sound server: gofmt, `go vet ./...`, the build, `go test -count=1 ./...`
+  (342 top-level tests pass and 3 skip), the node suites with the counts
+  above, `-race` on the builder's web filter (73 tests on this base, no
+  race), and the Markdown check of README and ARCHITECTURE (33 links).
+- Not verified: real phones (Android Chrome, iOS Safari) and real notches,
+  only Chrome's mobile emulation and its safe-area override; in Firefox, the
+  focus ring and entering full screen (its window never had the focus);
+  full screen under a real window manager; real 44.1 kHz audio hardware (a
+  forced context in muted Chrome stood in); Safari's `webkitAudioContext`
+  and webkit full-screen prefixes; screen readers announcing `aria-pressed`
+  and `aria-keyshortcuts`; taps while the page is pinch-zoomed.
+- Review round 1 (snapshot review-19, on parts 26 and 28 as then reviewed)
+  passed. Round 2 rebuilds this part on the branch tip, where parts 26 and
+  28 have landed, and takes the review's wording notes: the README says to
+  swipe on the bar's buttons (a swipe that starts between them goes to the
+  device), this entry says the bar shows again after the sheet only while
+  the chrome is up, and `player.css`'s header no longer says the HUD appears
+  only when the pointer moves. Left for a later change, from the review:
+  keyboard focus left on the bar's Controls button (after Esc closes a sheet
+  it opened) holds the chrome up for the rest of a session, though Tab,
+  Enter and Space go to the device; in touch mode a key, a soft keyboard's
+  too, still brings up the bar, and the next tap there runs a bar button (as
+  before this part); with a ratio other than 1 the ring counts an underrun
+  for every output frame it cannot fill, where the frame-for-frame path
+  counts one per block, so the HUD's `u<N>` runs far higher on a 44.1 kHz
+  context (part 12 left the uneven counting alone); a chip that changes A,
+  B, A within 6 s can go quiet early; no check pins a press on the picture
+  after a bye leaving Reconnect focused, a mouse taking over dropping the ⋯
+  pin, closing the sheet by touch showing a pinned bar again, a coarse
+  pointer at load starting with the bar down, returning to the tab in touch
+  mode, `room()` keeping the side insets, Alt+M unmuting when the sound both
+  failed and is muted, or the fade waiting out an open sheet (the review saw
+  three of them work in Chrome); on a portrait phone the bars beside the
+  picture are about 5 px wide, so there is little room to pinch the page.
+  On round 2's snapshot (the branch tip with part 28 as rebuilt), under a
+  scratch sound server: gofmt, `go vet ./...`, the build, `go test -count=1
+  ./...` (342 top-level tests pass and 3 skip), the six node suites with the
+  counts above, `-race` on the builder's web filter (73 tests, no race), and
+  the Markdown check of README and ARCHITECTURE (33 links).
+- Left alone: `web.go`, `webui.go`, `websocket.go` and the CSP; the canvas's
+  direct `pcm.resume()` call (guarded inside `resume()` instead); browser
+  touch adjustment; at 390×844 the sheet's 17 rows still scroll.
+
 ## Update (2026-10-21: QoL overhaul, part 28: the browser display refuses names it is not served by)
 
 - DNS rebinding: a website that points its own name at this computer could

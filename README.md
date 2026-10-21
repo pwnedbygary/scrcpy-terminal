@@ -139,7 +139,15 @@ example through an SSH tunnel, gives the low-delay path.
 
 A card on the picture says what the page is waiting for: *Connecting…*, *Waiting for video
 from …*, *Connection lost. Reconnecting…* (the page reconnects by itself), or *Session ended*
-with the reason and a *Reconnect* button.
+with the reason and a *Reconnect* button. Once the session has ended, the keys are the
+browser's again, so F5 reloads the page; Alt+/ still opens the Controls sheet, and Alt+S still
+saves the last picture.
+
+On a phone or tablet, a tap or a swipe on the picture goes to the device and does not bring up
+the action bar. The ⋯ button next to ☰ shows the bar until you press ⋯ again or touch the
+picture. The bar is one row: swipe sideways on its buttons for the rest of them (a swipe that
+starts between buttons goes to the device). The page keeps its buttons clear of a notch. A
+pinch outside the picture zooms the page; a pinch on the picture does nothing.
 
 > **Warning:** by default only this computer can open the page. With `--web-addr 0.0.0.0`, or
 > any address that is not a loopback address, anyone who can reach the port can see the screen
@@ -180,7 +188,9 @@ showing the picture, scterm prints the browser's error lines and the address it 
 ## Controls
 
 The terminal, the browser and the window share one set of actions. Almost every action has a
-button on the action bar, which appears when you use the mouse and fades a few seconds later.
+button on the action bar, which appears when you use the mouse and fades a few seconds after
+you stop, but not while the mouse rests on it. On a touch screen, the browser's ⋯ button shows
+it.
 Most actions also have an Alt+letter chord and an F-key; the Alt chords exist because phone
 keyboards have Alt but no F-keys. Alt+/ opens the Controls menu (terminal) or the Controls
 sheet (browser), which lists the actions with their keys: click a row, or in the terminal press
@@ -221,8 +231,10 @@ the terminal, on the action bar and in the Controls sheet in the browser.
   keys too). In the browser the mouse always goes to the device, and Grab decides where some
   Ctrl keys go (see [Typing](#typing)).
 - Refresh video asks the device for a new keyframe, which repaints a damaged picture.
-- In the browser, Alt+F1 to Alt+F12 do the same as F1 to F12. F5 and F11 do not reload the page
-  or switch to full screen.
+- In the browser, Alt+F1 to Alt+F12 do the same as F1 to F12. During a session, F5 and F11 do
+  not reload the page or switch to full screen. The *Full screen* button, last on the action
+  bar and also in the Controls sheet, fills the screen where the browser allows it, and Esc
+  then leaves full screen instead of pressing Back.
 
 ### Mouse and touch
 
@@ -239,7 +251,7 @@ the terminal, on the action bar and in the Controls sheet in the browser.
 In the terminal, the mouse reaches the device only while it is grabbed. A click on the action
 bar, the Controls menu or the on-screen keyboard runs that control and does not tap the device.
 In the browser, a long press is a long touch on the device, not Back, and only one finger
-reaches the device.
+reaches the device. A pinch on the picture does nothing; a pinch outside it zooms the page.
 
 ### Typing
 
@@ -425,8 +437,10 @@ connection it was waiting for.
 - The default `--audio-source output` mutes the device while scterm runs. To hear the sound on
   the device too, use `--audio-source playback --audio-dup` (Android 13 and later).
 - In the browser, the sound chip says what is wrong: *Tap for sound*, *Sound off · Alt+M* (the
-  page's volume is muted), *Sound: compatibility mode* (plain http, a little more delay), or
-  *No sound in this browser*.
+  page's volume is muted), *Sound failed · Alt+M* (the sound did not start: click the chip or
+  press Alt+M to try again), *Sound: compatibility mode* (plain http, a little more delay), or
+  *No sound in this browser*. Apart from *Tap for sound*, the chip shows for six seconds when
+  it changes, and after that only along with the action bar.
 
 ### The terminal picture is garbled
 

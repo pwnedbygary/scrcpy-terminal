@@ -11,6 +11,12 @@
 // opened over plain http from another machine has none; player.js then drains
 // this same ring from a ScriptProcessorNode on the main thread, where there is
 // no AudioWorkletProcessor to extend and nothing to register.
+//
+// The page asks for a 48 kHz context, so the ring normally plays frame for
+// frame. A browser that runs the context at another rate anyway (an older
+// Safari's webkitAudioContext takes no options) would play the stream slow or
+// fast, and the host would run ahead of it; processorOptions.ratio, the
+// stream's frames per output frame, makes pull() resample instead.
 "use strict";
 
 const SctermPCMBase = typeof AudioWorkletProcessor === "function" ? AudioWorkletProcessor : class {};
@@ -21,6 +27,8 @@ class SctermPCM extends SctermPCMBase {
     const opt = (options && options.processorOptions) || {};
     this.target = opt.targetFrames || 4608;   // 96 ms @ 48 kHz
     this.max = opt.maxFrames || 11520;        // 240 ms
+    this.ratio = opt.ratio > 0 ? opt.ratio : 1; // stream frames per output frame
+    this.frac = 0;                             // how far past `read` playback is
     this.buf = new Float32Array(this.max * 2); // interleaved stereo
     this.read = 0;
     this.write = 0;
@@ -80,6 +88,10 @@ class SctermPCM extends SctermPCMBase {
       if (this.started && this.count === 0) this.underruns++;
       return;
     }
+    if (this.ratio !== 1) {
+      this.resample(left, right);
+      return;
+    }
 
     for (let i = 0; i < frames; i++) {
       if (this.count === 0) {
@@ -93,6 +105,31 @@ class SctermPCM extends SctermPCMBase {
       right[i] = this.buf[r + 1];
       this.read = (this.read + 1) % this.max;
       this.count--;
+    }
+  }
+
+  // resample plays the stream at `ratio` stream frames per output frame, each
+  // output frame a straight line between the two stream frames it falls
+  // between. It needs both, so the last frame waits for the next burst.
+  resample(left, right) {
+    for (let i = 0; i < left.length; i++) {
+      while (this.frac >= 1 && this.count > 1) {
+        this.frac -= 1;
+        this.read = (this.read + 1) % this.max;
+        this.count--;
+      }
+      if (this.count < 2) {
+        this.underruns++;
+        left[i] = 0;
+        right[i] = 0;
+        continue;
+      }
+      const a = this.read * 2;
+      const b = ((this.read + 1) % this.max) * 2;
+      const f = this.frac;
+      left[i] = this.buf[a] + (this.buf[b] - this.buf[a]) * f;
+      right[i] = this.buf[a + 1] + (this.buf[b + 1] - this.buf[a + 1]) * f;
+      this.frac += this.ratio;
     }
   }
 

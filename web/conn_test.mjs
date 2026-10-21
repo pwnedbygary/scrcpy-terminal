@@ -243,8 +243,12 @@ console.log("markup");
   const rule = /#conn \{([^}]*)\}/.exec(css);
   check("the card takes no pointer events", rule !== null && /pointer-events: none/.test(rule[1]), true);
   check("its button does", /#conn-retry \{[^}]*pointer-events: auto/.test(css), true);
-  check("the motion respects prefers-reduced-motion",
-    /@media \(prefers-reduced-motion: reduce\) \{[^}]*#conn[^}]*transition: none/.test(css), true);
+  // A rule in the reduced-motion block that turns transitions off for the
+  // card, by name or for every element.
+  const reduced = /@media \(prefers-reduced-motion: reduce\) \{([^]*?)\n\}/.exec(css);
+  const still = (sel) => !!reduced && [...reduced[1].matchAll(/([^{}]+)\{([^}]*)\}/g)].some(([, sels, body]) =>
+    /transition: none/.test(body) && sels.split(",").map((s) => s.trim()).some((s) => s === "*" || s === sel));
+  check("the motion respects prefers-reduced-motion", still("#conn"), true);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

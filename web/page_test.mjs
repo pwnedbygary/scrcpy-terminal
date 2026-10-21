@@ -24,14 +24,21 @@ function check(name, got, want) {
 
 const E = {};
 const docListeners = {};
+// modality is what the last input was, "keyboard" or "pointer": a focused
+// element matches :focus-visible after a key, as in a browser.
 const doc = {
-  title: "scterm", hidden: false, activeElement: null,
+  title: "scterm", hidden: false, activeElement: null, modality: "pointer",
   getElementById: (id) => E[id] || null,
   querySelectorAll: () => [],
   addEventListener(t, fn) { (docListeners[t] ||= []).push(fn); },
   createElement: (tag) => el("", tag),
   body: { tagName: "BODY", appendChild() {} },
+  // The Fullscreen API, as a browser that has it: a request fills the screen
+  // with the element, and fullscreenchange follows.
+  fullscreenEnabled: true, fullscreenElement: null, fullscreenRequests: [],
+  exitFullscreen() { doc.fullscreenElement = null; fireDoc("fullscreenchange"); return Promise.resolve(); },
 };
+const fireDoc = (t, ev) => (docListeners[t] || []).forEach((fn) => fn(ev || {}));
 
 // inside tells whether x is box or sits in it, and inertOf whether x or
 // anything it sits in is inert.
@@ -69,6 +76,15 @@ function el(id, tag) {
     setPointerCapture() {},
     focus() { if (!inertOf(e)) doc.activeElement = e; },
     blur() { if (doc.activeElement === e) doc.activeElement = null; },
+    removeAttribute(k) { delete e.attrs[k]; },
+    contains: (x) => inside(x, e),
+    // hovered stands for the mouse resting on the element or in it.
+    hovered: false, scrollWidth: 0, clientWidth: 0, scrollLeft: 0,
+    matches(sel) {
+      if (sel === ":focus-visible") return doc.activeElement === e && doc.modality === "keyboard";
+      if (sel === ":hover") return e.hovered;
+      throw new Error("the stand-in DOM cannot match " + sel);
+    },
   };
   Object.defineProperty(e, "textContent", {
     get: () => text,
@@ -123,6 +139,14 @@ class FakeWS {
 }
 FakeWS.all = [];
 FakeWS.CONNECTING = 0; FakeWS.OPEN = 1; FakeWS.CLOSING = 2; FakeWS.CLOSED = 3;
+
+doc.documentElement = el("", "html");
+doc.documentElement.requestFullscreen = (opts) => {
+  doc.fullscreenRequests.push(opts);
+  doc.fullscreenElement = doc.documentElement;
+  fireDoc("fullscreenchange");
+  return Promise.resolve();
+};
 
 const ctx = {
   document: doc,
@@ -184,6 +208,7 @@ const keydown = (key, target) => {
     prevented: false, preventDefault() { this.prevented = true; },
     getModifierState: () => false,
   };
+  doc.modality = "keyboard";
   (winListeners.keydown || []).forEach((fn) => fn(ev));
   return ev;
 };
@@ -342,6 +367,7 @@ const key = (o) => {
     prevented: false, preventDefault() { this.prevented = true; },
     getModifierState: () => false,
   }, o);
+  doc.modality = "keyboard";
   (winListeners[ev.type] || []).forEach((fn) => fn(ev));
   return ev;
 };
@@ -379,7 +405,8 @@ const BAR = [
 
 console.log("the action bar");
 const kids = E.bar.children;
-const buttons = kids.filter((c) => c.tagName === "BUTTON");
+// The catalog's buttons; Full screen, the page's own, follows them.
+const buttons = kids.filter((c) => c.tagName === "BUTTON" && c.dataset.act);
 // A control the page did not build is a blank element, so its checks fail
 // rather than stop the suite.
 const button = (id) => buttons.find((b) => b.dataset.act === id) || el("", "button");
@@ -397,9 +424,9 @@ check("Mute says whose mute it is", button("mute").title, "Mute device (F7)");
 check("the keyframe button says what it does", [button("resetvideo").textContent, button("resetvideo").title],
   ["Redraw", "Refresh video (Alt+K)"]);
 check("the buttons submit nothing", buttons.every((b) => b.type === "button"), true);
-check("a separator stands before Vol+, Rot and Power, and nowhere else",
-  kids.flatMap((c, i) => (c.className === "bar-sep" ? [(kids[i + 1] || { dataset: {} }).dataset.act] : [])),
-  ["volup", "rotate", "power"]);
+check("a separator stands before Vol+, Rot, Power and Full screen, and nowhere else",
+  kids.flatMap((c, i) => (c.className === "bar-sep" ? [(kids[i + 1] || { dataset: {} }).dataset.act || (kids[i + 1] || {}).textContent] : [])),
+  ["volup", "rotate", "power", "Full screen"]);
 
 console.log("the controls sheet");
 const html = servedIndex();
@@ -508,10 +535,22 @@ check("with the focus on the page like that, Esc still gives it back to ☰", [i
   [false, true]);
 
 console.log("closing the sheet once the chrome has had time to fade");
-// fade is 2.5 s with no input: the chrome (the HUD, the bar and ☰) fades out
-// and turns inert. poke is the pointer moving again, which brings it back.
+// fade is 2.5 s with no input: the chrome (the HUD and the bar) fades out and
+// the bar turns inert. poke is the pointer moving again, which brings it back.
 const fade = () => due(2500);
 const poke = () => (winListeners.pointermove || []).forEach((fn) => fn({}));
+// pointer dispatches a pointer event as a browser does: at its target, then
+// on the window, where the page listens in the bubble phase.
+const pointer = (type, target, o) => {
+  const ev = Object.assign({ type, target, pointerId: 9, pointerType: "mouse", button: 0, clientX: 5, clientY: 5,
+    preventDefault() {} }, o);
+  if (type === "pointerdown") doc.modality = "pointer";
+  target.fire(type, ev);
+  (winListeners[type] || []).forEach((fn) => fn(ev));
+  return ev;
+};
+// click is a mouse press and release on the picture, a tap to the device.
+const click = (o) => { pointer("pointerdown", E.screen, o); pointer("pointerup", E.screen, o); };
 // focusOn names what has the focus: an id, a bar button or row by its action,
 // or the page.
 const focusOn = () => {
@@ -538,9 +577,18 @@ barSheet.fire("click");
 fade();
 key({ key: "Escape", code: "Escape", target: doc.activeElement });
 check("and to the bar's Controls button, when that opened it", [isOpen(), focusOn()], [false, "bar:toolbar"]);
+check("which is shown again, with the HUD, now that the sheet is shut",
+  [E.bar.classList.contains("idle"), E.bar.inert, E.hud.classList.contains("idle")], [false, false, false]);
 fade();
-check("once the sheet is shut, the chrome fades out after 2.5 s as before",
-  [E.hud.classList.contains("idle"), E.bar.inert, menuBtn.inert], [true, true, true]);
+check("2.5 s on, it still has the keyboard focus: the chrome stays, as fading would make the bar inert " +
+  "and drop the focus to the page", [E.hud.classList.contains("idle"), E.bar.inert, focusOn()], [false, false, "bar:toolbar"]);
+fade();
+check("for as long as it has it", [E.hud.classList.contains("idle"), focusOn()], [false, "bar:toolbar"]);
+click();
+check("a press on the picture is for the device, and takes the focus off the page's buttons", focusOn(), null);
+fade();
+check("then the chrome fades out after 2.5 s as before, the bar inert; ☰ stays, never inert",
+  [E.hud.classList.contains("idle"), E.bar.classList.contains("idle"), E.bar.inert, menuBtn.inert], [true, true, true, false]);
 poke();
 check("and comes back when the pointer moves", [E.hud.classList.contains("idle"), E.bar.inert, menuBtn.inert],
   [false, false, false]);
@@ -648,9 +696,10 @@ menuBtn.fire("click");
 quitRow.fire("click");
 key({ key: "Escape", code: "Escape", target: quitRow });
 check("closing the sheet drops the ask", [labelOf(quitRow), quitRow.classList.contains("armed")], ["Quit", false]);
-// next is the sheet's control after the Quit row (dir 1) or before it (-1).
+// next is the sheet's control after the Quit row (dir 1) or before it (-1):
+// the rows, then Full screen and Close.
 const next = (dir) => {
-  const list = rows.concat([closeBtn]);
+  const list = rows.concat([E["sheet-full"], closeBtn]);
   return list[(list.indexOf(quitRow) + dir + list.length) % list.length];
 };
 for (const [shiftKey, name] of [[false, "Tab"], [true, "Shift+Tab"]]) {
@@ -675,8 +724,8 @@ check("so a press after a Tab away and back asks again rather than quitting",
 key({ key: "Escape", code: "Escape", target: quitRow });
 const css = read("player.css");
 const armedRule = css.indexOf("#bar button.armed, .sheet-row.armed {");
-check("an asking Quit keeps its colour under the pointer: its rule follows the hover and press rules",
-  armedRule > 0 && ["#bar button:hover", "#bar button:active", ".sheet-row:hover", ".sheet-row:active"]
+check("an asking Quit keeps its colour under the pointer: its rule follows the buttons' hover and press rules",
+  armedRule > 0 && ["button:hover", "button:active"]
     .every((s) => css.indexOf(s) >= 0 && css.indexOf(s) < armedRule), true);
 
 console.log("any other press drops the ask, as in the terminal");
@@ -857,6 +906,346 @@ ev = key({ key: "Enter", code: "Enter", repeat: true, target: doc.activeElement 
 check("an Enter still held when the session ends does not press Reconnect, which now has the focus, with its repeats",
   [doc.activeElement === E["conn-retry"], ev.prevented], [true, true]);
 key({ type: "keyup", key: "Enter", code: "Enter", target: doc.activeElement });
+
+console.log("once the session has ended, what still works");
+// The session has just ended, with the focus on Reconnect. Only what needs no
+// device still runs, from its chord as from its button: the controls sheet,
+// and a screenshot of the last frame.
+let blobs = E.screen.blobs || 0;
+ev = key({ key: "/", code: "Slash", altKey: true, target: doc.activeElement });
+check("Alt+/ opens the controls sheet, as ☰ does", [ev.prevented, isOpen()], [true, true]);
+ev = key({ key: "/", code: "Slash", altKey: true, repeat: true, target: doc.activeElement });
+check("its auto-repeat does not close it again", [ev.prevented, isOpen()], [true, true]);
+key({ key: "/", code: "Slash", altKey: true, target: doc.activeElement });
+check("a second press does", isOpen(), false);
+ev = key({ key: "s", code: "KeyS", altKey: true, target: doc.activeElement });
+key({ key: "s", code: "KeyS", altKey: true, repeat: true, target: doc.activeElement });
+check("Alt+S saves the last frame, as the Shot button does, once while it is held",
+  [ev.prevented, (E.screen.blobs || 0) - blobs], [true, 1]);
+const gainThen = player("pcm.localGain");
+const leftAlone = [{ key: "m", code: "KeyM", altKey: true }, { key: "h", code: "KeyH", altKey: true },
+  { key: "g", code: "KeyG", altKey: true }, { key: "F5", code: "F5" }, { key: "F1", code: "F1" }]
+  .map((k) => key(Object.assign({ target: doc.activeElement }, k)).prevented);
+check("Alt+M, the device's chords and the F-keys stay the browser's: no sound or device is left, and F5 reloads",
+  [leftAlone, player("pcm.localGain") === gainThen, player("input.grab")], [[false, false, false, false, false], true, false]);
+const pasteEv = { clipboardData: { getData: () => "after the end" }, prevented: false, preventDefault() { this.prevented = true; } };
+let toastWrites = E.toast.writes;
+(docListeners.paste || []).forEach((fn) => fn(pasteEv));
+check("a paste is the browser's too: nothing is pasted, and no toast says it was",
+  [pasteEv.prevented, E.toast.writes - toastWrites, E.toast.textContent === "pasted 13 chars"], [false, 0, false]);
+const homeBtn = button("home");
+homeBtn.classList.remove("done");
+homeBtn.fire("click");
+check("a device button says the session has ended, and does not flash as if it ran",
+  [E.toast.textContent, homeBtn.classList.contains("done")], ["the session has ended", false]);
+E.toast.textContent = "";
+quit.fire("click");
+check("Quit does not ask for a second press: there is nothing left to quit",
+  [quit.textContent, quit.classList.contains("armed"), E.toast.textContent], ["Quit", false, "the session has ended"]);
+menuBtn.fire("click");
+E.toast.textContent = "";
+row("back").fire("click");
+check("a row closes the sheet and says so too", [isOpen(), E.toast.textContent], [false, "the session has ended"]);
+blobs = E.screen.blobs || 0;
+button("screenshot").fire("click");
+check("while Shot still saves the last frame, and flashes", [(E.screen.blobs || 0) - blobs,
+  button("screenshot").classList.contains("done")], [1, true]);
+
+E["conn-retry"].fire("click");
+w = ws();
+open(w);
+say(w, { op: "hello", device: "Pixel 7" });
+frame(w, 1, 1);
+const now2 = () => w.sent.map((m) => m.op);
+
+console.log("a held chord runs the page's own actions once");
+// held presses a key, holds it for `repeats` auto-repeats, and lets it go.
+const held = (k, repeats) => {
+  for (let i = 0; i <= repeats; i++) key(Object.assign({ target: doc.body, repeat: i > 0 }, k));
+  key(Object.assign({ type: "keyup", target: doc.body }, k));
+};
+doc.activeElement = doc.body;
+held({ key: "g", code: "KeyG", altKey: true }, 3);
+check("Alt+G held down: grab is on, not flipped again by each repeat", player("input.grab"), true);
+held({ key: "F12", code: "F12" }, 4);
+check("F12 held down: off again, once", player("input.grab"), false);
+held({ key: "i", code: "KeyI", altKey: true }, 3);
+check("Alt+I held down: the phone keyboard is on", player("input.softKeys"), true);
+held({ key: "i", code: "KeyI", altKey: true }, 0);
+doc.activeElement = doc.body;
+held({ key: "/", code: "Slash", altKey: true }, 3);
+check("Alt+/ held down: the sheet is open", isOpen(), true);
+key({ key: "Escape", code: "Escape", target: doc.activeElement });
+doc.activeElement = doc.body;
+held({ key: "m", code: "KeyM", altKey: true }, 3);
+check("Alt+M held down: this browser is muted", player("pcm.localGain"), 0);
+held({ key: "m", code: "KeyM", altKey: true }, 0);
+check("and a press unmutes it", player("pcm.localGain"), 1);
+blobs = E.screen.blobs || 0;
+held({ key: "s", code: "KeyS", altKey: true }, 3);
+check("Alt+S held down: one screenshot", (E.screen.blobs || 0) - blobs, 1);
+n = w.sent.length;
+held({ key: "u", code: "KeyU", altKey: true }, 2);
+held({ key: "F6", code: "F6" }, 1);
+check("while a device action's chord repeats, as a key held on the device would",
+  now2().slice(n), ["volup", "volup", "volup", "volup", "volup"]);
+
+console.log("the bar behind the sheet");
+const barState = () => [E.bar.classList.contains("idle"), E.bar.inert];
+poke();
+pointer("pointerdown", menuBtn);
+menuBtn.fire("click");
+poke();
+const byClick = barState();
+key({ key: "Escape", code: "Escape", target: doc.activeElement });
+key({ key: "/", code: "Slash", altKey: true, target: doc.body });
+const byKey = barState();
+check("the bar is hidden behind the sheet, the same whether a click or a key opened it, and can still take " +
+  "the focus back", [byClick, byKey], [[true, false], [true, false]]);
+key({ key: "Escape", code: "Escape", target: doc.activeElement });
+check("and is back when it closes", barState(), [false, false]);
+
+console.log("touch");
+// chromeShown says whether the HUD and the bar show, and whether the bar is inert.
+const chromeShown = () => [!E.hud.classList.contains("idle"), !E.bar.classList.contains("idle"), E.bar.inert];
+const barBtn = E["bar-btn"] || el("", "button");
+const touchAt = (type, target, x = 50, y = 50) =>
+  pointer(type, target, { pointerType: "touch", pointerId: 21, clientX: x, clientY: y });
+click();
+fade();
+check("with a mouse, the chrome fades as before, and ⋯ is not shown", [chromeShown(), barBtn.hidden], [[false, false, true], true]);
+n = w.sent.length;
+touchAt("pointerdown", E.screen);
+touchAt("pointermove", E.screen, 90, 70);
+touchAt("pointerup", E.screen, 90, 70);
+check("a finger's drag on the picture goes to the device", now2().slice(n), ["down", "up"]);
+check("and does not bring the bar up over the picture, where it would take the next tap", chromeShown(),
+  [false, false, true]);
+touchAt("pointerdown", E.screen);
+touchAt("pointerup", E.screen);
+check("nor does a tap", chromeShown(), [false, false, true]);
+check("a touch shows ⋯ instead, beside ☰", barBtn.hidden, false);
+barBtn.fire("click");
+check("⋯ brings the chrome up, and says it is expanded", [chromeShown(), barBtn.getAttribute("aria-expanded")],
+  [[true, true, false], "true"]);
+fade();
+fade();
+check("and it stays: no timer puts it away under a finger", chromeShown(), [true, true, false]);
+n = w.sent.length;
+touchAt("pointerdown", button("home"));
+button("home").fire("click");
+touchAt("pointerup", button("home"));
+check("a finger on one of its buttons runs it, and the bar stays", [now2().slice(n), chromeShown()],
+  [["home"], [true, true, false]]);
+touchAt("pointerdown", E.screen);
+touchAt("pointerup", E.screen);
+check("a finger on the picture puts it away", [chromeShown(), barBtn.getAttribute("aria-expanded")],
+  [[false, false, true], "false"]);
+barBtn.fire("click");
+barBtn.fire("click");
+check("as does ⋯ again", [chromeShown(), barBtn.getAttribute("aria-expanded")], [[false, false, true], "false"]);
+key({ key: "a", code: "KeyA", target: doc.body });
+E.bar.hovered = true;
+fade();
+check("a key still shows the chrome, which fades; a finger's :hover left on the bar does not hold it",
+  chromeShown(), [false, false, true]);
+E.bar.hovered = false;
+poke();
+check("a mouse takes over: ⋯ goes, and the chrome comes up as before", [barBtn.hidden, chromeShown()],
+  [true, [true, true, false]]);
+
+console.log("a mouse resting on the bar");
+E.bar.hovered = true;
+fade();
+fade();
+check("while the mouse rests on the bar, it does not fade", chromeShown(), [true, true, false]);
+E.bar.hovered = false;
+fade();
+check("once it is off the bar, it does", chromeShown(), [false, false, true]);
+poke();
+E.bar.scrollWidth = 1000;
+E.bar.clientWidth = 400;
+E.bar.scrollLeft = 0;
+const wheelOnBar = (o) => {
+  const e = Object.assign({ deltaX: 0, deltaY: 0, deltaMode: 0, prevented: false, preventDefault() { this.prevented = true; } }, o);
+  E.bar.fire("wheel", e);
+  return e;
+};
+let we = wheelOnBar({ deltaY: 120 });
+check("a wheel turned over a bar that does not fit scrolls it sideways", [E.bar.scrollLeft, we.prevented], [120, true]);
+wheelOnBar({ deltaY: 3, deltaMode: 1 });
+check("a line of the wheel is 16 px of it", E.bar.scrollLeft, 168);
+we = wheelOnBar({ deltaX: 40, deltaY: 10 });
+check("a sideways scroll is left to the browser", [E.bar.scrollLeft, we.prevented], [168, false]);
+E.bar.scrollWidth = 400;
+we = wheelOnBar({ deltaY: 120 });
+check("and a bar that fits does not move", [E.bar.scrollLeft, we.prevented], [168, false]);
+
+console.log("full screen");
+const fullBar = E.bar.children[E.bar.children.length - 1] || el("", "button");
+const fullSheet = E["sheet-full"] || el("", "button");
+check("the bar ends with Full screen, this browser's own, named by its text",
+  [fullBar.tagName, fullBar.type, fullBar.textContent, fullBar.getAttribute("aria-label"), fullBar.dataset.act],
+  ["BUTTON", "button", "Full screen", null, undefined]);
+check("a toggle that says it is off, as is the sheet's", [fullBar.getAttribute("aria-pressed"), fullSheet.hidden,
+  fullSheet.getAttribute("aria-pressed"), fullBar.title], ["false", false, "false", "Full screen"]);
+fullBar.fire("click");
+await flush();
+check("a press fills the screen with the whole page, without the browser's navigation bar",
+  [doc.fullscreenElement === doc.documentElement, doc.fullscreenRequests], [true, [{ navigationUI: "hide" }]]);
+check("and both buttons say so", [fullBar.getAttribute("aria-pressed"), fullSheet.getAttribute("aria-pressed"), fullBar.title],
+  ["true", "true", "Leave full screen (Esc)"]);
+fullBar.fire("click");
+await flush();
+check("a second press leaves it", [doc.fullscreenElement, fullBar.getAttribute("aria-pressed")], [null, "false"]);
+fullBar.fire("click");
+doc.fullscreenElement = null;
+fireDoc("fullscreenchange");
+check("and when the browser leaves it (Esc), the buttons follow",
+  [fullBar.getAttribute("aria-pressed"), fullSheet.getAttribute("aria-pressed")], ["false", "false"]);
+menuBtn.fire("click");
+closeBtn.focus();
+key({ key: "Tab", code: "Tab", shiftKey: true, target: closeBtn });
+check("in the sheet, Tab reaches it, just before Close", doc.activeElement === fullSheet, true);
+fullSheet.fire("click");
+await flush();
+check("where it closes the sheet and fills the screen", [isOpen(), doc.fullscreenElement === doc.documentElement],
+  [false, true]);
+doc.exitFullscreen();
+doc.documentElement.requestFullscreen = () => Promise.reject(new Error("denied"));
+fullBar.fire("click");
+await flush();
+check("a browser that refuses says so in a toast", E.toast.textContent, "full screen is not available here");
+
+console.log("the canvas fits the layout viewport");
+// A phone zooms a page that can be zoomed out to show whatever overflows it,
+// and its innerWidth and innerHeight grow with that; the window the picture
+// is in is still the layout viewport.
+doc.documentElement.clientWidth = 390;
+doc.documentElement.clientHeight = 844;
+Object.assign(ctx.window, { innerWidth: 1052, innerHeight: 2277 });
+E.screen.width = 1080;
+E.screen.height = 2400;
+(winListeners.resize || []).forEach((fn) => fn({}));
+check("a 1080x2400 picture in a 390x844 window is 380x844, however far innerWidth has grown",
+  [E.screen.style.width, E.screen.style.height], ["380px", "844px"]);
+n = w.sent.length;
+due(120);
+check("and the server is told the window's size, not the overflow's", w.sent.slice(n).filter((m) => m.op === "resize")
+  .map((m) => [m.w, m.h]), [[390, 844]]);
+// A notch and a home indicator: player.css offsets the canvas by the safe
+// area, and the picture fits what is left.
+ctx.getComputedStyle = (e) => (e === E.screen ? { top: "47px", right: "0px", bottom: "34px", left: "0px" } : {});
+(winListeners.resize || []).forEach((fn) => fn({}));
+delete ctx.getComputedStyle;
+check("under a notch, it fits what the safe area leaves: 390x763, so 343x763",
+  [E.screen.style.width, E.screen.style.height], ["343px", "763px"]);
+
+console.log("the page's head, and its looks");
+const head = (/<head>([^]*?)<\/head>/.exec(html) || ["", ""])[1];
+const viewportMeta = (/<meta name="viewport" content="([^"]*)">/.exec(head) || ["", ""])[1];
+check("the page can be zoomed: the viewport has no user-scalable=no or maximum-scale",
+  /user-scalable\s*=\s*no|maximum-scale/.test(viewportMeta), false);
+check("and runs under a notch or a home indicator (viewport-fit=cover)", /viewport-fit=cover/.test(viewportMeta), true);
+const plain = css.replace(/\/\*[^]*?\*\//g, "");
+const rules = [...plain.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map(([, sel, body]) => ({ sel: sel.trim(), body }));
+const rule = (sel) => (rules.find((r) => r.sel === sel) || { body: "" }).body;
+check("every touch on the picture is still the page's, for the device, so zooming starts only off it",
+  /touch-action: none/.test(rule("#screen")), true);
+check("and the canvas cannot overflow the window before its first fit, or the page would be zoomed out",
+  [/max-width: 100%/.test(rule("#screen")), /max-height: 100%/.test(rule("#screen"))], [true, true]);
+check("dark: a color-scheme meta, and color-scheme in :root",
+  [/<meta name="color-scheme" content="dark">/.test(head), /color-scheme: dark/.test(rule(":root"))], [true, true]);
+const icon = /<link rel="icon" href="([^"]*)">/.exec(head);
+const svg = icon ? decodeURIComponent(icon[1].replace(/^data:image\/svg\+xml,/, "")) : "";
+const csp = /Content-Security-Policy",[^]*?img-src ([^;"]*)/.exec(readFileSync(new URL("../web.go", import.meta.url), "utf8"));
+check("a favicon in the page itself, an SVG data: URL that the server's CSP allows, so no /favicon.ico is asked for",
+  [!!icon && icon[1].startsWith("data:image/svg+xml,"), /^<svg xmlns='http:\/\/www\.w3\.org\/2000\/svg'[^>]*>[^]*<\/svg>$/.test(svg),
+    !!csp && /\bdata:/.test(csp[1])], [true, true, true]);
+const tokens = [...rule(":root").matchAll(/--([\w-]+):/g)].map((m) => m[1]);
+check("colours, radii, spacing and type are custom properties in :root",
+  ["fg", "fg-dim", "panel", "btn", "radius", "gap", "edge", "font", "text", "text-s"].filter((t) => !tokens.includes(t)), []);
+check("one style for every button", /appearance: none/.test(rule("button")) && /background: var\(--btn-bg/.test(rule("button")) &&
+  /border: 1px solid var\(--btn-line/.test(rule("button")) && /cursor: pointer/.test(rule("button")), true);
+check("which no button's own rule overrides with a background or a border (they set --btn-bg and --btn-line), " +
+  "so hovering and pressing show on all of them",
+  rules.filter((r) => /#menu-btn|#bar-btn|#sound-chip|#sheet-close|#sheet-full|#conn-retry|\.sheet-row|#bar button/.test(r.sel) &&
+    !/\.(armed|done)\b/.test(r.sel) && /(^|[;{\s])(background|border|border-color):/.test(r.body)).map((r) => r.sel), []);
+check("every button shows the keyboard focus", /outline: 2px solid/.test(rule("button:focus-visible")), true);
+const reducedBlock = (/@media \(prefers-reduced-motion: reduce\) \{([^]*?)\n\}/.exec(plain) || ["", ""])[1];
+check("reduced motion turns off every transition and animation, not just a few",
+  /\*, \*::before, \*::after \{[^}]*transition: none !important;[^}]*animation: none !important;/.test(reducedBlock), true);
+check("no rules for what never happens: a faded ☰, a grabbed canvas", [css.includes("#menu-btn.idle"), css.includes(".grabbed")],
+  [false, false]);
+// The sides of the window each of them sits against, and so must keep clear of.
+const sides = { "#bar": "rbl", "#hud": "rbl", "#menu-btn, #bar-btn": "t", "#menu-btn": "l", "#bar-btn": "l", "#sound": "tr",
+  "#toast": "trl", "#conn": "rl", "#sheet": "trbl", "#screen": "trbl" };
+check("the bar, the HUD, ☰ and ⋯, the sound chip, the toast, the status card, the sheet and the picture keep clear of a notch " +
+  "and a home indicator, on every side they sit against",
+  Object.entries(sides).flatMap(([sel, s]) => [...s].filter((x) => !rule(sel).includes(`var(--safe-${x})`)).map((x) => sel + " " + x)), []);
+check("the bar is one row that scrolls sideways, rather than rows that wrap",
+  [/flex-wrap: wrap/.test(rule("#bar")), /overflow-x: auto/.test(rule("#bar"))], [false, true]);
+check("only its buttons take pointer events, so a tap between them reaches the picture",
+  [/pointer-events: none/.test(rule("#bar")), /pointer-events: auto/.test(rule("#bar button"))], [true, true]);
+check("a finger gets buttons 44 CSS px or more each way", /--tap: 44px/.test((/@media \(pointer: coarse\) \{([^]*?)\n\}/.exec(plain) || ["", ""])[1]) &&
+  /min-width: var\(--tap\)/.test(rule("button")) && /min-height: var\(--tap\)/.test(rule("button")), true);
+const narrow = (/@media \(max-width: (\d+)px\) \{([^]*?)\n\}/.exec(plain) || ["", "0", ""]);
+check("on a narrow window the toast shows below ☰, ⋯ and the sound chip, not over them",
+  Number(narrow[1]) >= 700 && /#toast \{[^}]*top: calc\([^;]*var\(--ctl\)/.test(narrow[2]), true);
+const short = (/@media \(max-height: (\d+)px\) \{([^]*?)\n\}/.exec(plain) || ["", "0", ""]);
+check("a short window gets denser rows in the sheet", Number(short[1]) >= 736 && /\.sheet-row \{[^}]*padding: 3px/.test(short[2]), true);
+
+// contrast is WCAG 2's contrast ratio of a text colour on a background,
+// both over a white picture: the background's alpha lets the white through.
+// var() comes from :root (or the rule's own custom properties), and a
+// gradient counts as its most transparent stop, where some text sits.
+const vars = Object.fromEntries([...rule(":root").matchAll(/--([\w-]+):\s*([^;]+);/g)].map(([, k, v]) => [k, v.trim()]));
+const resolve = (v, own = {}) => v.replace(/var\(--([\w-]+)(?:,\s*([^()]*(?:\([^()]*\))?))?\)/g,
+  (_, k, dflt) => resolve(own[k] || vars[k] || dflt || "", own));
+const ownVars = (sel) => Object.fromEntries([...rule(sel).matchAll(/--([\w-]+):\s*([^;]+);/g)].map(([, k, v]) => [k, v.trim()]));
+const decl = (sel, prop) => {
+  const m = new RegExp("(?:^|[;\\s])" + prop + ":\\s*([^;]+);").exec(rule(sel));
+  return m ? resolve(m[1].trim(), ownVars(sel)) : "";
+};
+const colours = (v) => [...v.matchAll(/#[0-9a-f]{6}\b|#[0-9a-f]{3}\b|rgba?\([^)]*\)/gi)].map(([c]) => {
+  if (c[0] === "#") {
+    const h = c.length === 4 ? c.slice(1).split("").map((x) => x + x).join("") : c.slice(1);
+    return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)).concat([1]);
+  }
+  const p = c.replace(/rgba?\(|\)/g, "").split(",").map(Number);
+  return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1];
+});
+const onWhite = (c) => c.slice(0, 3).map((x) => x * c[3] + 255 * (1 - c[3]));
+const lin = (x) => { x /= 255; return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
+const lum = (rgb) => 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
+const contrast = (fg, bgSel) => {
+  const bgs = colours(decl(bgSel, "--btn-bg") || decl(bgSel, "background"));
+  if (!bgs.length) return 1;
+  const bg = onWhite(bgs.reduce((a, b) => (b[3] < a[3] ? b : a)));
+  const text = colours(fg)[0];
+  if (!text) return 1;
+  const t = onWhite(text).map((x, i) => x * text[3] + bg[i] * (1 - text[3]));
+  const [hi, lo] = [lum(t), lum(bg)].sort((a, b) => b - a);
+  return (hi + 0.05) / (lo + 0.05);
+};
+const pageText = decl("html, body", "color");
+const pairs = [
+  ["the HUD's readouts", pageText, "#hud"], ["its help row", decl("#hud .row.help", "color"), "#hud"],
+  ["its separators", decl("#hud .sep", "color"), "#hud"], ["its state, ok", decl("#state.ok", "color"), "#hud"],
+  ["warning", decl("#state.warn", "color"), "#hud"], ["and bad", decl("#state.bad", "color"), "#hud"],
+  ["the toast", decl("#toast", "color"), "#toast"], ["the status card", pageText, "#conn"],
+  ["its detail", decl("#conn-detail", "color"), "#conn"], ["the sound chip", pageText, "#sound-chip"],
+  ["☰ and ⋯", pageText, "#menu-btn, #bar-btn"],
+];
+check("text over the picture reads at 4.5:1 or better, even over a white picture",
+  pairs.filter(([, fg, bg]) => !(contrast(fg, bg) >= 4.5)).map(([name, fg, bg]) => name + " " + contrast(fg, bg).toFixed(2)), []);
+
+console.log("a paste while the connection is lost");
+close(w);
+const lostPaste = { clipboardData: { getData: () => "lost" }, prevented: false, preventDefault() { this.prevented = true; } };
+(docListeners.paste || []).forEach((fn) => fn(lostPaste));
+check("the page still takes it, as the session goes on, but says it was not pasted",
+  [lostPaste.prevented, E.toast.textContent], [true, "not connected: nothing pasted"]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
