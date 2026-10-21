@@ -62,12 +62,14 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
+                android:accessibilityLiveRegion="polite"
                 android:gravity="center"
                 android:maxWidth="320dp"
                 android:textColor="#FFFFFFFF" />
 
             <Button
                 android:id="@+id/overlay_retry"
+                style="@style/Widget.ScTerm.Button.Primary"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
@@ -76,6 +78,7 @@
 
             <Button
                 android:id="@+id/overlay_close"
+                style="@style/Widget.ScTerm.Button.Secondary"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
@@ -83,15 +86,17 @@
                 android:visibility="gone" />
         </LinearLayout>
 
+        <!-- The background draws its pill in the bottom 24dp; the padding
+             centers the chevron on it. -->
         <ImageView
             android:id="@+id/controls_handle"
             android:layout_width="64dp"
-            android:layout_height="24dp"
+            android:layout_height="48dp"
             android:layout_gravity="bottom|center_horizontal"
             android:layout_marginBottom="6dp"
-            android:alpha="0.8"
             android:background="@drawable/controls_handle_background"
             android:contentDescription="@string/viewer_show_controls"
+            android:paddingTop="24dp"
             android:scaleType="center"
             android:src="@drawable/ic_chevron_up"
             android:visibility="gone" />
@@ -113,6 +118,6 @@
             android:layout_height="wrap_content"
             android:gravity="center_horizontal"
             android:orientation="horizontal"
-            android:padding="4dp" />
+            android:paddingHorizontal="4dp" />
     </HorizontalScrollView>
 </LinearLayout>

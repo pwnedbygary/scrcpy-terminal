@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Widget.ScTerm.Button.Primary: a 40dp button filled with the accent, inset
+     in the 48dp touch target. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:insetTop="4dp"
+    android:insetBottom="4dp">
+    <ripple android:color="#33000000">
+        <item>
+            <shape android:shape="rectangle">
+                <corners android:radius="10dp" />
+                <solid android:color="@color/button_primary_fill" />
+                <padding
+                    android:left="16dp"
+                    android:right="16dp" />
+            </shape>
+        </item>
+    </ripple>
+</inset>

@@ -97,3 +97,14 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlin.test.junit)
 }
+
+// ViewerBarTest holds the viewer's bar and its strings to the action catalog
+// shared with the Go client, at the repository root.
+val fixtures = layout.projectDirectory.dir("../../protocol/fixtures")
+val appStrings = layout.projectDirectory.file("src/main/res/values/strings.xml")
+tasks.withType<Test>().configureEach {
+    inputs.dir(fixtures).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(appStrings).withPathSensitivity(PathSensitivity.RELATIVE)
+    systemProperty("scterm.fixtures", fixtures.asFile.absolutePath)
+    systemProperty("scterm.strings", appStrings.asFile.absolutePath)
+}

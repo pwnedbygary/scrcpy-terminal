@@ -8,6 +8,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Typeface
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -89,6 +90,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var kickButton: Button
     private lateinit var inputButton: Button
     private lateinit var inputHelp: View
+    private lateinit var notificationsLine: TextView
     private lateinit var notificationsHelp: View
     private lateinit var networkHelp: View
     private var localNetworkDenied = false
@@ -99,7 +101,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var pageScroll: ScrollView
     private lateinit var peersList: LinearLayout
 
-    private data class PeerRowViews(val root: LinearLayout, val title: TextView, val detail: TextView, val status: TextView, val connect: Button)
+    private data class PeerRowViews(val root: LinearLayout, val title: TextView, val detail: TextView, val status: TextView, val connect: Button, val manage: Button)
     private val peerRows = mutableMapOf<String, PeerRowViews>()
 
     private var pendingAfterPermissions: (() -> Unit)? = null
@@ -166,6 +168,7 @@ class MainActivity : ComponentActivity() {
         nearbyPairing?.cancel()
         invitationDialog?.dismiss()
         requestDialog?.dismiss()
+        pairDialog?.dismiss()
         super.onDestroy()
     }
 
@@ -218,7 +221,7 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
-        column.addView(text(getString(R.string.app_name), 26f, Typeface.BOLD))
+        column.addView(text(getString(R.string.app_name), 26f, Typeface.BOLD).apply { ViewCompat.setAccessibilityHeading(this, true) })
         column.addView(text("Serve this device to paired peers, or control theirs.", 14f, color = R.color.muted).apply {
             setPadding(0, 0, 0, dp(16))
         })
@@ -252,15 +255,16 @@ class MainActivity : ComponentActivity() {
             }
         }
         serveStatus = text("", 14f)
-        serveButton = button(getString(R.string.serve_start)) { toggleServing() }
+        serveButton = button(getString(R.string.serve_start), primary = true) { toggleServing() }
         inviteButton = button(getString(R.string.serve_invite)) { showInviteDialog() }
         kickButton = button(getString(R.string.serve_kick)) { TargetService.disconnectAll(this) }
         inputButton = button(getString(R.string.serve_enable_input)) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         inputHelp = settingsHelp(text(getString(R.string.serve_input_restricted), 13f, color = R.color.muted), getString(R.string.open_app_info)) {
             openAppInfo()
         }
-        notificationsHelp = settingsHelp(text(getString(R.string.serve_notifications_blocked), 14f), getString(R.string.open_notification_settings)) {
-            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+        notificationsLine = text(getString(R.string.serve_notifications_blocked), 14f)
+        notificationsHelp = settingsHelp(notificationsLine, getString(R.string.open_notification_settings)) {
+            openSettings(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
         }
         helperCommand = text("", 12f).apply {
             typeface = Typeface.MONOSPACE
@@ -285,7 +289,8 @@ class MainActivity : ComponentActivity() {
             pageScroll = this
             addView(column)
             ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
-                val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+                val types = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime()
+                val bars = insets.getInsets(types)
                 view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
                 insets
             }
@@ -295,13 +300,18 @@ class MainActivity : ComponentActivity() {
     /** How the viewer shows its controls and statistics over a fullscreen (landscape) video. */
     private fun viewerSettings(): Array<View> {
         fun hideLabel(seconds: Int) = resources.getQuantityString(R.plurals.viewer_hide_after, seconds, seconds)
+        fun delayState(seconds: Int) = resources.getQuantityString(R.plurals.viewer_seconds, seconds, seconds)
         val hideAfter = text(hideLabel(app.viewerControlsHideSeconds), 14f)
         val seconds = SeekBar(this).apply {
             max = ScTermApp.MAX_CONTROLS_HIDE_SECONDS - 1
             progress = app.viewerControlsHideSeconds - 1
+            // Read out as a delay in seconds, not as a percentage of the bar.
+            contentDescription = getString(R.string.viewer_hide_delay)
+            ViewCompat.setStateDescription(this, delayState(app.viewerControlsHideSeconds))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
                     hideAfter.text = hideLabel(value + 1)
+                    ViewCompat.setStateDescription(bar, delayState(value + 1))
                     if (fromUser) app.viewerControlsHideSeconds = value + 1
                 }
 
@@ -367,15 +377,15 @@ class MainActivity : ComponentActivity() {
                 serveButton.isEnabled = true
             }
             is ServeState.Serving -> {
-                val address = Net.localAddresses().firstOrNull() ?: "this device"
+                val address = Net.localAddresses().firstOrNull() ?: getString(R.string.serve_this_device)
                 serveStatus.text = buildString {
-                    append(state.status).append('\n').append(getString(R.string.serve_listening, address, state.port))
+                    append(state.status).append('\n').append(getString(R.string.serve_listening, "$address:${state.port}"))
                     if (state.sessions.isEmpty()) {
                         append("\nNo one is connected.")
                     } else {
                         for (s in state.sessions) {
-                            append("\n• ").append(s.peerName).append(" (").append(s.address).append(") ")
-                            append(getString(if (s.holdsLease) R.string.serve_controlling else R.string.serve_viewing))
+                            val peer = "${s.peerName} (${s.address})"
+                            append("\n• ").append(getString(if (s.holdsLease) R.string.serve_controlling else R.string.serve_viewing, peer))
                         }
                     }
                     invitationExpiresAtMs?.let {
@@ -392,7 +402,17 @@ class MainActivity : ComponentActivity() {
                     // Android 13+ greys out the switch for apps installed from outside a store.
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) inputHelp.visibility = View.VISIBLE
                 }
-                if (TargetService.notificationsBlocked(this)) notificationsHelp.visibility = View.VISIBLE
+                val hidden = TargetService.hiddenNotifications(this)
+                if (hidden.serving || hidden.pairing) {
+                    notificationsLine.setText(
+                        when {
+                            !hidden.pairing -> R.string.serve_stop_notification_blocked
+                            !hidden.serving -> R.string.serve_pairing_notifications_blocked
+                            else -> R.string.serve_notifications_blocked
+                        },
+                    )
+                    notificationsHelp.visibility = View.VISIBLE
+                }
                 state.helperCommand?.takeIf { !state.ready }?.let {
                     helperCommand.text = it
                     helperShellCommand = state.helperShellCommand
@@ -457,15 +477,19 @@ class MainActivity : ComponentActivity() {
                 val status = text("", 14f).apply {
                     minHeight = dp(48)
                     gravity = Gravity.CENTER_VERTICAL
+                    setBackgroundResource(selectableBackground())
                     setOnClickListener { app.peers.find(peer.id)?.let(::showPeerStatus) }
                     isFocusable = true
                 }
-                val connect = button(getString(R.string.connect)) { app.peers.find(peer.id)?.let(::connect) }
-                PeerRowViews(column(title, status, detail, row(connect, button("Manage…") { app.peers.find(peer.id)?.let(::showManageDialog) })).apply {
+                val connect = button(getString(R.string.connect), primary = true) { app.peers.find(peer.id)?.let(::connect) }
+                val manage = button(getString(R.string.manage)) { app.peers.find(peer.id)?.let(::showManageDialog) }
+                PeerRowViews(column(title, status, detail, row(connect, manage)).apply {
                     setPadding(0, dp(8), 0, dp(8))
-                }, title, detail, status, connect)
+                }, title, detail, status, connect, manage)
             }
             views.title.text = peer.name
+            views.connect.contentDescription = getString(R.string.connect_to, peer.name)
+            views.manage.contentDescription = getString(R.string.manage_device, peer.name)
             views.detail.text = buildString {
                 append("Identity ").append(peer.id.short)
                 peer.target?.let { append("\nAddress ").append(it.host).append(':').append(it.port) }
@@ -996,7 +1020,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun openAppInfo() = startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()))
+    private fun openAppInfo() = openSettings(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()))
+
+    /** Some builds leave out a settings page. */
+    private fun openSettings(intent: Intent) {
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            toast(getString(R.string.settings_unavailable))
+        }
+    }
 
     // --------------------------------------------------------------- helpers
 
@@ -1030,7 +1063,13 @@ class MainActivity : ComponentActivity() {
         setPadding(0, dp(12), 0, dp(12))
     }
 
-    private fun sectionLabel(title: String) = text(title.uppercase(), 13f, Typeface.BOLD, R.color.accent)
+    /**
+     * A card's or dialog section's title, as a heading. uppercase() ignores the locale, where
+     * isAllCaps would follow it and show "THİS DEVİCE" on Turkish devices.
+     */
+    private fun sectionLabel(title: String) = text(title.uppercase(), 13f, Typeface.BOLD, R.color.accent).apply {
+        ViewCompat.setAccessibilityHeading(this, true)
+    }
 
     /** "see its screen, hear its audio and control it", or the same about "your" device. */
     private fun describeAccess(grants: Set<Grant>, theirs: Boolean): String {
@@ -1082,38 +1121,45 @@ class MainActivity : ComponentActivity() {
         setPadding(0, dp(2), 0, dp(2))
     }
 
-    private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
-        text = label
-        isAllCaps = false
-        setOnClickListener { onClick() }
-    }
+    /** [primary] for the main action of a card or row, filled with the accent; the others are outlined. */
+    private fun button(label: String, primary: Boolean = false, onClick: () -> Unit) =
+        Button(this, null, 0, if (primary) R.style.Widget_ScTerm_Button_Primary else R.style.Widget_ScTerm_Button_Secondary).apply {
+            text = label
+            isAllCaps = false
+            setOnClickListener { onClick() }
+        }
+
+    /** The theme's ripple, for something tappable that is not a button. */
+    private fun selectableBackground(): Int =
+        TypedValue().also { theme.resolveAttribute(android.R.attr.selectableItemBackground, it, true) }.resourceId
 
     private fun column(vararg views: View) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         views.forEach { addView(it) }
     }
 
+    /** Equal widths, 8dp apart; the gaps go only between the views that are not gone. */
     private fun row(vararg views: View) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
-        views.forEach {
-            addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
-        }
+        dividerDrawable = GradientDrawable().apply { setSize(dp(8), 0) }
+        showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
+        views.forEach { addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)) }
     }
 
     private fun card(title: String, vararg children: View) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setBackgroundColor(ContextCompat.getColor(context, R.color.card))
+        setBackgroundResource(R.drawable.card_background)
         setPadding(dp(16), dp(12), dp(16), dp(12))
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = dp(12)
         }
-        addView(text(title.uppercase(), 13f, Typeface.BOLD, R.color.accent))
+        addView(sectionLabel(title))
         children.forEach { addView(it) }
     }
 
     /** A line about something only system settings can change, with the button that opens them; hidden until needed. */
     private fun settingsHelp(line: TextView, label: String, open: () -> Unit) =
-        column(line, row(button(label, open))).apply { visibility = View.GONE }
+        column(line, row(button(label, onClick = open))).apply { visibility = View.GONE }
 
     private fun padded(view: View) = LinearLayout(this).apply {
         setPadding(dp(20), dp(8), dp(20), 0)

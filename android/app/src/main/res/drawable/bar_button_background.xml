@@ -1,18 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-<selector xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:state_pressed="true">
-        <shape android:shape="rectangle">
-            <corners android:radius="10dp" />
-            <solid android:color="#59FFFFFF" />
-        </shape>
-    </item>
-    <item>
-        <shape android:shape="rectangle">
-            <corners android:radius="10dp" />
-            <solid android:color="#26FFFFFF" />
-            <stroke
-                android:width="1dp"
-                android:color="#1FFFFFFF" />
-        </shape>
-    </item>
-</selector>
+<!-- A 40dp pill inset in the bar button's 48dp touch target. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:insetTop="4dp"
+    android:insetBottom="4dp">
+    <selector>
+        <item android:state_pressed="true">
+            <shape android:shape="rectangle">
+                <corners android:radius="10dp" />
+                <solid android:color="#59FFFFFF" />
+            </shape>
+        </item>
+        <item>
+            <shape android:shape="rectangle">
+                <corners android:radius="10dp" />
+                <solid android:color="#26FFFFFF" />
+                <stroke
+                    android:width="1dp"
+                    android:color="#1FFFFFFF" />
+            </shape>
+        </item>
+    </selector>
+</inset>

@@ -27,6 +27,9 @@
     <string name="edit_address">Edit address</string>
     <string name="edit_access">Change what it may do here</string>
     <string name="connect">Connect</string>
+    <string name="connect_to">Connect to %1$s</string>
+    <string name="manage">Manage…</string>
+    <string name="manage_device">Manage %1$s</string>
 
     <string name="grant_view">See the screen</string>
     <string name="grant_audio">Hear audio</string>
@@ -78,6 +81,35 @@
     <string name="viewer_show_controls">Show the controls</string>
     <string name="viewer_hide_controls">Hide the controls</string>
 
+    <!-- The viewer's action bar, named as in the action catalog every frontend
+         shares (protocol/fixtures/actions.json): _label is an action's label,
+         _short its short name. ViewerBarTest holds them to the catalog. -->
+    <string name="action_back_label">Back</string>
+    <string name="action_back_short">Back</string>
+    <string name="action_home_label">Home</string>
+    <string name="action_home_short">Home</string>
+    <string name="action_appswitch_label">Recents</string>
+    <string name="action_keyboard_label">Keyboard</string>
+    <string name="action_voldown_label">Volume down</string>
+    <string name="action_voldown_short">Vol-</string>
+    <string name="action_volup_label">Volume up</string>
+    <string name="action_volup_short">Vol+</string>
+    <string name="action_mute_label">Mute</string>
+    <string name="action_mute_short">Mute</string>
+    <string name="action_power_label">Power</string>
+    <string name="action_power_short">Power</string>
+    <string name="action_rotate_label">Rotate</string>
+    <string name="action_notif_label">Notifications</string>
+    <string name="action_settings_label">Settings shade</string>
+    <string name="action_settings_short">Shade</string>
+    <string name="action_collapse_label">Collapse panels</string>
+    <string name="action_collapse_short">Collapse</string>
+    <string name="action_menu_label">Menu key</string>
+    <string name="action_menu_short">Menu</string>
+    <string name="action_screenshot_label">Screenshot</string>
+    <string name="action_resetvideo_label">Keyframe</string>
+    <string name="action_resetvideo_short">Refresh</string>
+
     <string name="section_viewer">Viewer</string>
     <string name="viewer_settings_hint">In landscape the video fills the screen, and the handle at the bottom brings up the controls.</string>
     <string name="viewer_controls_always">Always show the controls</string>
@@ -86,6 +118,11 @@
         <item quantity="one">Hide the controls %d second after the last touch on them</item>
         <item quantity="other">Hide the controls %d seconds after the last touch on them</item>
     </plurals>
+    <string name="viewer_hide_delay">Delay before the controls hide</string>
+    <plurals name="viewer_seconds">
+        <item quantity="one">%d second</item>
+        <item quantity="other">%d seconds</item>
+    </plurals>
 
     <string name="identity_format">Identity %1$s</string>
     <string name="address_format">Address %1$s</string>
@@ -93,10 +130,14 @@
     <string name="serve_not_serving">Not serving.</string>
     <string name="serve_starting">Starting…</string>
     <string name="serve_failed">Serving stopped: %1$s</string>
-    <string name="serve_listening">Listening on %1$s:%2$d</string>
-    <string name="serve_controlling">controlling</string>
-    <string name="serve_viewing">viewing</string>
+    <string name="serve_listening">Listening on %1$s</string>
+    <string name="serve_this_device">this device</string>
+    <string name="serve_controlling">%1$s controlling</string>
+    <string name="serve_viewing">%1$s viewing</string>
     <string name="serve_notifications_blocked">Notifications are blocked, so the Stop button and pairing requests can\'t appear.</string>
+    <string name="serve_stop_notification_blocked">Serving notifications are blocked, so the Stop button can\'t appear.</string>
+    <string name="serve_pairing_notifications_blocked">Pairing request notifications are blocked, so pairing requests can\'t appear while this screen is closed.</string>
+    <string name="settings_unavailable">This device can\'t open that settings page.</string>
     <string name="serve_input_restricted">If the switch is greyed out, open App info, tap the three-dot menu, then Allow restricted settings.</string>
     <string name="local_network_denied">Local network access is denied, so this device can\'t reach other devices or serve them. Allow it in App info, under Permissions.</string>
     <string name="open_notification_settings">Notification settings</string>

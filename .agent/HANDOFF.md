@@ -7,6 +7,80 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 15: Android looks and accessibility)
+
+- Cards are 16 dp rounded rectangles with a thin outline (same fill, padding
+  and gaps). Buttons are flat: primary (accent fill, dark text) for Start or
+  Stop serving and each device's Connect, secondary (outline, accent text)
+  for the rest, drawn 40 dp tall inside a 48 dp touch target, with ripples
+  and a dimmed disabled state. Visible buttons in a row sit 8 dp apart with
+  no trailing margin, a lone button spans the row, and the tappable status
+  line has a ripple. Page padding clears display cutouts and the keyboard as
+  well as the system bars. The viewer's connection overlay uses the same
+  buttons: Retry primary, Close (Cancel while connecting) secondary.
+  Framework dialog buttons are unchanged.
+- The viewer bar is built from the shared catalog (`viewer/ViewerBar.kt`):
+  the catalog's short name is the text unless it is a clipped word (Rec,
+  Rot, Notif, Keys, Shot), and its label is what TalkBack reads. The Menu key
+  (after Power) and Refresh (one keyframe request, also in view-only
+  sessions) are new; "Vol −"/"Vol +" became "Vol-"/"Vol+", "Rotate device"
+  "Rotate", "Quick settings" "Shade". Bar buttons, the handle and the
+  panel's collapse arrow are 48 dp tall targets (the landscape panel grows
+  24 dp, and taps on the 64×24 dp of picture just above the handle's pill
+  now open the panel instead of reaching the device, which in landscape is
+  where a target's keyboard has its space bar). The blurred panel's tint
+  went from 35% to 72%, so white labels over
+  a white screen reach about 5:1 (they were about 2:1), and the handle is
+  darker.
+- TalkBack: card titles, the page title and the pair dialog's sections are
+  headings; a device row's buttons read "Connect to <name>" and "Manage
+  <name>"; the delay slider is named "Delay before the controls hide" with
+  its value in seconds; the viewer's status line is a live region. Titles
+  are still capitalised with `uppercase()`, which ignores the locale
+  (`isAllCaps` would show "THİS DEVİCE" on Turkish devices), so TalkBack is
+  given the capitalised text as before.
+- From the part-11 review: "Listening on HOST:PORT" no longer formats the
+  port with the locale's digits, and the notifications help line says which
+  channel is blocked (serving: the Stop button can't appear; pairing:
+  requests can't appear while the screen is closed; both: the old sentence).
+  The two settings buttons part 11 added show a toast when the device has no
+  such page instead of crashing. `onDestroy` also dismisses an open pair
+  dialog; its dismiss listener stops the device search a second time, which
+  `stop()` ignores.
+- `app/build.gradle.kts` passes the catalog and `strings.xml` paths to the
+  unit tests as system properties, declared as task inputs like
+  `:protocol`'s. The new `ViewerBarTest` checks the bar's ids, texts and
+  descriptions against both files, and that every catalog device action is on
+  the bar exactly once.
+- Verification (rerun after the review's fixes): aapt2 2.20 compiled and
+  linked the resources against android-37 (min 27, target 37) without
+  warnings. kotlinc 2.3.20 compiled `:protocol` and `:peer` with `-Werror`;
+  kotlinc 2.4.10 compiled 25 of the 26 app sources without warnings
+  (`ShizukuActivation.kt` needs Shizuku, which is not cached), with
+  stand-ins for `BuildConfig`, `ShizukuActivation` and the scrcpy `Server`
+  and cached androidx older than pinned (core 1.19.0, activity 1.9.1,
+  annotation 1.10.0, coroutines 1.9.0). The app's unit tests ran 17/17 that
+  way with the real kotlin-test-junit, and `:protocol`/`:peer` 94/94. The
+  bar tests fail on a copy that encodes the old bar and on a catalog with
+  changed labels. The build-script lines were checked with system Gradle
+  9.8.0, using the `java` plugin in place of AGP. In review, the SDK's
+  standalone lint 8.2.0 reported the same as on the base, and AGP 9.3.2
+  (offline, on a minimal stand-in module with the same build-script lines)
+  passed both properties to the unit-test process. Contrast figures are
+  computed by alpha compositing. Not run: this project's Gradle build with
+  its pinned AGP and lint (`abortOnError`), the debug or release build, or
+  anything on a device (rendering, blur, insets, TalkBack).
+- Left alone: the stats overlay over a white screen (4.35:1); a held bar
+  button in the panel (3.18:1); four other settings `startActivity` calls
+  (accessibility twice, Wi-Fi, installing unknown apps) are unguarded; the
+  nearby-pairing progress and confirm dialogs aren't dismissed in
+  `onDestroy`; inline text on lines not touched; for voice control, "Vol-"
+  is read as "Volume down" and "Refresh" as "Keyframe";
+  `ViewerActivity.perform()` runs only the Keyboard and Screenshot local
+  actions, so any other local action put on the bar would do nothing; the
+  unit tests get absolute paths, as `:protocol`'s do, so Gradle's cache keys
+  depend on where the checkout is.
+
 ## Update (2026-10-20: QoL overhaul, part 12: browser sound start and the http fallback)
 
 - Sound starts from any tap, click or key, not only a press on the picture,

@@ -265,8 +265,11 @@ class TargetService : Service() {
         )
         val text = when {
             b?.ready != true -> b?.status ?: getString(R.string.notification_serving)
-            sessions.isEmpty() -> getString(R.string.serve_listening, Net.localAddresses().firstOrNull() ?: "this device", port)
-            else -> sessions.joinToString { it.peerName + " " + getString(if (it.holdsLease) R.string.serve_controlling else R.string.serve_viewing) }
+            sessions.isEmpty() -> {
+                val address = Net.localAddresses().firstOrNull() ?: getString(R.string.serve_this_device)
+                getString(R.string.serve_listening, "$address:$port")
+            }
+            else -> sessions.joinToString { getString(if (it.holdsLease) R.string.serve_controlling else R.string.serve_viewing, it.peerName) }
         }
         val statuses = ScTermApp.of(this).peerMonitor.statuses.value
         val peers = ScTermApp.of(this).peers.all()
@@ -388,11 +391,14 @@ class TargetService : Service() {
             context.startService(Intent(context, TargetService::class.java).setAction(ACTION_KICK))
         }
 
-        /** True when Android hides this service's notification, and with it Stop, or its pairing requests. */
-        fun notificationsBlocked(context: Context): Boolean {
+        fun hiddenNotifications(context: Context): HiddenNotifications {
             val manager = context.getSystemService(NotificationManager::class.java)
-            return !manager.areNotificationsEnabled() ||
-                listOf(CHANNEL, PAIRING_CHANNEL).any { manager.getNotificationChannel(it)?.importance == NotificationManager.IMPORTANCE_NONE }
+            val all = !manager.areNotificationsEnabled()
+            fun hidden(channel: String) = all || manager.getNotificationChannel(channel)?.importance == NotificationManager.IMPORTANCE_NONE
+            return HiddenNotifications(serving = hidden(CHANNEL), pairing = hidden(PAIRING_CHANNEL))
         }
     }
+
+    /** What Android hides of this service: its notification, and with it Stop ([serving]); its pairing requests ([pairing]). */
+    class HiddenNotifications(val serving: Boolean, val pairing: Boolean)
 }
