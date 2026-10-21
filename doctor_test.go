@@ -209,10 +209,12 @@ func TestDoctorWithoutADB(t *testing.T) {
 }
 
 // TestDoctorExplainsEachDeviceState: each device adb lists gets a line; one
-// that is not ready gets scterm's own explanation of its state, and one too
-// old for the bundled server says so: a failure when scterm would have no
-// device to use or none it can mirror, and a warning otherwise. Several ready
-// devices need -s or ANDROID_SERIAL, which picks the device scterm uses.
+// that is not ready gets scterm's own explanation of its state. Only the
+// device scterm would use is read, and when it is too old for the bundled
+// server, it says so: a failure when it is that device or scterm has none it
+// can mirror, and a warning otherwise. Another ready device is listed as adb
+// lists it, and may be one scterm can mirror. Several ready devices need -s
+// or ANDROID_SERIAL, which picks the device scterm uses.
 func TestDoctorExplainsEachDeviceState(t *testing.T) {
 	const pixel = "\tdevice usb:1-1 product:shiba model:Pixel_8 device:shiba transport_id:1\n"
 	const tab = "\tdevice usb:1-2 product:gts9 model:Tab_S9 device:gts9 transport_id:2\n"
@@ -220,6 +222,7 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 	const tooOld = "; the bundled server needs Android 5.0 or later\n              scterm cannot mirror it: use a device with Android 5.0 or later\n"
 	const noneNamed = "              connect that device, or unset ANDROID_SERIAL, or set it as adb takes it: a serial, a network device's host " +
 		"without its port (tcp: or udp: may come first), a USB path such as usb:1-1, or product:, model: or device: and a name, as adb devices -l shows them\n"
+	const unread = " is ready; scterm would not use it, so doctor runs nothing on it\n"
 	for _, tc := range []struct {
 		name, listing, serial string
 		versions              map[string]string
@@ -248,7 +251,7 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 			"FAIL  device  no device found\n" +
 				"              connect one with USB debugging turned on (or over Wi-Fi with adb pair and adb connect), or use --peer NAME for the scterm Android app\n"},
 		{"two ready", devicesHeader + "GT9" + tab + "R5CT" + pixel, "", map[string]string{"GT9": "13 33", "R5CT": "14 34"},
-			"ok    device  GT9 (Tab_S9) is ready: Android 13 (SDK 33); sound and playback capture work\n" + readyPixel + "\n" +
+			"ok    device  GT9 (Tab_S9)" + unread + "ok    device  R5CT (Pixel_8)" + unread +
 				"warn  device  2 devices are connected (GT9, R5CT)\n" +
 				"              choose one with -s SERIAL, or set ANDROID_SERIAL\n"},
 		{"ready beside unauthorized", devicesHeader + "GT9\tunauthorized usb:1-2 transport_id:3\nR5CT" + pixel, "",
@@ -257,26 +260,32 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 				"              unlock it, accept the \"Allow USB debugging?\" prompt, and run scterm again\n" + readyPixel + "\n"},
 		{"two ready, one too old, neither chosen", devicesHeader + "OLD\tdevice model:Nexus_7 transport_id:9\nR5CT" + pixel, "",
 			map[string]string{"OLD": "4.4 19", "R5CT": "14 34"},
-			"warn  device  OLD (Nexus_7) is ready: Android 4.4 (SDK 19); the bundled server needs Android 5.0 or later\n" +
-				"              scterm cannot mirror it: use a device with Android 5.0 or later\n" + readyPixel + "\n" +
+			"ok    device  OLD (Nexus_7)" + unread + "ok    device  R5CT (Pixel_8)" + unread +
 				"warn  device  2 devices are connected (OLD, R5CT)\n" +
 				"              choose one with -s SERIAL, or set ANDROID_SERIAL\n"},
 		{"a ready device, then one too old, neither chosen", devicesHeader + "R5CT" + pixel + "OLD\tdevice model:Nexus_7 transport_id:9\n", "",
 			map[string]string{"OLD": "4.4 19", "R5CT": "14 34"},
-			readyPixel + "\n" + "warn  device  OLD (Nexus_7) is ready: Android 4.4 (SDK 19)" + tooOld +
+			"ok    device  R5CT (Pixel_8)" + unread + "ok    device  OLD (Nexus_7)" + unread +
 				"warn  device  2 devices are connected (R5CT, OLD)\n" +
 				"              choose one with -s SERIAL, or set ANDROID_SERIAL\n"},
+		// Neither is read, so neither is known to be too old: each may be one
+		// scterm can mirror, once it is chosen.
 		{"two ready, both too old, neither chosen", devicesHeader + "OLD1\tdevice model:Nexus_7 transport_id:1\nOLD2\tdevice model:Nexus_4 transport_id:2\n", "",
 			map[string]string{"OLD1": "4.4 19", "OLD2": "4.2 17"},
-			"FAIL  device  OLD1 (Nexus_7) is ready: Android 4.4 (SDK 19)" + tooOld +
-				"FAIL  device  OLD2 (Nexus_4) is ready: Android 4.2 (SDK 17)" + tooOld +
+			"ok    device  OLD1 (Nexus_7)" + unread + "ok    device  OLD2 (Nexus_4)" + unread +
+				"warn  device  2 devices are connected (OLD1, OLD2)\n" +
+				"              choose one with -s SERIAL, or set ANDROID_SERIAL\n"},
+		{"two ready, both too old, neither chosen, beside one not ready",
+			devicesHeader + "OLD1\tdevice model:Nexus_7 transport_id:1\nOLD2\tdevice model:Nexus_4 transport_id:2\nR5CT\tunauthorized usb:1-1 transport_id:3\n", "",
+			map[string]string{"OLD1": "4.4 19", "OLD2": "4.2 17"},
+			"ok    device  OLD1 (Nexus_7)" + unread + "ok    device  OLD2 (Nexus_4)" + unread +
+				"warn  device  R5CT has not allowed USB debugging from this computer\n" +
+				"              unlock it, accept the \"Allow USB debugging?\" prompt, and run scterm again\n" +
 				"warn  device  2 devices are connected (OLD1, OLD2)\n" +
 				"              choose one with -s SERIAL, or set ANDROID_SERIAL\n"},
 		{"two ready, one too old, the other's version unknown", devicesHeader + "OLD\tdevice model:Nexus_7 transport_id:9\nR5CT" + pixel, "",
 			map[string]string{"OLD": "4.4 19", "R5CT": "14 fourteen"},
-			"warn  device  OLD (Nexus_7) is ready: Android 4.4 (SDK 19)" + tooOld +
-				"warn  device  R5CT (Pixel_8) is ready, but its Android version could not be read (its SDK reads \"fourteen\")\n" +
-				"              see what adb says: adb -s R5CT shell getprop ro.build.version.sdk\n" +
+			"ok    device  OLD (Nexus_7)" + unread + "ok    device  R5CT (Pixel_8)" + unread +
 				"warn  device  2 devices are connected (OLD, R5CT)\n" +
 				"              choose one with -s SERIAL, or set ANDROID_SERIAL\n"},
 		{"one ready but too old, beside one not ready", devicesHeader + "OLD\tdevice model:Nexus_7 transport_id:9\nR5CT\tunauthorized usb:1-1 transport_id:3\n", "",
@@ -286,25 +295,22 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 				"              unlock it, accept the \"Allow USB debugging?\" prompt, and run scterm again\n"},
 		{"ANDROID_SERIAL picks one of two", devicesHeader + "GT9" + tab + "R5CT" + pixel, "R5CT",
 			map[string]string{"GT9": "13 33", "R5CT": "14 34"},
-			"ok    device  GT9 (Tab_S9) is ready: Android 13 (SDK 33); sound and playback capture work\n" +
-				readyPixel + "; ANDROID_SERIAL names it\n"},
+			"ok    device  GT9 (Tab_S9)" + unread + readyPixel + "; ANDROID_SERIAL names it\n"},
 		{"ANDROID_SERIAL beside one too old", devicesHeader + "OLD\tdevice model:Nexus_7 transport_id:9\nR5CT" + pixel, "R5CT",
 			map[string]string{"OLD": "4.4 19", "R5CT": "14 34"},
-			"warn  device  OLD (Nexus_7) is ready: Android 4.4 (SDK 19); the bundled server needs Android 5.0 or later\n" +
-				"              scterm cannot mirror it: use a device with Android 5.0 or later\n" +
-				readyPixel + "; ANDROID_SERIAL names it\n"},
+			"ok    device  OLD (Nexus_7)" + unread + readyPixel + "; ANDROID_SERIAL names it\n"},
 		{"ANDROID_SERIAL names one too old", devicesHeader + "OLD\tdevice model:Nexus_7 transport_id:9\nR5CT" + pixel, "OLD",
 			map[string]string{"OLD": "4.4 19", "R5CT": "14 34"},
 			"FAIL  device  OLD (Nexus_7) is ready: Android 4.4 (SDK 19); the bundled server needs Android 5.0 or later; ANDROID_SERIAL names it\n" +
-				"              scterm cannot mirror it: use a device with Android 5.0 or later\n" + readyPixel + "\n"},
+				"              scterm cannot mirror it: use a device with Android 5.0 or later\n" + "ok    device  R5CT (Pixel_8)" + unread},
 		{"ANDROID_SERIAL names one not ready", devicesHeader + "GT9" + tab + "R5CT\toffline usb:1-1 transport_id:4\n", "R5CT",
 			map[string]string{"GT9": "13 33"},
-			"ok    device  GT9 (Tab_S9) is ready: Android 13 (SDK 33); sound and playback capture work\n" +
+			"ok    device  GT9 (Tab_S9)" + unread +
 				"FAIL  device  R5CT is offline; ANDROID_SERIAL names it\n" +
 				"              unplug and replug it, or restart adb with 'adb kill-server'\n"},
 		{"ANDROID_SERIAL names one not listed", devicesHeader + "GT9" + tab + "R5CT\toffline usb:1-1 transport_id:4\n", "192.168.1.20:5555",
 			map[string]string{"GT9": "13 33"},
-			"ok    device  GT9 (Tab_S9) is ready: Android 13 (SDK 33); sound and playback capture work\n" +
+			"ok    device  GT9 (Tab_S9)" + unread +
 				"warn  device  R5CT is offline\n" +
 				"              unplug and replug it, or restart adb with 'adb kill-server'\n" +
 				"FAIL  device  ANDROID_SERIAL is 192.168.1.20:5555, which names no device adb lists\n" + noneNamed},
@@ -312,7 +318,7 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 			"FAIL  device  ANDROID_SERIAL is R5CT, which names no device adb lists\n" + noneNamed},
 		{"ANDROID_SERIAL names one not listed, beside one too old", devicesHeader + "OLD\tdevice model:Nexus_7 transport_id:9\n", "R5CT",
 			map[string]string{"OLD": "4.4 19"},
-			"warn  device  OLD (Nexus_7) is ready: Android 4.4 (SDK 19)" + tooOld +
+			"ok    device  OLD (Nexus_7)" + unread +
 				"FAIL  device  ANDROID_SERIAL is R5CT, which names no device adb lists\n" + noneNamed},
 	} {
 		bin := doctorHost(t)
@@ -341,10 +347,11 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 // 1289-1323 at 1cf2f017): its serial; a network device's host without its
 // port, and either with tcp: or udp: before it; its USB path; and product:,
 // model: or device: with the name adb devices -l shows. The line of the
-// device it names says so. A value that names no device, or more than one,
-// fails, as adb then takes none (acquire_one_transport, lines 942-950), and a
-// device adb has no permission to open is passed over (lines 932-935), but
-// one in any other state that is not ready, such as offline, is not.
+// device it names says so, and only that device is read. A value that names
+// no device, or more than one, fails, as adb then takes none
+// (acquire_one_transport, lines 942-950), and a device adb has no permission
+// to open is passed over (lines 932-935), but one in any other state that is
+// not ready, such as offline, is not.
 func TestDoctorTakesANDROID_SERIALAsADBDoes(t *testing.T) {
 	const listing = devicesHeader +
 		"192.168.1.20:5555      device product:shiba model:Pixel_8 device:shiba transport_id:2\n" +
@@ -352,22 +359,25 @@ func TestDoctorTakesANDROID_SERIALAsADBDoes(t *testing.T) {
 	versions := map[string]string{"192.168.1.20:5555": "14 34", "R5CT": "13 33"}
 	const wifi = "ok    device  192.168.1.20:5555 (Pixel_8) is ready: Android 14 (SDK 34); sound and playback capture work"
 	const usb = "ok    device  R5CT (Tab_S9) is ready: Android 13 (SDK 33); sound and playback capture work"
+	const unread = " is ready; scterm would not use it, so doctor runs nothing on it\n"
+	const wifiUnread = "ok    device  192.168.1.20:5555 (Pixel_8)" + unread
+	const usbUnread = "ok    device  R5CT (Tab_S9)" + unread
 	const noneNamed = "FAIL  device  ANDROID_SERIAL is <value>, which names no device adb lists\n" +
 		"              connect that device, or unset ANDROID_SERIAL, or set it as adb takes it: a serial, a network device's host " +
 		"without its port (tcp: or udp: may come first), a USB path such as usb:1-1, or product:, model: or device: and a name, as adb devices -l shows them\n"
-	both := wifi + "\n" + usb + "\n"
+	both := wifiUnread + usbUnread
 	for _, tc := range []struct{ value, want string }{
 		{"", both + "warn  device  2 devices are connected (192.168.1.20:5555, R5CT)\n" +
 			"              choose one with -s SERIAL, or set ANDROID_SERIAL\n"},
-		{"192.168.1.20:5555", wifi + "; ANDROID_SERIAL names it\n" + usb + "\n"},
-		{"192.168.1.20", wifi + "; ANDROID_SERIAL=192.168.1.20 names it\n" + usb + "\n"},
-		{"tcp:192.168.1.20", wifi + "; ANDROID_SERIAL=tcp:192.168.1.20 names it\n" + usb + "\n"},
-		{"udp:192.168.1.20:5555", wifi + "; ANDROID_SERIAL=udp:192.168.1.20:5555 names it\n" + usb + "\n"},
-		{"R5CT", wifi + "\n" + usb + "; ANDROID_SERIAL names it\n"},
-		{"usb:1-1", wifi + "\n" + usb + "; ANDROID_SERIAL=usb:1-1 names it\n"},
-		{"product:gts9", wifi + "\n" + usb + "; ANDROID_SERIAL=product:gts9 names it\n"},
-		{"model:Pixel_8", wifi + "; ANDROID_SERIAL=model:Pixel_8 names it\n" + usb + "\n"},
-		{"device:shiba", wifi + "; ANDROID_SERIAL=device:shiba names it\n" + usb + "\n"},
+		{"192.168.1.20:5555", wifi + "; ANDROID_SERIAL names it\n" + usbUnread},
+		{"192.168.1.20", wifi + "; ANDROID_SERIAL=192.168.1.20 names it\n" + usbUnread},
+		{"tcp:192.168.1.20", wifi + "; ANDROID_SERIAL=tcp:192.168.1.20 names it\n" + usbUnread},
+		{"udp:192.168.1.20:5555", wifi + "; ANDROID_SERIAL=udp:192.168.1.20:5555 names it\n" + usbUnread},
+		{"R5CT", wifiUnread + usb + "; ANDROID_SERIAL names it\n"},
+		{"usb:1-1", wifiUnread + usb + "; ANDROID_SERIAL=usb:1-1 names it\n"},
+		{"product:gts9", wifiUnread + usb + "; ANDROID_SERIAL=product:gts9 names it\n"},
+		{"model:Pixel_8", wifi + "; ANDROID_SERIAL=model:Pixel_8 names it\n" + usbUnread},
+		{"device:shiba", wifi + "; ANDROID_SERIAL=device:shiba names it\n" + usbUnread},
 		// Values that name neither: another host or port, a host for a USB
 		// device, which has none, a model as the device calls itself rather
 		// than as adb devices -l writes it, and a name without its form.
@@ -398,14 +408,13 @@ func TestDoctorTakesANDROID_SERIALAsADBDoes(t *testing.T) {
 	}{
 		{"two devices of one model", devicesHeader + "R5CT" + fmt.Sprintf(shiba, 1, 1) + "R5CU" + fmt.Sprintf(shiba, 2, 3), "model:Pixel_8",
 			map[string]string{"R5CT": "14 34", "R5CU": "14 34"},
-			"ok    device  R5CT (Pixel_8) is ready: Android 14 (SDK 34); sound and playback capture work\n" +
-				"ok    device  R5CU (Pixel_8) is ready: Android 14 (SDK 34); sound and playback capture work\n" +
+			"ok    device  R5CT (Pixel_8)" + unread + "ok    device  R5CU (Pixel_8)" + unread +
 				"FAIL  device  ANDROID_SERIAL is model:Pixel_8, which names 2 devices (R5CT, R5CU), so adb takes none of them\n" +
 				"              set it to the serial of the one to use\n"},
 		{"two devices of one model, one of them offline", devicesHeader + "R5CT" + fmt.Sprintf(shiba, 1, 1) +
 			"R5CU\toffline usb:1-2 product:shiba model:Pixel_8 device:shiba transport_id:3\n", "model:Pixel_8",
 			map[string]string{"R5CT": "14 34"},
-			"ok    device  R5CT (Pixel_8) is ready: Android 14 (SDK 34); sound and playback capture work\n" +
+			"ok    device  R5CT (Pixel_8)" + unread +
 				"warn  device  R5CU is offline\n" +
 				"              unplug and replug it, or restart adb with 'adb kill-server'\n" +
 				"FAIL  device  ANDROID_SERIAL is model:Pixel_8, which names 2 devices (R5CT, R5CU), so adb takes none of them\n" +
@@ -421,7 +430,7 @@ func TestDoctorTakesANDROID_SERIALAsADBDoes(t *testing.T) {
 			map[string]string{"0123456789ABCDEF": "13 33"},
 			"FAIL  device  adb has no permission to open 0123456789ABCDEF; ANDROID_SERIAL=usb:1-1 names it\n" +
 				"              add a udev rule for it (or join the plugdev group), then unplug and replug it\n" +
-				cheap + "\n"},
+				"ok    device  0123456789ABCDEF (Tab_7)" + unread},
 	} {
 		bin := doctorHost(t)
 		t.Setenv("ANDROID_SERIAL", tc.value)
@@ -468,7 +477,8 @@ func TestDoctorComparesTheAndroidVersion(t *testing.T) {
 	// A device that stops answering between the listing and getprop: the cause
 	// adb gives, after the progress lines of a server it had to start again,
 	// and the first line of an error that takes several (transport.cpp, lines
-	// 997-1004 at 1cf2f017).
+	// 997-1004 at 1cf2f017). The advice gives the read that failed: the
+	// release, read first, or the SDK after it.
 	for _, tc := range []struct{ name, stderr, cause string }{
 		{"closed", "error: closed", "error: closed"},
 		{"the server started again", "* daemon not running; starting now at tcp:5037\n* daemon started successfully\nadb: device 'R5CT' not found",
@@ -476,20 +486,24 @@ func TestDoctorComparesTheAndroidVersion(t *testing.T) {
 		{"no longer allowed", "error: device unauthorized.\nThis adb server's $ADB_VENDOR_KEYS is not set\n" +
 			"Try 'adb kill-server' if that seems wrong.\nOtherwise check for a confirmation dialog on your device.", "error: device unauthorized."},
 	} {
-		bin := doctorHost(t)
-		fakeProgram(t, bin, "adb", `case "$1" in
+		for _, failing := range []string{"ro.build.version.release", "ro.build.version.sdk"} {
+			bin := doctorHost(t)
+			fakeProgram(t, bin, "adb", `case "$*" in
 version) echo 'Android Debug Bridge version 1.0.41' ;;
-devices) printf 'List of devices attached\nR5CT\tdevice model:Pixel_8\n' ;;
-*) while IFS= read -r l; do printf '%s\n' "$l" >&2; done <<'EOF'
+'devices -l') printf 'List of devices attached\nR5CT\tdevice model:Pixel_8\n' ;;
+*`+failing+`) while IFS= read -r l; do printf '%s\n' "$l" >&2; done <<'EOF'
 `+tc.stderr+`
 EOF
    exit 1 ;;
+*release) echo 14 ;;
+*) echo 'adb: unexpected' >&2; exit 1 ;;
 esac
 `)
-		want := "warn  device  R5CT (Pixel_8) is ready, but its Android version could not be read (" + tc.cause + ")\n" +
-			"              see what adb says: adb -s R5CT shell getprop ro.build.version.sdk\n"
-		if got := doctorText(adbAndDevices(false)[1:]); got != want {
-			t.Errorf("getprop failing, %s: printed\n%s\nwant\n%s", tc.name, got, want)
+			want := "warn  device  R5CT (Pixel_8) is ready, but its Android version could not be read (" + tc.cause + ")\n" +
+				"              see what adb says: adb -s R5CT shell getprop " + failing + "\n"
+			if got := doctorText(adbAndDevices(false)[1:]); got != want {
+				t.Errorf("getprop %s failing, %s: printed\n%s\nwant\n%s", failing, tc.name, got, want)
+			}
 		}
 	}
 }
@@ -1124,11 +1138,11 @@ func TestDoctorOnAHealthyAndAnUnhealthyComputer(t *testing.T) {
 // still fail.
 func TestDoctorOnAPeerOnlyComputer(t *testing.T) {
 	const (
-		adbOK      = "ok    adb     <bin>/adb: Android Debug Bridge version 1.0.41, Version 35.0.2-12147458\n"
-		pixel      = "\tdevice usb:1-1 product:shiba model:Pixel_8 device:shiba transport_id:1\n"
-		pixelReady = " (Pixel_8) is ready: Android 14 (SDK 34); sound and playback capture work\n"
-		oneListed  = "ok    peers   1 paired device: Pixel 8\n              scterm peers --check tests whether it is reachable\n"
-		identityOK = "ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n"
+		adbOK       = "ok    adb     <bin>/adb: Android Debug Bridge version 1.0.41, Version 35.0.2-12147458\n"
+		pixel       = "\tdevice usb:1-1 product:shiba model:Pixel_8 device:shiba transport_id:1\n"
+		pixelUnread = " (Pixel_8) is ready; scterm would not use it, so doctor runs nothing on it\n"
+		oneListed   = "ok    peers   1 paired device: Pixel 8\n              scterm peers --check tests whether it is reachable\n"
+		identityOK  = "ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n"
 	)
 	pair := func(t *testing.T, home, fingerprint, name string) {
 		if err := peer.OpenStore(home).Put(peer.Record{Fingerprint: fingerprint, Name: name, Host: "192.0.2.1", Port: 27300, PairedAtMs: 1}); err != nil {
@@ -1202,13 +1216,13 @@ func TestDoctorOnAPeerOnlyComputer(t *testing.T) {
 				"              unplug and replug it, or restart adb with 'adb kill-server'\n",
 			identityOK + oneListed, true},
 		{"ANDROID_SERIAL names no device", adbScript(devicesHeader+"R5CT"+pixel, map[string]string{"R5CT": "14 34"}), "R5CU", onePaired,
-			adbOK + "ok    device  R5CT" + pixelReady +
+			adbOK + "ok    device  R5CT" + pixelUnread +
 				"FAIL  device  ANDROID_SERIAL is R5CU, which names no device adb lists\n" +
 				"              connect that device, or unset ANDROID_SERIAL, or set it as adb takes it: a serial, a network device's host " +
 				"without its port (tcp: or udp: may come first), a USB path such as usb:1-1, or product:, model: or device: and a name, as adb devices -l shows them\n",
 			identityOK + oneListed, true},
 		{"ANDROID_SERIAL names two devices", adbScript(devicesHeader+"R5CT"+pixel+"R5CU"+pixel, map[string]string{"R5CT": "14 34", "R5CU": "14 34"}), "model:Pixel_8", onePaired,
-			adbOK + "ok    device  R5CT" + pixelReady + "ok    device  R5CU" + pixelReady +
+			adbOK + "ok    device  R5CT" + pixelUnread + "ok    device  R5CU" + pixelUnread +
 				"FAIL  device  ANDROID_SERIAL is model:Pixel_8, which names 2 devices (R5CT, R5CU), so adb takes none of them\n" +
 				"              set it to the serial of the one to use\n",
 			identityOK + oneListed, true},

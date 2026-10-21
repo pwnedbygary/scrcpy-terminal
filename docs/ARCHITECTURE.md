@@ -84,6 +84,13 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
 - While scterm runs, the bottom line shows messages ("notices") instead of printing them,
   because printed lines would scroll the picture. scterm prints them again on exit
   (`notice.go`).
+- The bottom line's frame rate is the stream's: the video goroutine counts the frames over
+  windows of half a second or more, each ending at a frame (`stream.go`), and hands the rate
+  over with each frame. `--no-tui` prints the same rate, and the browser display's status
+  messages carry it, though the page shows the rate it paints at. The graph beside it is the
+  time between the frames drawn. A still screen sends a frame and up to ten repeats of it,
+  100 ms apart, and then nothing until it changes, so a mean of those times counts the pauses
+  (`app.go`); the stream's rate dips after such a pause too.
 
 ## Input
 

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -473,8 +475,13 @@ func TestBrowserIsToldTheSessionsSound(t *testing.T) {
 
 // TestStatisticsLineSaysOffWithoutSound: the statistics line of --no-tui,
 // where this computer's sink is what plays, says off with --no-audio, once
-// the device has turned the sound off, and when the sink did not open; and
-// muted or the volume otherwise.
+// the device has turned the sound off, when the sink did not open, and from a
+// peer target that grants no sound; and muted or the volume otherwise. The
+// PCM decoded, its peak and how far the audio lags the video come only while
+// sound plays: not when it is off, nor before the first audio packet; and the
+// lag only once a video packet has come too. Before, the line always had
+// them, and without sound the lag was the video's own timestamp
+// (avlag=214994453ms on the first real-device run).
 func TestStatisticsLineSaysOffWithoutSound(t *testing.T) {
 	headless := func(cfg config, audio net.Conn, sink *audioSink) *app {
 		a := streamApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: audio})
@@ -487,29 +494,163 @@ func TestStatisticsLineSaysOffWithoutSound(t *testing.T) {
 		return s
 	}
 	sound := config{noTUI: true, audio: true}
+	turnedOff := headless(sound, soundOff(t), sink(100, nil))
+	captureStderr(t, func() { // the line that says so
+		if err := turnedOff.playAudio(); err != nil {
+			t.Errorf("playAudio: %v", err)
+		}
+	})
+	const pcm = " pcm=8KB peak=1234"
 	for _, tc := range []struct {
-		name string
-		a    *app
-		want string
+		name  string
+		a     *app
+		state string
 	}{
 		{"the sink plays", headless(sound, videoSocket(t), sink(100, nil)), "100%"},
 		{"turned down", headless(sound, videoSocket(t), sink(40, nil)), "40%"},
 		{"muted", headless(sound, videoSocket(t), sink(0, nil)), "muted"},
 		{"the sink did not open", headless(sound, videoSocket(t), sink(100, errNoAudio())), "off"},
 		{"--no-audio", headless(config{noTUI: true}, nil, sink(100, nil)), "off"},
+		{"a peer target that grants no sound", headless(config{noTUI: true, audio: true, usePeer: true}, nil, noAudioSink()), "off"},
+		{"the device turned the sound off", turnedOff, "off"},
 	} {
-		if got := audioState(tc.a); got != tc.want {
-			t.Errorf("%s: audio=%s, want %s", tc.name, got, tc.want)
+		a, s := tc.a, tc.a.stream
+		if got := audioState(a); got != tc.state {
+			t.Errorf("%s: audio=%s, want %s", tc.name, got, tc.state)
+		}
+		plays := func(more string) string {
+			if tc.state == "off" {
+				return ""
+			}
+			return more
+		}
+		check := func(when, want string) {
+			t.Helper()
+			if got := a.statistics(); got != want {
+				t.Errorf("%s, %s: %q, want %q", tc.name, when, got, want)
+			}
+		}
+		check("before any packet", "0x0 fps=0 audio="+tc.state)
+		// A video packet and its frame, with the stream's rate, on the device's
+		// clock (microseconds since it started).
+		s.lastVideoPts.Store(214994453000)
+		s.currentFPS = 10
+		a.frameW, a.frameH = 576, 1280
+		check("after a video packet", "576x1280 fps=10 audio="+tc.state)
+		// An audio packet, 120 ms before the video one, and its PCM.
+		s.lastAudioPts.Store(214994333000)
+		s.audioBytes = 8*1024 + 100
+		s.audioPeak.Store(1234)
+		check("after an audio packet too", "576x1280 fps=10 audio="+tc.state+plays(pcm+" avlag=120ms"))
+		s.lastVideoPts.Store(0)
+		check("after an audio packet, before any video", "576x1280 fps=10 audio="+tc.state+plays(pcm))
+	}
+}
+
+// TestStatisticsLinePrinted: --no-tui prints the statistics line in brackets,
+// over the one before it. Without sound, as on the first real-device run, it
+// holds the size, the rate and audio=off. A shorter line, once the sound stops
+// (here the sink's write fails), is padded to the longer one before it, so
+// that nothing of that one is left on the screen.
+func TestStatisticsLinePrinted(t *testing.T) {
+	// runHeadless takes these signals for the app and never gives them back.
+	t.Cleanup(func() { signal.Reset(syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
+	old := statisticsEvery
+	statisticsEvery = 5 * time.Millisecond
+	t.Cleanup(func() { statisticsEvery = old })
+	// printed runs runHeadless on a until enough says it has printed enough,
+	// and returns each line it printed.
+	printed := func(a *app, enough func(lines []string) bool) []string {
+		t.Helper()
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldOut := os.Stdout
+		os.Stdout = w
+		lines := make(chan string, 1024)
+		go func() {
+			sc := bufio.NewScanner(r)
+			sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+				if i := bytes.IndexByte(data, '\r'); i >= 0 {
+					return i + 1, data[:i], nil
+				}
+				if atEOF && len(data) > 0 {
+					return len(data), data, nil
+				}
+				return 0, nil, nil
+			})
+			for sc.Scan() {
+				if sc.Text() != "" {
+					lines <- sc.Text()
+				}
+			}
+			close(lines)
+		}()
+		ran := make(chan error, 1)
+		go func() { ran <- a.runHeadless() }()
+		var got []string
+		timeout := time.After(10 * time.Second)
+	read:
+		for !enough(got) {
+			select {
+			case l := <-lines:
+				got = append(got, l)
+			case <-timeout:
+				t.Errorf("printed %q, and then nothing more that was asked for", got)
+				break read
+			}
+		}
+		a.events <- inputEvent{kind: evQuit}
+		select {
+		case <-ran:
+		case <-time.After(5 * time.Second):
+			t.Error("runHeadless did not quit")
+		}
+		os.Stdout = oldOut
+		w.Close()
+		for range lines { // the rest, until the pipe is drained
+		}
+		r.Close()
+		return got
+	}
+
+	quiet := streamApp(&session{deviceName: "NX769J", video: videoSocket(t)})
+	quiet.cfg, quiet.audio = config{noTUI: true}, noAudioSink()
+	quiet.frameW, quiet.frameH = 576, 1280
+	quiet.stream.currentFPS = 10
+	quiet.stream.lastVideoPts.Store(214994453000)
+	for _, l := range printed(quiet, func(lines []string) bool { return len(lines) >= 2 }) {
+		if want := "[576x1280 fps=10 audio=off]   "; l != want {
+			t.Errorf("--no-audio: printed %q, want %q", l, want)
 		}
 	}
-	a := headless(sound, soundOff(t), sink(100, nil))
-	captureStderr(t, func() { // the line that says so
-		if err := a.playAudio(); err != nil {
-			t.Errorf("playAudio: %v", err)
+
+	loud := streamApp(&session{deviceName: "Pixel 8", video: videoSocket(t)})
+	loud.cfg, loud.audio = config{noTUI: true, audio: true}, &audioSink{gain: 256, pct: 100}
+	loud.frameW, loud.frameH = 576, 1280
+	loud.stream.currentFPS = 10
+	loud.stream.lastVideoPts.Store(214994453000)
+	loud.stream.lastAudioPts.Store(214994333000)
+	loud.stream.audioBytes = 8*1024 + 100
+	loud.stream.audioPeak.Store(1234)
+	failed := false
+	lines := printed(loud, func(lines []string) bool {
+		if len(lines) > 0 && !failed {
+			failed = true
+			loud.audio.writeFailed.Store(true)
 		}
+		return len(lines) > 0 && strings.Contains(lines[len(lines)-1], "audio=off")
 	})
-	if got := audioState(a); got != "off" {
-		t.Errorf("the device turned the sound off: audio=%s, want off", got)
+	const long, short = "[576x1280 fps=10 audio=100% pcm=8KB peak=1234 avlag=120ms]", "[576x1280 fps=10 audio=off]"
+	if len(lines) < 2 {
+		t.Fatalf("printed %q, want a line with sound and one without", lines)
+	}
+	if want := long + "   "; lines[0] != want {
+		t.Errorf("with sound: printed %q, want %q", lines[0], want)
+	}
+	if got, want := lines[len(lines)-1], short+strings.Repeat(" ", len(long)-len(short))+"   "; got != want {
+		t.Errorf("once the sound stopped: printed %q, want %q", got, want)
 	}
 }
 

@@ -7,6 +7,202 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 40: fixes from the first real-device run)
+
+- doctor runs commands only on the device scterm would use: the one
+  `pickTarget` gives for `ANDROID_SERIAL`, or else the only ready one.
+  Another ready device is listed from `adb devices -l` alone: `ok device
+  SERIAL (MODEL) is ready; scterm would not use it, so doctor runs nothing
+  on it`. With several ready and none chosen, or an `ANDROID_SERIAL` that
+  names none or several, only `adb version` and `adb devices -l` run. On
+  the first device run it ran `getprop` on two devices another program
+  used (the guard refused both) and printed two warnings for them.
+- `mirrorable`: a ready device doctor does not read may be one scterm can
+  mirror. With two or more ready and none chosen, a device that is not
+  ready beside them is a warning, and two ready devices too old for the
+  server no longer fail (doctor cannot know without reading them); the
+  "choose one" warning stays. The used device's rules are as before: not
+  ready, too old, an unknown or ambiguous `ANDROID_SERIAL`, and the pairing
+  cases of parts 30 and 37.
+- doctor's advice after a failed read names the read that failed,
+  `getprop ro.build.version.release` or `...sdk`; it always said `sdk`.
+  `doctor -h` and the README's Troubleshooting say which device is read.
+- `--no-tui`'s line (`app.statistics`) leaves out `pcm`, `peak` and `avlag`
+  without sound playing: `audio=off` (part 36's rules) or no audio packet
+  yet (`lastAudioPts` 0; the server stamps packets with the device's
+  monotonic clock, except the first packet of Android's default Opus and
+  FLAC encoders, which keeps the encoder's own stamp:
+  `AudioEncoder.fixTimestamp`). `avlag` also needs a video packet. The
+  run printed `avlag=214994453ms` with no sound, the video's own
+  timestamp; now `[576x1280 fps=10 audio=off]`. The line is padded to the
+  longest one printed, as it now shrinks when the sound stops (a failed
+  sink write). `statisticsEvery` (2 s) is a seam for the test.
+- The terminal's fps: no frame is lost at the rates the probe tried (the
+  run loop's one-slot mailbox drops an older frame by design when the
+  terminal falls behind, which the probe's pipe, read at once, cannot
+  show). The row showed the mean of the run loop's last 32 frame times,
+  which counts the pauses of a still screen (the server repeats a frame
+  after 100 ms, `SurfaceEncoder.java` line 32; AOSP at most 10 times, per
+  part 35); `stream.currentFPS` (which `--no-tui` prints and the browser
+  display's status messages carry, though the page shows the rate it
+  paints at) changes only as frames come, over windows of 0.5 s or more
+  that end at a frame, so it dips after a pause too. The row now shows the
+  stream's rate as each frame carries it (`videoFrame.fps`, kept in
+  `app.streamFPS` by the run loop: race-free, no stream.go change), with
+  1000/rate as the ms, and no rate in the stream's first 0.5 s. The
+  sparkline is unchanged. README and docs/ARCHITECTURE.md say so.
+- Evidence (fakes): a probe, not committed (real decoder, mailbox and run
+  loop on a pipe, 120x40), on BASE: steady 10 fps, 40 sent, 40 drawn, both
+  figures 10.0; a still screen (a frame and 10 repeats 100 ms apart every
+  2 s, then 3 s of nothing), 33 sent, 33 drawn, row `156.2ms  6.4fps`,
+  `currentFPS` 10.0 at every 2 s sample and 3 s after the last frame; pairs
+  written at once every 200 ms, 40 of 40 drawn. On the device a
+  frames-only test client got 23 frames in 6.0 s while the status said
+  9.56, and the row's sparkline had no interval under 57 ms.
+- Found, left alone: `takePooled` and `returnPooled` race on `canvasPool`
+  (video goroutine against the run loop; 2 reports from the probe under
+  `-race`, on BASE too; no frame lost): a mutex would fix it in stream.go.
+  All three displays hold their last rate while no frame comes (the
+  browser's HUD says idle after 2 s). web.go never sets the status's
+  `dropped`. `currentFPS` and `audioBytes` are read off their goroutine.
+  When the audio stream ends while the video goes on, nothing marks the
+  sound as stopped (`playAudio` returns the error): the line keeps
+  `audio=100%`, with `pcm` and `peak` that no longer move and an `avlag`
+  that grows with the video (the review saw 120, 2120 and 4120 ms);
+  recording the end would make it say `audio=off`.
+- Tests: `doctor_calls_test.go` (a fake adb notes every call; exact call
+  lists for 6 cases), `tui_fps_test.go`, `TestStatisticsLinePrinted`;
+  doctor expectations updated, with a mirrorable case; the getprop failure
+  test fails each read in turn; `statusApp` gives a stream rate;
+  `TestStatisticsLineSaysOffWithoutSound` pins the whole line.
+- Verification (builder's tree, base `62ba53b`, iso.env, bwrap, go1.27.1):
+  gofmt, vet, build, `git diff --check` clean. `go test -count=1 -v ./...`:
+  465 pass, 3 skip, 0 fail (base 462, 3, 0). `-race ./...`: 465, 3, 0, no
+  race. 42 touched tests `-race -count=3`: 126 of 126. New tests x20: 60
+  of 60; under `-race` x5: 15 of 15. Changed tests x20: 140 of 140. On
+  BASE's files (a shim gives BASE's line under the new names) all 8 new
+  or changed tests fail. Mutants: 14 of 14 caught.
+- Not run: a device, adb, a real terminal, a browser, CI, and the node
+  suites (web/ untouched). The AOSP limit of 10 repeats is part 35's
+  reference, not re-read (no network). The canvas-pool race is not fixed.
+- Intake: merged three ways into the worktree (the builder's base
+  `62ba53b` was the worktree of that time). `README.md` merged cleanly
+  with the worktree's later lines (part 41's table-of-contents entry and
+  License section); the other eight files are the builder's.
+- Verification, snapshot round 1 (`/tmp/opencode/review-40`, on part 38's
+  third round), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (466
+  top-level tests pass and 3 skip); `-race -count=3` on 46 related tests;
+  the 8 new or changed tests (3 new, 5 changed), with `TestDoctorWithoutADB`
+  and `TestDoctorOnAHealthyAndAnUnhealthyComputer`, unchanged, next to
+  them, 20 times and 5 times under `-race`. On the base's `app.go`,
+  `doctor.go` and `tui_status_test.go`, with the builder's shim, all 8 new
+  or changed tests fail, and the two unchanged ones pass. The docs checker
+  finds 33 relative links in the README and docs/ARCHITECTURE.md and no
+  problem; the whole module, in the desktop-like sandbox, connects to none
+  of its decoy sockets, while the positive control reaches two. These
+  checks ran before part 38's snapshot gained its last handoff bullet; the
+  snapshot was then rebuilt on the final one, with the same files.
+- Review round 1 (NEEDS CHANGES, wording only): the snapshot bullet called
+  10 tests new and changed, where 3 are new, 5 changed and 2 unchanged
+  neighbours that the diff's hunks name; docs/ARCHITECTURE.md and the
+  comments on `app.streamFPS` and `TestStatusShowsTheStreamsFrameRate` said
+  the browser's status gives the same rate, but the page shows its own
+  paint rate (`view.fps`) and uses neither the status's `fps` nor the
+  frame header's; and the lost-audio case above was missing. Nits: "no
+  frame is lost" needed its scope; the stream's windows last half a second
+  or more and end at a frame; the 23 frames went to a frames-only test
+  client; the first packet of Android's default Opus and FLAC encoders
+  keeps the encoder's stamp. It found the code right: doctor runs nothing
+  on a device scterm would not use, on any path; the padding neither leaves
+  old text nor grows without end; the rate travels with the frame and only
+  the run loop reads it. Left for later, from its suggestions: a call-list
+  case for an `ANDROID_SERIAL` that names a device that is not ready;
+  doctor's "choose one with -s SERIAL", though `scterm doctor` takes no
+  `-s` (`ANDROID_SERIAL` would let doctor read the device); the README
+  Troubleshooting paragraph's ragged lines; recording a lost audio stream
+  in `app.go`.
+- Round 2 corrects the sentences above, docs/ARCHITECTURE.md and the two
+  comments, and moves the part onto part 38's fourth round.
+- Verification, snapshot round 2 (`/tmp/opencode/review-40b`, on part 38's
+  fourth round), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (468
+  top-level tests pass and 3 skip); `-race -count=3` on 46 related tests;
+  the 3 new and 5 changed tests, with the two unchanged neighbours, 20
+  times and 5 times under `-race`. On the base's `app.go`, `doctor.go` and
+  `tui_status_test.go`, with the builder's shim, the 8 new or changed tests
+  fail and the two unchanged ones pass. The docs checker finds 33 relative
+  links in the README and docs/ARCHITECTURE.md and no problem; the whole
+  module, in the desktop-like sandbox, connects to none of its decoy
+  sockets, while the positive control reaches two. These checks, too, ran
+  before part 38's snapshot gained its last handoff bullet; the snapshot
+  was then rebuilt on the final one, with the same files.
+- Review round 2 (PASS), with two nits, both corrected above: the round-2
+  snapshot bullet left out that rebuild, and the Review round 1 bullet
+  said the page reads neither rate, though it reads the frame header's
+  (it uses neither). It found round 1's findings resolved, `app.go` and
+  `tui_fps_test.go` changed only in comments (their tokens equal round
+  1's), and every figure of the round-2 snapshot bullet reproduced, with
+  the lost-audio figures. Left for later, from its suggestions: the
+  comment on `statistics` in `app.go` still says the server stamps packets
+  with the device's monotonic clock, without the exception above.
+- Round 3 changes only this entry, and moves the part unchanged onto part
+  38's fifth round (on part 37's fourth), which changes none of its files
+  but the handoff.
+- Verification, snapshot round 3 (`/tmp/opencode/review-40c`, on part 38's
+  fifth round), every Go command inside the bwrap sandbox with `iso.env`:
+  gofmt, vet, the build and `git diff --check`; `go test ./...` (468
+  top-level tests pass and 3 skip); `-race -count=3` on 46 related tests;
+  the 3 new and 5 changed tests, with the two unchanged neighbours, 20
+  times and 5 times under `-race`; the docs checker finds 33 relative
+  links in the README and docs/ARCHITECTURE.md and no problem; the whole
+  module, in the desktop-like sandbox, connects to none of its decoy
+  sockets, while the positive control reaches two. The runs against older
+  code were not repeated, as the part's files are round 2's bytes. Every
+  file of the part but the handoff, `README.md` and `app.go` (which part
+  39 also changes, and part 41 the README) equals the worktree's. These
+  checks ran before this bullet was written and before part 38's snapshot
+  gained its last handoff bullet; the snapshot was then rebuilt on the
+  final one, with this bullet, the same files.
+- Review round 3 (PASS), with two nits, both corrected above: the round-3
+  snapshot bullet left out the rebuild of part 38's snapshot under it (the
+  checks name its earlier base), and the Review round 2 bullet said every
+  figure reproduced, where round 2 reproduced the round-2 snapshot
+  bullet's figures and the lost-audio ones, not the device's or the
+  probe's. It found round 2's nits resolved, only the handoff changed
+  since round 2, and every figure of the round-3 snapshot bullet
+  reproduced.
+- Round 4 changes only this entry, and moves the part unchanged onto part
+  38's sixth round, on part 37's fifth round, which changes none of its
+  files but the handoff.
+- Verification, snapshot round 4 (`/tmp/opencode/review-40d`, on part 38's
+  sixth round): the same checks as round 3's, with the same results: 468
+  top-level tests pass and 3 skip, the related, new and changed tests and
+  the docs checks pass, and the whole module connects to none of its decoy
+  sockets, while the positive control reaches two.
+- Review round 4 (BLOCKED on part 37): part 37's fifth round, under this
+  snapshot, needed changes, so the tree could not land as reviewed, and
+  the Round 4 bullet's "on part 37 as committed" was not true (corrected
+  above). It found nothing to change in this part: both of round 3's nits
+  fixed as asked, the files and the delta right, and every check
+  reproduced. Its suggestion, taken: a move names part 37's round until
+  part 37 has landed.
+- Round 5 changes only this entry, and moves the part unchanged onto part
+  38's seventh round, on part 37's sixth, which changes none of its files
+  but the handoff.
+- Review round 5 (PASS), with no findings: the files, the delta and this
+  entry right, the base exactly part 38's seventh round, and every check
+  reproduced. Part 37's sixth round then needed changes.
+- Round 6 changes only this entry, and moves the part unchanged onto part
+  38's eighth round, on part 37's seventh, which changes none of its files
+  but the handoff.
+- Review round 6 (PASS), with no findings: the files, the delta and this
+  entry right, the base exactly part 38's eighth round, and every check
+  reproduced. Part 37's seventh round then needed changes.
+- Round 7 changes only this entry, and moves the part unchanged onto part
+  38's ninth round, on part 37's eleventh, which changes none of its files
+  but the handoff.
+
 ## Update (2026-10-21: QoL overhaul, part 38: web loose ends and test isolation)
 
 - `--window`: no browser opens once a stop has begun, and none outlives the

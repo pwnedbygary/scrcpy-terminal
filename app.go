@@ -75,6 +75,14 @@ type app struct {
 
 	lastFrameNano int64
 
+	// streamFPS is the stream's frame rate as the last frame drawn carried it
+	// (videoFrame.fps): the rate --no-tui prints and the browser display's
+	// status messages carry (the page shows the rate it paints at). The
+	// status row shows it rather than the mean of ftHist, which counts the
+	// pauses of a still screen, where the device repeats a frame at most ten
+	// times, 100 ms apart, and then sends none until something changes.
+	streamFPS float64
+
 	// keyboard auto-grabbed the mouse on open (Zellij); restore on close
 	kbAutoGrabbed bool
 
@@ -271,6 +279,7 @@ func (a *app) loop(wake <-chan struct{}, lost <-chan error) error {
 				a.recordFrameTime(float64(now-a.lastFrameNano) / 1e6)
 			}
 			a.lastFrameNano = now
+			a.streamFPS = f.fps
 			a.frameW, a.frameH = f.w, f.h
 			a.tui.draw(f.rgb)
 			a.stream.returnPooled(f.rgb)
@@ -620,9 +629,10 @@ func (a *app) runHeadless() error {
 			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
 		}
 	}()
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(statisticsEvery)
 	defer ticker.Stop()
 	var dumped int
+	width := 0 // of the longest statistics line printed
 
 	for {
 		select {
@@ -646,12 +656,36 @@ func (a *app) runHeadless() error {
 			}
 			a.stream.returnPooled(f.rgb)
 		case <-ticker.C:
-			lag := (a.stream.lastVideoPts.Load() - a.stream.lastAudioPts.Load()) / 1000
-			fmt.Fprintf(os.Stdout, "\r[%dx%d fps=%.0f audio=%s pcm=%dKB peak=%d avlag=%dms]   ",
-				a.frameW, a.frameH, a.stream.currentFPS, audioState(a),
-				a.stream.audioBytesSeen()/1024, a.stream.peakAudio(), lag)
+			// Padded to the longest line printed, so that a shorter one,
+			// once the sound stops, hides all of it.
+			line := "[" + a.statistics() + "]"
+			width = max(width, len(line))
+			fmt.Fprintf(os.Stdout, "\r%-*s   ", width, line)
 		}
 	}
+}
+
+// statisticsEvery is how often --no-tui prints its statistics line.
+var statisticsEvery = 2 * time.Second
+
+// statistics is the statistics line of --no-tui: the picture's size, the
+// stream's frame rate and the sound (audioState). While sound plays, which
+// takes a sound stream that is not off and has sent a packet, it adds the
+// PCM decoded and its peak, and once a video packet has come too, how far
+// the audio lags the video. The server stamps packets with the device's
+// monotonic clock, so a timestamp of 0 means that none has come yet.
+func (a *app) statistics() string {
+	audio := audioState(a)
+	line := fmt.Sprintf("%dx%d fps=%.0f audio=%s", a.frameW, a.frameH, a.stream.currentFPS, audio)
+	audioPts := a.stream.lastAudioPts.Load()
+	if audio == "off" || audioPts == 0 {
+		return line
+	}
+	line += fmt.Sprintf(" pcm=%dKB peak=%d", a.stream.audioBytesSeen()/1024, a.stream.peakAudio())
+	if videoPts := a.stream.lastVideoPts.Load(); videoPts != 0 {
+		line += fmt.Sprintf(" avlag=%dms", (videoPts-audioPts)/1000)
+	}
+	return line
 }
 
 // audioState is the sound for the statistics line of --no-tui, where this
@@ -911,8 +945,8 @@ func (a *app) statusLine() string {
 
 // statusParts is what follows the hints, most important first: where input
 // goes, the software keyboard, the volume and the device's name if it is
-// known, then the frame size and rate and their sparkline, which are the
-// first to go on a narrow pane.
+// known, then the frame size, the stream's frame rate and the sparkline of the
+// times between the frames drawn, which are the first to go on a narrow pane.
 func (a *app) statusParts() []statusPart {
 	var mode string
 	switch {
@@ -939,19 +973,8 @@ func (a *app) statusParts() []statusPart {
 	if a.frameW > 0 && a.frameH > 0 {
 		stats = append(stats, fmt.Sprintf("%dx%d", a.frameW, a.frameH))
 	}
-	if a.ftCnt > 0 {
-		avg := 0.0
-		n := min(a.ftCnt, 32)
-		for i := 0; i < n; i++ {
-			idx := (a.ftIdx - 1 - i + len(a.ftHist)) % len(a.ftHist)
-			avg += a.ftHist[idx]
-		}
-		avg /= float64(n)
-		fps := 0.0
-		if avg > 0.01 {
-			fps = 1000.0 / avg
-		}
-		stats = append(stats, fmt.Sprintf("%4.1fms %4.1ffps", avg, fps))
+	if a.streamFPS > 0 { // 0 until the stream has measured its first half second
+		stats = append(stats, fmt.Sprintf("%4.1fms %4.1ffps", 1000/a.streamFPS, a.streamFPS))
 	}
 	return []statusPart{
 		{text: mode, shrink: true},

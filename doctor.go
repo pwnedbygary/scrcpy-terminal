@@ -59,11 +59,13 @@ Checks what scterm needs on this computer, and prints one line for each
 check: ok, warn or FAIL, what it checked and what it found, and under it
 what to do, when there is something to do. It checks this build (on x86-64,
 that the CPU has AVX2), adb and each device it lists, with the Android
-version of each ready one, the sound of the terminal display, the browser
-and the display --window would use, whether --web can listen on its default
+version of the one scterm would use (the one ANDROID_SERIAL names, or the
+only ready one), the sound of the terminal display, the browser and the
+display --window would use, whether --web can listen on its default
 address, 127.0.0.1:6969, the names in SCTERM_WEB_HOSTS, and the identity and
-pairings of peer mode. It connects to no paired device: scterm peers --check
-does. It exits 1 when a check fails, and 0 when there are only warnings.
+pairings of peer mode. It runs nothing on any other device. It connects to
+no paired device: scterm peers --check does. It exits 1 when a check fails,
+and 0 when there are only warnings.
 `
 
 // runDoctor runs scterm doctor's checks, in the order it prints them, and
@@ -258,13 +260,14 @@ func doctorADB(paired int) doctorLine {
 const serialForms = "connect that device, or unset ANDROID_SERIAL, or set it as adb takes it: a serial, a network device's host " +
 	"without its port (tcp: or udp: may come first), a USB path such as usb:1-1, or product:, model: or device: and a name, as adb devices -l shows them"
 
-// doctorDevices checks each device adb lists, and the Android version of each
-// ready one. A device's problem is a failure when it is the device scterm
-// would use (the one ANDROID_SERIAL names, or the only ready one), or when no
-// device is chosen and scterm has none it can mirror; otherwise it is a
-// warning. No device at all offers --peer. With a paired device, no device
-// and a listing that fails are warnings, and the advice for the listing
-// offers --peer too.
+// doctorDevices checks each device adb lists, and the Android version of the
+// one scterm would use (the one ANDROID_SERIAL names, or the only ready one).
+// It runs nothing on any other device, which another program may be using: a
+// ready one is listed as adb devices -l shows it. A device's problem is a
+// failure when it is the device scterm would use, or when no device is chosen
+// and scterm has none it can mirror; otherwise it is a warning. No device at
+// all offers --peer. With a paired device, no device and a listing that fails
+// are warnings, and the advice for the listing offers --peer too.
 //
 // A pairing makes only those two warnings, as --peer needs neither adb nor a
 // device it lists. Whatever adb does list is what plain scterm would use, so
@@ -277,28 +280,40 @@ func doctorDevices(paired int) []doctorLine {
 			orPeer("restart adb with 'adb kill-server', then try again", paired)}}
 	}
 	devices := listedDevices(out)
-	lines := make([]doctorLine, len(devices))
-	unusable := make([]bool, len(devices)) // not ready, or too old to mirror
 	var ready []string
-	mirrorable := false // whether a ready device may be one scterm can mirror
-	for i, d := range devices {
+	for _, d := range devices {
 		if d.state == "device" {
 			ready = append(ready, d.serial)
-			lines[i], unusable[i] = doctorDevice(d)
-			mirrorable = mirrorable || !unusable[i]
-			continue
 		}
-		why, todo := notReadyAdvice(d.serial, d.state)
-		lines[i], unusable[i] = doctorLine{doctorWarn, "device", why, todo}, true
 	}
 	// The device scterm would use, as findDevice picks it: the one adb takes
 	// for ANDROID_SERIAL, or else the only ready one.
 	chosen := envOr("ANDROID_SERIAL", "")
 	picked, ambiguous := pickTarget(devices, chosen)
+	used := func(i int) bool {
+		return !ambiguous && slices.Contains(picked, i) || chosen == "" && len(ready) == 1 && devices[i].state == "device"
+	}
+	lines := make([]doctorLine, len(devices))
+	unusable := make([]bool, len(devices)) // not ready, or too old to mirror
+	// Whether a ready device may be one scterm can mirror: one doctor does
+	// not read may be.
+	mirrorable := false
+	for i, d := range devices {
+		switch {
+		case d.state != "device":
+			why, todo := notReadyAdvice(d.serial, d.state)
+			lines[i], unusable[i] = doctorLine{doctorWarn, "device", why, todo}, true
+		case used(i):
+			lines[i], unusable[i] = doctorDevice(d)
+			mirrorable = mirrorable || !unusable[i]
+		default:
+			lines[i] = doctorLine{doctorOK, "device", listedName(d) + " is ready; scterm would not use it, so doctor runs nothing on it", ""}
+			mirrorable = true
+		}
+	}
 	for i, d := range devices {
 		named := !ambiguous && slices.Contains(picked, i)
-		use := named || chosen == "" && len(ready) == 1 && d.state == "device"
-		if unusable[i] && (use || chosen == "" && !mirrorable) {
+		if unusable[i] && (used(i) || chosen == "" && !mirrorable) {
 			lines[i].status = doctorFail
 		}
 		switch {
@@ -327,21 +342,29 @@ func doctorDevices(paired int) []doctorLine {
 	return lines
 }
 
+// listedName is a device as adb devices -l lists it: its serial, and its
+// model when the listing has one.
+func listedName(d adbDevice) string {
+	if d.model != "" {
+		return d.serial + " (" + d.model + ")"
+	}
+	return d.serial
+}
+
 // doctorDevice reads a ready device's Android version, read-only, and compares
 // it with what the README gives: Android 5.0 (SDK 21) for the bundled server,
 // 11 (SDK 30) for sound and 13 (SDK 33) for playback capture. It reports
 // whether the device is too old for the bundled server; doctorDevices decides
 // whether that fails.
 func doctorDevice(d adbDevice) (l doctorLine, tooOld bool) {
-	name := d.serial
-	if d.model != "" {
-		name += " (" + d.model + ")"
-	}
-	release, err := doctorOutput(nil, "adb", "-s", d.serial, "shell", "getprop", "ro.build.version.release")
+	name := listedName(d)
+	prop := "ro.build.version.release"
+	release, err := doctorOutput(nil, "adb", "-s", d.serial, "shell", "getprop", prop)
 	sdk := 0
 	if err == nil {
+		prop = "ro.build.version.sdk"
 		var out string
-		if out, err = doctorOutput(nil, "adb", "-s", d.serial, "shell", "getprop", "ro.build.version.sdk"); err == nil {
+		if out, err = doctorOutput(nil, "adb", "-s", d.serial, "shell", "getprop", prop); err == nil {
 			if sdk, err = strconv.Atoi(strings.TrimSpace(out)); err != nil {
 				err = fmt.Errorf("its SDK reads %q", strings.TrimSpace(out))
 			}
@@ -349,7 +372,7 @@ func doctorDevice(d adbDevice) (l doctorLine, tooOld bool) {
 	}
 	if err != nil {
 		return doctorLine{doctorWarn, "device", fmt.Sprintf("%s is ready, but its Android version could not be read (%v)", name, err),
-			"see what adb says: adb -s " + d.serial + " shell getprop ro.build.version.sdk"}, false
+			"see what adb says: adb -s " + d.serial + " shell getprop " + prop}, false
 	}
 	android := fmt.Sprintf("SDK %d", sdk)
 	if r := strings.TrimSpace(release); r != "" {

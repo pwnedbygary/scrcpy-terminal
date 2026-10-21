@@ -21,7 +21,8 @@ import (
 const statusHintsText = "Alt+Q quit · Alt+/ controls"
 
 // statusApp is a terminal UI app width cells wide showing a device: volume
-// 100%, a 1080x2400 picture and 32 frames 16 ms apart (16.0 ms, 62.5 fps).
+// 100%, a 1080x2400 picture from a stream of 62.5 fps (16.0 ms), and 32
+// frames drawn 16 ms apart.
 func statusApp(width int, name string) *app {
 	a := newTestApp(nil)
 	a.tui = &tui{cols: width, rows: 23}
@@ -30,6 +31,7 @@ func statusApp(width int, name string) *app {
 	a.audio.setGain(100)
 	a.sess = &session{deviceName: name}
 	a.frameW, a.frameH = 1080, 2400
+	a.streamFPS = 62.5
 	for i := 0; i < 32; i++ {
 		a.recordFrameTime(16)
 	}

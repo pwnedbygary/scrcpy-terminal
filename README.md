@@ -109,8 +109,9 @@ still go to the device. In Zellij, scterm starts with the mouse and typing left 
 `typing goes to Zellij · F12 gives control`.
 
 The bottom line starts with the two hints. After them come where input goes (when it is not
-grabbed), the volume of the sound on this computer, the device name, and the picture size and
-frame rate. A message, such as a saved screenshot or an error, takes the place of these details
+grabbed), the volume of the sound on this computer, the device name, the picture size, the frame
+rate of the video stream (the one `--no-tui` prints), and a graph of the time between the frames
+drawn. A message, such as a saved screenshot or an error, takes the place of these details
 for a few seconds. When it exits, scterm prints the messages again: the last 50 different ones,
 with a count of any older ones. After a first press on Quit
 in the action bar, the menu or the on-screen keyboard, the line says `press Quit again to quit`
@@ -424,12 +425,14 @@ prints the same line first.
 ## Troubleshooting
 
 Start with `scterm doctor`. It checks what scterm needs on this computer: on x86-64, a CPU with
-AVX2; adb, each device it lists, and the Android version of each ready device; what the sound of
+AVX2; adb, each device it lists, and the Android version of the device scterm would use (the one
+`ANDROID_SERIAL` names, or the only ready one); what the sound of
 the terminal display needs; the browser and the display for `--window`; whether `--web` can
 listen on its default address, `127.0.0.1:6969`; the names in `SCTERM_WEB_HOSTS`; and the
 identity and pairings of peer mode. It prints one line for each check, which starts with
 `ok`, `warn` or `FAIL`, and under it a line that says what to do, when there is something to do.
-It exits with status 1 when a check fails, and 0 when there are only warnings. It does not
+It exits with status 1 when a check fails, and 0 when there are only warnings. It runs nothing
+on the other devices, which another program may be using, and it does not
 connect to paired devices: `scterm peers --check` does that.
 
 ### The device is not found
