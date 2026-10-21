@@ -20,6 +20,7 @@
     <string name="start_with_shizuku">Start with Shizuku</string>
     <string name="share">Share</string>
     <string name="cancel">Cancel</string>
+    <string name="close">Close</string>
     <string name="done">Done</string>
     <string name="pair">Pair</string>
     <string name="forget">Forget</string>
@@ -92,6 +93,6 @@
     <string name="serve_not_serving">Not serving.</string>
     <string name="serve_starting">Starting…</string>
     <string name="serve_failed">Serving stopped: %1$s</string>
-    <string name="pair_allow_back">Also let it see and control this device</string>
+    <string name="pair_allow_back">Also let it see, hear and control this device</string>
     <string name="viewer_retry">Retry</string>
 </resources>

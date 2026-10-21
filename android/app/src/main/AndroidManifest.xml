@@ -34,8 +34,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ScTerm">
 
+        <!-- Handles its own configuration changes, like the viewer: recreating it
+             on a rotation or unfold would end a pairing that is comparing codes. -->
         <activity
             android:name=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode"
             android:exported="true"
             android:launchMode="singleTop">
             <intent-filter>

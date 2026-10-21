@@ -7,6 +7,21 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 5: Android pairing, viewer Back, allow-back grant)
+
+- `MainActivity` handles its own configuration changes, like the viewer, so
+  rotating or unfolding no longer ends a pairing that is comparing codes;
+  `alert()` refuses a dead window, the nearby flow no longer dismisses a dead
+  dialog, and `onDestroy` stops the device search and its multicast lock.
+- Viewer: Back leaves while connecting or after a session ended (it sent the
+  remote Back to nothing); the overlay offers Cancel while connecting, Close
+  after.
+- "Also let it see, hear and control this device" grants view, audio and
+  control, like the invite dialog's defaults; it used to share the clipboard.
+- Verification: not compiled here (the offline Gradle cache lacks the pinned
+  toolchain); CI on the draft pull request builds, tests and lints it. Not
+  checked on a device.
+
 ## Update (2026-10-20: QoL overhaul, part 4: the command line fails fast)
 
 - Startup no longer hangs (a bad `--audio-codec` used to hang silently): the

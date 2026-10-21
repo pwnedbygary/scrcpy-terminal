@@ -111,6 +111,7 @@ class MainActivity : ComponentActivity() {
     private var requestDialog: AlertDialog? = null
     private var requestShown: TargetServer.PairingRequest? = null
     private var nearbyPairing: NearbyPairing? = null
+    private var nearbyBrowser: Nearby.Browser? = null
 
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val next = pendingAfterPermissions
@@ -148,7 +149,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        // Dialogs die with this window; a pairing waiting on one cannot finish.
+        // Dialogs die with this window without running their dismiss listeners:
+        // a pairing waiting on one cannot finish, and a search would keep its
+        // multicast lock.
+        nearbyBrowser?.stop()
         nearbyPairing?.cancel()
         invitationDialog?.dismiss()
         requestDialog?.dismiss()
@@ -649,8 +653,12 @@ class MainActivity : ComponentActivity() {
                 if (input.text.isBlank()) toast("Pick a nearby device, or enter an invitation.") else pair(input.text.toString(), allowBack.isChecked)
             }
             .setNegativeButton(R.string.cancel, null)
-            .setOnDismissListener { browser.stop() }
+            .setOnDismissListener {
+                browser.stop()
+                if (nearbyBrowser === browser) nearbyBrowser = null
+            }
             .show()
+        nearbyBrowser = browser
         browser.start()
     }
 
@@ -696,12 +704,18 @@ class MainActivity : ComponentActivity() {
             thread(name = "pairing", isDaemon = true) {
                 val started = runCatching { ControllerClient(app.identity, app.clientInfo).startNearbyPairing(host, port, servePort) }
                 runOnUiThread {
-                    progress.dismiss()
                     val pairing = started.getOrNull()
-                    when {
-                        cancelled || isDestroyed -> pairing?.cancel()
-                        pairing != null -> confirmNearby(pairing, host, port, allowBack)
-                        else -> alert("Pairing failed", describePairingFailure(started.exceptionOrNull()!!, nearby = true))
+                    // A cancelled dialog is already gone, and a destroyed screen's
+                    // window cannot be dismissed.
+                    if (cancelled || isDestroyed) {
+                        pairing?.cancel()
+                        return@runOnUiThread
+                    }
+                    progress.dismiss()
+                    if (pairing != null) {
+                        confirmNearby(pairing, host, port, allowBack)
+                    } else {
+                        alert("Pairing failed", describePairingFailure(started.exceptionOrNull()!!, nearby = true))
                     }
                 }
             }
@@ -748,7 +762,8 @@ class MainActivity : ComponentActivity() {
                 name = result.device.name,
                 target = TargetAddress(host, port),
                 grantedByPeer = Grant.toWire(result.grants),
-                inbound = if (allowBack) Grant.toWire(Grant.FULL) else old?.inbound ?: emptyList(),
+                // The invite dialog's defaults: the clipboard is only shared when asked for.
+                inbound = if (allowBack) Grant.toWire(Grant.FULL - Grant.CLIPBOARD) else old?.inbound ?: emptyList(),
                 lastSeenMs = now,
             )
         }
@@ -1005,6 +1020,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun alert(title: String, message: String) {
+        // Results arrive from other threads, sometimes after this screen is gone;
+        // showing a dialog on a dead window crashes.
+        if (isFinishing || isDestroyed) return
         AlertDialog.Builder(this).setTitle(title).setMessage(message).setPositiveButton(R.string.done, null).show()
     }
 

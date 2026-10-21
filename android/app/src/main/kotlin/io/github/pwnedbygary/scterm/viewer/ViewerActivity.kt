@@ -161,9 +161,15 @@ class ViewerActivity : ComponentActivity() {
         }
         // The panel is a window of its own: it can only be added once this one is.
         window.decorView.post { applyOrientation(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) }
-        // System Back is the remote Back; leaving uses the Disconnect button.
+        // During a session System Back is the remote Back, and leaving uses the
+        // Disconnect button. While connecting, or after a session ended, there is
+        // nothing to send it to, so Back leaves.
         onBackPressedDispatcher.addCallback(this) {
-            if (keyboardShown) hideKeyboard() else input.press(DeviceAction.BACK)
+            when {
+                keyboardShown -> hideKeyboard()
+                session == null -> finish()
+                else -> input.press(DeviceAction.BACK)
+            }
         }
         findViewById<Button>(R.id.overlay_retry).setOnClickListener {
             if (cleanupReady) {
@@ -554,7 +560,11 @@ class ViewerActivity : ComponentActivity() {
         overlay.visibility = View.VISIBLE
         overlayText.text = message
         findViewById<ProgressBar>(R.id.progress).visibility = if (busy) View.VISIBLE else View.GONE
-        findViewById<Button>(R.id.overlay_close).visibility = if (busy) View.GONE else View.VISIBLE
+        // A connect can wait out several timeouts: it can always be left.
+        findViewById<Button>(R.id.overlay_close).apply {
+            visibility = View.VISIBLE
+            setText(if (busy) R.string.cancel else R.string.close)
+        }
         findViewById<Button>(R.id.overlay_retry).apply {
             visibility = if (busy || !leaving) View.GONE else View.VISIBLE
             isEnabled = cleanupReady
