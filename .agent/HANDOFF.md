@@ -7,6 +7,160 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 27: a way out of a paste, and true paste notices)
+
+- Notices are quoted here as the status row shows them, without the
+  "scterm: " that stderr and the exit replay keep.
+- A Ctrl+C byte anywhere between a paste's start and end markers cancels
+  the paste: nothing of it is sent, the status row says "paste cancelled by
+  Ctrl+C", and input is dropped up to the paste's end marker, or until no
+  read has come for 250 ms (each dropped read starts the 250 ms again); then
+  keys act again. This holds whether the paste is still coming in, already
+  whole in one read, or being dropped as too long (the cancel notice then
+  replaces the "paste not sent" one), so the result does not depend on where
+  the terminal's reads cut it, and a genuine paste holding a Ctrl+C
+  character is dropped whole. A paste unfinished for 2 s, counted from the
+  read that brought its start marker, gets "Ctrl+C cancels the unfinished
+  paste", again every 2 s while it stays unfinished. The input loop now
+  waits until the decoder's next deadline (an Esc's 25 ms, that notice, or
+  the end of the 250 ms pause), at most 500 ms, instead of 500 ms polls with
+  one 25 ms window for a lone Esc. These deadlines count on the monotonic
+  clock, from a start taken when the program starts, so setting the system
+  time moves none of them. The debug log shows only "(N bytes of a paste)"
+  for what a cancel drops.
+- An Esc directly followed by a start marker is Back, then one paste. An
+  Esc followed by what could still become a start marker waits the 25 ms a
+  lone Esc gets for the rest, and when it does not come decodes as before
+  (Alt+Esc, which does nothing, then the rest typed); so two Esc presses
+  within 25 ms resolve 25 ms later than before, with the same events. ESC O
+  followed by ESC is now ESC O alone (Alt+Shift+O, which does nothing) and
+  the Esc begins what follows, everywhere, since an Esc cannot end an SS3
+  sequence.
+- With a paired device a paste is sent only while this computer holds the
+  lease (`peer.Session.Lease()`, `peer/client.go:258`, is `held`).
+  Otherwise nothing is sent, and every time the status row says "paste not
+  sent: no control (--takeover takes it)"; before, the paste went out, the
+  device refused it, and scterm said "pasted N characters". adb sessions
+  have no lease and are unchanged.
+- The typed fallback (a paired device without the clipboard grant,
+  capabilities or `set_clipboard`) takes at most 4096 bytes of text as
+  typed (after CR LF folding, with control characters and bytes that are not
+  UTF-8 left out); a longer paste is refused whole: "paste not sent: N
+  bytes, at most 4096 typed". 4096 is a judgement call (a long URL, a key or
+  a page of text, and at most 14 inject-text messages); how fast a device
+  types it was not measured. The clipboard path keeps its 262,130-byte
+  limit.
+- Paste notices (sent, not sent for any reason, cancelled, and the Ctrl+C
+  hint) still show in the status row, or on stderr without the terminal UI,
+  but are no longer kept for the exit replay. A send error ("scterm: paste:
+  ...") still is, and so is "scterm: input ignored: ... (a paste)" when
+  handling a paste panics, now without the paste's length.
+- From part 23's review: tests for its gaps R2 (a paste whose text reaches
+  the limit as its end marker is cut), R3 (a welcome with the clipboard
+  grant and no capabilities) and R4 (an empty or all-control paste), each
+  failing on part 23's code with that mutation; `TestInputFuzz` also feeds
+  every entry through a fresh `inputDecoder`, in one read and a byte per
+  read, and fails on a panic or an "input ignored" notice (a decoder panic
+  planted as mutation M30 fails the new `TestInputFuzz` and passes the old
+  one).
+- From part 16's review: `repaint` lets go of the UI lock with `defer`, so a
+  panic while it paints, which `handleInput`'s recover swallows, no longer
+  leaves the lock held and the run loop hung.
+- README: the terminal's paste paragraph says Ctrl+C cancels a paste, gives
+  the 4,096-byte typed limit and the lease, says what an unfinished paste
+  does, and that scterm says when one of these stops a paste.
+- This closes the part-23 entry's "nothing inside it acts as a key" (Ctrl+C
+  now does) and its "Left alone" items on an unfinished paste, an Esc or
+  ESC O before a paste, the success notice after a refusal, the R2, R3, R4
+  and fuzz gaps, and the untested input loop and Esc window, as well as
+  part 23's suggestions on paste lengths in the exit replay and a cap for
+  the typed fallback.
+- Verification, in the builder's tree (`286d838` plus the then uncommitted
+  parts 14, 20, 21, 22, 23, 25 and 26): gofmt, vet, the build, `go test
+  ./...` (the root package takes 22.8 s, 19.4 s before), `-race` on the
+  whole module and `-race -count=3` on the 83 input, paste, fuzz, notice and
+  render tests, and the 19 new and changed tests 20 times plain and 5 times
+  under `-race`. New tests: `TestCtrlCCancelsAPaste`, `TestEscBeforeAPaste`,
+  `TestPasteNeedsTheLease` (real sessions through `peer.Client.Connect` to a
+  fake TLS target answering as `docs/PEER_PROTOCOL.md` describes),
+  `TestTypedPasteLimit`, `TestPasteNoticesAreNotReplayed`,
+  `TestPasteAtTheLimitWithItsEndMarkerCut`,
+  `TestPasteWithoutTheBackendsCapabilities`, `TestEmptyPasteSendsNothing`,
+  `TestRepaintPanicLeavesTheLockFree`, `TestInputLoop` (the real input loop
+  in a child process reading a pipe, with real pauses), and, on a fake
+  clock, `TestCancelledPasteEndsWhenInputStops`, `TestUnfinishedPasteHint`,
+  `TestCtrlCAlwaysGetsOut` (3000 random inputs), `TestEscWaitsForWhatFollows`
+  and `TestWaitWithNothingDue`; `TestPasteWithoutTheDeviceClipboard` now
+  builds its sessions with the lease held. The seven behaviour tests fail
+  on the base files for their item's reason; the fake-clock tests use the
+  new decoder API and cannot compile there, so mutations stand behind them:
+  40 of 40 mutations of the new code are caught. In the worktree with the
+  other uncommitted parts: gofmt, vet and `go test ./...` pass. Not
+  verified: a real terminal (its paste markers, one that never sends the end
+  marker, how the notices look), a device or a real peer, how long a helper
+  backend takes to type 4096 bytes, and `TestInputLoop`'s timing margins
+  under much heavier load than this host's.
+- Review round 1 asked for docs fixes only: this entry named
+  `peer.Client.Lease()` and said the old fuzz test missed a decoder panic
+  (it was a planted mutation), and the README said scterm tells whenever a
+  paste is not sent, though the menu, ungrabbed Zellij and control off stop
+  one silently. Round 2 fixes those and takes four of the review's
+  suggestions: the two refusals fit the 50 cells an 80-column status row has
+  after its hints (48 cells at most; the device's name is left out, since a
+  name longer than 7 cells would push out `--takeover`); the panic notice
+  above lost the paste's length; the decoder's deadlines moved to the
+  monotonic clock; and guard tests for the review's mutants V02, V03 and V04
+  (`TestNoHintOncePasteIsOver`, and a Ctrl+C right after a paste's end
+  marker, in the same read, is a key). Also new: `TestInputClockIsMonotonic`
+  and `TestPasteRefusalsFitTheStatusRow`; `TestPasteNoticesAreNotReplayed`
+  pins the panic notice in the replay. The 250 ms pause after a cancel
+  stays: on the fake clock a longer pause only moves the threshold for a
+  pasted Ctrl+C's late rest (with the 250 ms pause it is typed from 250 ms
+  on, with a 1 s pause from 1 s on) and drops the user's own keys after
+  every Ctrl+C for longer (at 1 s, ten keys typed 300 ms apart after a
+  cancel are all dropped).
+- Verification of round 2, in the builder's tree (`743400f`: `e0919d4` plus
+  parts 26 round 2, 27, 28 round 1 and 29), with iso.env: gofmt, vet, the
+  build, `go test ./...` (364 top-level tests pass and 3 skip; 361 and 3
+  before), `-race` on the module and `-race -count=3` on 86 input, paste,
+  notice and render tests, and the 9 new, changed or affected tests 20 times
+  plain and 5 times under `-race`. The four tests of the panic notice and
+  the refusals' width fail on round 1's files for their reasons; the two
+  guards pass there, since that code was right. V02, V03 and V04 survive
+  round 1's tests and fail the new ones; round 1's M03 (already caught
+  there, by `TestInputFuzzSplitReads`) and the builder's 7 mutations of the
+  round-2 code fail the new ones too. Taken into the worktree: `input.go`
+  and the two test files as built (unchanged there since the builder's
+  base), the README merged three ways with exactly the builder's lines;
+  gofmt, vet, `go test ./...` and the README test pass there.
+- Review round 2 asked for docs fixes only: the sentence above on round 1's
+  M03 said round 1's tests missed it, and the figures below for the
+  notices' widths and V14, and above for the late rest's threshold, were
+  rounded or too broad. Round 3 corrects them and names two more users of
+  the wall clock.
+- Left alone: mouse motion reports keep the 250 ms pause from ending while
+  the mouse moves; a new paste that starts within 250 ms of a cancel is
+  dropped up to its end marker; a paste holding a Ctrl+C character whose
+  rest arrives more than 250 ms after it (a stalled link) has that rest
+  typed as keys: a CR in it presses Enter on the device, and a pasted `ESC
+  q` quits scterm (seen on the fake clock), so the README's "nothing in it
+  acts as a key except Ctrl+C" does not hold there; a complete paste more
+  than 2 s in transit shows the Ctrl+C hint, though a Ctrl+C typed then
+  arrives after the end marker and reaches the device; the Ctrl+C hint can
+  stay up to 4 s after the paste ended; a start marker cut more than 25 ms
+  after its Esc is still Back plus typed text; ESC O alone still waits for
+  its third byte with no time limit; the too-long notice shows where the
+  paste would have gone nowhere (menu open, or ungrabbed in Zellij), and on
+  an 80-column pane it is cut after "...more than the 26213" (for a size of
+  six digits; of seven, after "...more than the 2621"); the two refusals
+  show whole down to 78 columns (the typed one, for a size of four digits,
+  down to 76) and are cut on narrower panes; only the input decoder's
+  deadlines are monotonic (the notices, the action bar, the keyboard flash,
+  quit arming, the menu, the mouse-drag coalescer and the frame-rate counter
+  still use the wall clock); the review's mutants V11 (a lease state of ""
+  passing) and V14 (equivalent: the hint deadline is 0 whenever what follows
+  a cancel is being dropped); the browser's paste is unchanged.
+
 ## Update (2026-10-21: QoL overhaul, part 19: the browser player on phones, its looks and its accessibility)
 
 - On a touch screen, a finger on the picture no longer brings up the HUD and

@@ -27,33 +27,19 @@ func (a *app) inputLoop() {
 	buf := make([]byte, 4096)
 	pend := make([]byte, 0, 4096)
 	var dec inputDecoder
+	emit := func(ev []byte) {
+		a.events <- inputEvent{kind: evBytes, buf: ev}
+	}
 	for {
-		if len(pend) == 0 || len(pend) > 1 || pend[0] != 0x1b {
-			// normal path: block until readable
-			if !waitReadable(500 * 1000) {
-				continue
-			}
-			n, err := os.Stdin.Read(buf)
-			if err != nil {
-				return
-			}
-			pend = append(pend, buf[:n]...)
-		} else {
-			// pend == [ESC]: short window to catch a following sequence byte
-			if !waitReadable(25 * 1000) {
-				a.events <- inputEvent{kind: evBytes, buf: []byte{0x1b}}
-				pend = pend[:0]
-				continue
-			}
-			n, err := os.Stdin.Read(buf)
-			if err != nil {
-				return
-			}
-			pend = append(pend, buf[:n]...)
+		if !waitReadable(dec.wait(pend).Microseconds()) {
+			pend = dec.expire(a, pend, emit)
+			continue
 		}
-		pend = dec.feed(a, pend, func(ev []byte) {
-			a.events <- inputEvent{kind: evBytes, buf: ev}
-		})
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			return
+		}
+		pend = dec.feed(a, append(pend, buf[:n]...), emit)
 	}
 }
 
@@ -61,29 +47,75 @@ func (a *app) inputLoop() {
 // bracketed paste: while the terminal UI runs, the terminal sends a paste
 // between pasteStart and pasteEnd (shellInit turns the mode on), so a paste is
 // one event. It goes to the device as one paste, and nothing in it is read as
-// a key or a shortcut.
+// a key or a shortcut, except Ctrl+C (raw mode reads it as a byte), which
+// cancels it: the way out of a paste whose end marker never comes.
 // ---------------------------------------------------------------------------
 
 const (
 	pasteStart = "\x1b[200~"
 	pasteEnd   = "\x1b[201~"
+	ctrlC      = 0x03
 )
 
 // maxPasteBytes is the longest paste sent: what one set-clipboard message
 // carries. A longer one is dropped, and a notice says so.
 const maxPasteBytes = clipboardTextMaxBytes
 
-// inputDecoder decodes what the terminal sends into input events. All it
-// keeps from one read to the next is whether it is dropping a paste too long
-// to send, and how many bytes of it so far.
+// maxTypedPasteBytes is the longest paste sent as injected text, where the
+// device clipboard cannot take it: a peer's helper backend then types it key
+// by key, pressing Enter at each line break, and nothing stops it once it is
+// sent. 4096 bytes holds a long URL, an SSH public key or a page of text, in
+// at most 14 messages. A longer paste is not sent, and a notice says so.
+const maxTypedPasteBytes = 4096
+
+// What the input loop waits for (inputDecoder.wait) besides input.
+const (
+	// escWait is how long an Esc waits for what follows it before it is
+	// the Esc key; the rest of an escape sequence comes in the same write.
+	escWait = 25 * time.Millisecond
+	// pasteHintAfter is how long a paste can stay unfinished before a
+	// notice says that Ctrl+C cancels it. The notice comes back every
+	// pasteHintEvery, so it stays up for as long as the paste does.
+	pasteHintAfter = 2 * time.Second
+	pasteHintEvery = noticeShowFor / 2
+	// cancelQuiet is the pause in input that ends a cancelled paste whose
+	// end marker does not come.
+	cancelQuiet = 250 * time.Millisecond
+	// inputPoll is the longest wait for input.
+	inputPoll = 500 * time.Millisecond
+)
+
+// inputDecoder decodes what the terminal sends into input events. From one
+// read to the next it keeps the state of a paste (dropped as too long to send,
+// with how many bytes of it so far; or cancelled), when to say that Ctrl+C
+// cancels an unfinished one, and when the last read came.
 type inputDecoder struct {
-	dropping bool
-	dropped  int
+	dropping   bool
+	dropped    int
+	discarding bool         // what follows a cancelled paste's Ctrl+C is dropped
+	hintAt     int64        // while a paste is unfinished, when the next Ctrl+C notice is due; else 0
+	lastRead   int64        // when the last read came (see clock)
+	now        func() int64 // the clock; nil is the real one
+}
+
+// inputClockStart is where the decoder's real clock starts. It holds a reading
+// of the monotonic clock, so the time since then goes on as time does whatever
+// the system time is set to, and setting it moves none of the deadlines.
+var inputClockStart = time.Now()
+
+// clock is the time now, in nanoseconds since inputClockStart.
+func (d *inputDecoder) clock() int64 {
+	if d.now != nil {
+		return d.now()
+	}
+	return int64(time.Since(inputClockStart))
 }
 
 // feed decodes the events at the front of pend, hands each to emit, and
 // returns what is left: the start of an event that a later read completes.
+// The input loop calls it with each read, added to what the one before left.
 func (d *inputDecoder) feed(a *app, pend []byte, emit func([]byte)) []byte {
+	d.lastRead = d.clock()
 	for len(pend) > 0 {
 		if dbgControl != "" {
 			fmt.Fprintf(os.Stderr, "scterm: raw %s\n", d.logged(pend))
@@ -101,19 +133,31 @@ func (d *inputDecoder) feed(a *app, pend []byte, emit func([]byte)) []byte {
 }
 
 // decode is decodeInput, except that a bracketed paste is one event, its
-// markers included, however many reads it spans. A paste longer than
-// maxPasteBytes is not kept: it is dropped as it comes in.
+// markers included, however many reads it spans, and that an Esc just before
+// one is the Esc key. A paste longer than maxPasteBytes is not kept: it is
+// dropped as it comes in. A paste with a Ctrl+C in it is cancelled.
 func (d *inputDecoder) decode(a *app, pend []byte) ([]byte, int) {
-	if d.dropping {
+	switch {
+	case d.discarding:
+		return nil, d.discard(pend)
+	case d.dropping:
 		return nil, d.drop(a, pend)
 	}
 	body, ok := bytes.CutPrefix(pend, []byte(pasteStart))
 	if !ok {
-		return a.decodeInput(pend)
+		return d.decodeKey(a, pend)
 	}
-	if end := bytes.Index(body, []byte(pasteEnd)); end >= 0 && end <= maxPasteBytes {
+	end := bytes.Index(body, []byte(pasteEnd))
+	if c := ctrlCBefore(body, end); c >= 0 {
+		return nil, len(pasteStart) + d.cancel(c)
+	}
+	if end >= 0 && end <= maxPasteBytes {
+		d.hintAt = 0
 		n := len(pasteStart) + end + len(pasteEnd)
 		return pend[:n], n
+	}
+	if d.hintAt == 0 {
+		d.hintAt = d.lastRead + int64(pasteHintAfter)
 	}
 	if len(body) < maxPasteBytes+len(pasteEnd) {
 		return nil, 0 // the rest of the paste is still to come
@@ -122,29 +166,147 @@ func (d *inputDecoder) decode(a *app, pend []byte) ([]byte, int) {
 	return nil, len(pasteStart) + d.drop(a, body)
 }
 
+// decodeKey is decodeInput, but an Esc followed by a paste's start marker is
+// the Esc key, not an Alt chord with the marker's Esc, and while what follows
+// an Esc could still be the start of that marker, it waits for the rest
+// (for escWait at most: see expire).
+func (d *inputDecoder) decodeKey(a *app, pend []byte) ([]byte, int) {
+	if pend[0] == 0x1b && len(pend) > 1 {
+		if bytes.HasPrefix(pend[1:], []byte(pasteStart)) {
+			return pend[:1], 1
+		}
+		if escWaiting(pend) {
+			return nil, 0
+		}
+	}
+	return a.decodeInput(pend)
+}
+
+// escWaiting reports whether pend is an Esc that waits for what follows it:
+// alone, or with what could still become a paste's start marker.
+func escWaiting(pend []byte) bool {
+	return len(pend) > 0 && len(pend) <= len(pasteStart) && pend[0] == 0x1b &&
+		bytes.HasPrefix([]byte(pasteStart), pend[1:])
+}
+
+// ctrlCBefore is where the first Ctrl+C in b is, before the end marker at end
+// (-1: not in b), or -1 when there is none.
+func ctrlCBefore(b []byte, end int) int {
+	if end >= 0 {
+		b = b[:end]
+	}
+	return bytes.IndexByte(b, ctrlC)
+}
+
+// cancel drops the paste whose Ctrl+C is at c in what is left of it: what
+// comes before, and the Ctrl+C, are taken now, and what comes after is
+// dropped up to the paste's end marker, or until input stops for cancelQuiet.
+// A paste that holds a Ctrl+C character is so dropped whole, not typed.
+func (d *inputDecoder) cancel(c int) int {
+	d.dropping, d.discarding, d.hintAt = false, true, 0
+	pasteNoticef("scterm: paste cancelled by Ctrl+C\n")
+	return c + 1
+}
+
+// discard takes what follows a cancelled paste's Ctrl+C, up to and including
+// its end marker. As in drop, the last bytes stay in case they begin the
+// marker; expire drops them once input stops.
+func (d *inputDecoder) discard(pend []byte) int {
+	end := bytes.Index(pend, []byte(pasteEnd))
+	if end < 0 {
+		return max(len(pend)-(len(pasteEnd)-1), 0)
+	}
+	d.discarding = false
+	return end + len(pasteEnd)
+}
+
 // drop takes the bytes of a paste too long to send, up to and including its
 // end marker. Until the marker comes, the last bytes stay in case they are its
 // beginning; so while dropping, at least that many are left over, never a
 // lone Esc that the input loop would time out as a key.
 func (d *inputDecoder) drop(a *app, pend []byte) int {
 	end := bytes.Index(pend, []byte(pasteEnd))
+	if c := ctrlCBefore(pend, end); c >= 0 {
+		return d.cancel(c)
+	}
 	if end < 0 {
 		n := max(len(pend)-(len(pasteEnd)-1), 0)
 		d.dropped += n
 		return n
 	}
 	d.dropped += end
-	d.dropping = false
+	d.dropping, d.hintAt = false, 0
 	if a.ctrl != nil { // without control no paste is sent, so none is missed
-		noticef("scterm: paste not sent: %d bytes, more than the %d one paste can carry\n", d.dropped, maxPasteBytes)
+		pasteNoticef("scterm: paste not sent: %d bytes, more than the %d one paste can carry\n", d.dropped, maxPasteBytes)
 	}
 	return end + len(pasteEnd)
+}
+
+// wait is how long the input loop waits for its next read before it calls
+// expire: until the next deadline, and inputPoll at most.
+func (d *inputDecoder) wait(pend []byte) time.Duration {
+	at, ok := d.deadline(pend)
+	if !ok {
+		return inputPoll
+	}
+	return min(max(time.Duration(at-d.clock()), 0), inputPoll)
+}
+
+// deadline is when expire next has something to do, if it has: end a
+// cancelled paste once input has stopped, say that Ctrl+C cancels an
+// unfinished one, or send an Esc that nothing followed.
+func (d *inputDecoder) deadline(pend []byte) (int64, bool) {
+	switch {
+	case d.discarding:
+		return d.lastRead + int64(cancelQuiet), true
+	case d.hintAt != 0:
+		return d.hintAt, true
+	case escWaiting(pend):
+		return d.lastRead + int64(escWait), true
+	}
+	return 0, false
+}
+
+// expire does what is due when no read came by the deadline, and returns what
+// is left of pend. A cancelled paste ends, and what is left of it is dropped;
+// a notice says (again) that Ctrl+C cancels an unfinished paste; an Esc that
+// nothing followed is the Esc key, and with the start of a sequence after it,
+// decodes as decodeInput decodes it.
+func (d *inputDecoder) expire(a *app, pend []byte, emit func([]byte)) []byte {
+	at, ok := d.deadline(pend)
+	now := d.clock()
+	if !ok || now < at {
+		return pend
+	}
+	switch {
+	case d.discarding:
+		d.discarding = false
+		return pend[:0]
+	case d.hintAt != 0:
+		d.hintAt = now + int64(pasteHintEvery)
+		pasteNoticef("scterm: Ctrl+C cancels the unfinished paste\n")
+		return pend
+	case len(pend) == 1:
+		emit([]byte{0x1b})
+		return pend[:0]
+	}
+	for len(pend) > 0 {
+		ev, n := a.decodeInput(pend)
+		if n == 0 {
+			break
+		}
+		pend = pend[n:]
+		if ev != nil {
+			emit(ev)
+		}
+	}
+	return pend
 }
 
 // logged is pend as the debug log shows it: its bytes in hex, but of a paste
 // only how long it is, never its text.
 func (d *inputDecoder) logged(pend []byte) string {
-	if d.dropping {
+	if d.dropping || d.discarding {
 		return fmt.Sprintf("(%d bytes of a paste)", len(pend))
 	}
 	if i := bytes.Index(pend, []byte(pasteStart)); i >= 0 {
@@ -182,6 +344,8 @@ func pasteText(b []byte) string {
 // paste sends a paste to the device as one paste: onto the device clipboard
 // and pasted from it where the device takes clipboard text from this computer,
 // and as injected text (in as many messages as that takes) where it does not.
+// A peer takes it only from the holder of its input lease (and says so only
+// once per run), so without the lease it is not sent, and the notice says why.
 func (a *app) paste(b []byte) {
 	if a.ctrl == nil {
 		return
@@ -190,8 +354,17 @@ func (a *app) paste(b []byte) {
 	if text == "" {
 		return
 	}
+	if a.sess != nil && a.sess.peer != nil && a.sess.peer.Lease() != peer.LeaseHeld {
+		pasteNoticef("scterm: paste not sent: no control (--takeover takes it)\n")
+		return
+	}
+	clip := a.clipboardPaste()
+	if !clip && len(text) > maxTypedPasteBytes {
+		pasteNoticef("scterm: paste not sent: %d bytes, at most %d typed\n", len(text), maxTypedPasteBytes)
+		return
+	}
 	var err error
-	if a.clipboardPaste() {
+	if clip {
 		err = a.ctrl.setClipboard(text, true)
 	} else {
 		err = a.ctrl.injectText(text)
@@ -201,9 +374,9 @@ func (a *app) paste(b []byte) {
 		return
 	}
 	if n := utf8.RuneCountInString(text); n == 1 {
-		noticef("scterm: pasted 1 character\n")
+		pasteNoticef("scterm: pasted 1 character\n")
 	} else {
-		noticef("scterm: pasted %d characters\n", n)
+		pasteNoticef("scterm: pasted %d characters\n", n)
 	}
 }
 
@@ -301,10 +474,13 @@ func escSeqLen(b []byte) int {
 		}
 		return 0
 	case 'O': // SS3
-		if len(b) >= 3 {
-			return 3
+		if len(b) < 3 {
+			return 0
 		}
-		return 0
+		if b[2] == 0x1b {
+			return 2 // Alt+O: an Esc does not end SS3, it starts what follows
+		}
+		return 3
 	default:
 		// Alt+key: ESC + char, all of a character beyond ASCII, so none of
 		// its bytes is left over to be read as a key of its own
@@ -325,8 +501,8 @@ func escSeqLen(b []byte) int {
 func (a *app) handleInput(b []byte) {
 	defer func() {
 		if r := recover(); r != nil {
-			if isPaste(b) { // not its text: a paste can hold a password
-				noticef("scterm: input ignored: %v (a paste of %d bytes)\n", r, len(b))
+			if isPaste(b) { // neither its text nor its length: a paste can hold a password
+				noticef("scterm: input ignored: %v (a paste)\n", r)
 				return
 			}
 			noticef("scterm: input ignored: %v (bytes % x)\n", r, b)

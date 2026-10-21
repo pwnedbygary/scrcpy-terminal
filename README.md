@@ -265,10 +265,14 @@ Ctrl+I, Ctrl+M and Ctrl+[ as Tab, Enter and Esc. Ctrl+C goes to the device and d
 scterm. Alt with a letter that has no action does nothing.
 
 A paste in the terminal goes to the device as one paste, through the device's clipboard
-(which it replaces), with its line breaks kept as line breaks; nothing in it acts as a key. A
-paired device that does not share its clipboard gets the text typed instead. A paste longer
-than 262,130 bytes is not sent, and scterm says so. Over adb, the server types accented
-letters but not the euro sign, CJK characters or emoji; a paste carries them.
+(which it replaces), with its line breaks kept as line breaks; nothing in it acts as a key
+except Ctrl+C, which cancels it (so a paste holding a Ctrl+C character is not sent). A paired
+device that does not share its clipboard gets the text typed instead, up to 4,096 bytes, and
+a paired device takes a paste only while this computer has control of it (`--takeover`). A
+paste longer than 262,130 bytes is not sent; scterm says when one of these stops a paste.
+If the terminal starts a paste and never ends it, keys do nothing until Ctrl+C cancels it;
+after two seconds the bottom line says so. Over adb, the server types accented letters but
+not the euro sign, CJK characters or emoji; a paste carries them.
 
 In the browser, Ctrl with a letter also goes to the device as that key with Ctrl, except:
 

@@ -43,9 +43,30 @@ func TestInputFuzz(t *testing.T) {
 		// typing beyond ASCII, whole, cut short, or not UTF-8 at all
 		"é", "€", "日本", "😀", "e\u0301", "\xc3", "\xc3(", "\xf0\x9f\x98", "\x80", "\xff",
 		"\xc0\xaf", "\xed\xa0\x80", "\xf4\x90\x80\x80", "\x1bé", "\x1b😀", "\x1b\xc3", "\x1b\xff",
-		// bracketed paste markers, alone, empty, nested, unterminated
+		// bracketed paste markers, alone, empty, nested, unterminated, cancelled
+		// by a Ctrl+C, after an Esc or an ESC O
 		"\x1b[200~", "\x1b[201~", "\x1b[200~\x1b[201~", "\x1b[200~hi\r\n\x1b[201~",
 		"\x1b[200~\x1b[200~x\x1b[201~", "\x1b[200~ab\x1bh", "\x1b[200~é\xc3",
+		"\x03", "\x1b[200~\x03", "\x1b[200~ab\x03cd", "\x1b[200~a\x03b\x1b[201~x", "\x1b[200~\x03\x1b[201~\x1b[201~",
+		"\x1b\x1b[200~x\x1b[201~", "\x1b\x1b[20", "\x1bO\x1b", "\x1bO\x1b[200~x\x1b[201~", "\x1b\x1b[200~\x03",
+	}
+	// Through the decoder the input loop uses, which is the one that knows
+	// pastes: each in one read and a byte at a time, from a fresh decoder (an
+	// unfinished paste would take in all that follows).
+	for _, s := range seqs {
+		for _, reads := range [][]string{{s}, readsOf(s, 1)} {
+			out := captureStderr(t, func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Errorf("PANIC on seq %q in %d reads: %v", s, len(reads), r)
+					}
+				}()
+				feedReads(a, &inputDecoder{}, reads...)
+			})
+			if strings.Contains(out, "input ignored") {
+				t.Errorf("seq %q in %d reads: %q", s, len(reads), out)
+			}
+		}
 	}
 	for _, s := range seqs {
 		bytes := []byte(s)
@@ -86,7 +107,8 @@ func TestInputFuzzSplitReads(t *testing.T) {
 	typed := strings.Join([]string{
 		"abc Z9!", "é", "ñ€日本😀", "e\u0301", "\xc3(", "\x80\xff\xed\xa0\x80", "\x1bé", "\x1b\x1b",
 		"\x1bh", "\x1b[A", "\x1b[1;5C", "\x1b[3~", pasted("one\rtwo\r\nthree"), pasted(""),
-		pasted("\x1b[200~nested\x1bh"), pasted("é😀\t"), "tail",
+		pasted("\x1b[200~nested\x1bh"), pasted("é😀\t"), "\x1b" + pasted("after Esc"), "\x1bO" + pasted("after ESC O"),
+		pasted("can\x03celled\x1bq"), "\x03", "tail",
 	}, "")
 	over := typed + pasted(strings.Repeat("big ", 70000)) + "after" // a paste too long to send
 

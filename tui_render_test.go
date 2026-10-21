@@ -422,3 +422,29 @@ func TestRestoreWhileAScreenshotIsTaken(t *testing.T) {
 		t.Errorf("test setup: no screenshot was tried before the restore: %q", out[:min(len(out), 200)])
 	}
 }
+
+// TestRepaintPanicLeavesTheLockFree: handleInput recovers from a panic in what
+// a key does, and the run loop goes on. A panic while repaint paints with the
+// UI lock held must not leave the lock held, or the next frame or status row
+// would wait for it forever. (Here the write panics: a zero os.File has no
+// descriptor behind it.)
+func TestRepaintPanicLeavesTheLockFree(t *testing.T) {
+	tr := &tui{cols: 20, rows: 4, running: true, status: "status"} // no frame yet: it paints without one
+	old := os.Stdout
+	os.Stdout = new(os.File)
+	var r any
+	func() {
+		defer func() {
+			os.Stdout = old
+			r = recover()
+		}()
+		tr.repaint()
+	}()
+	if r == nil {
+		t.Fatal("test setup: repaint did not panic")
+	}
+	if !tr.mu.TryLock() {
+		t.Fatal("after a panic in repaint the UI lock is still held")
+	}
+	tr.mu.Unlock()
+}

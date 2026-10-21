@@ -16,7 +16,8 @@ import (
 // leaving the alternate screen at exit throws it away. So while the terminal
 // UI runs, a message is shown in the status row instead, in place of the
 // state and stats after the hints, for noticeShowFor (the newest wins), and
-// kept to be printed on stderr once the terminal is back. The status row is
+// kept to be printed on stderr once the terminal is back (the notices about a
+// paste are not kept: see pasteNoticef). The status row is
 // used rather than a row of its own because it is already painted on its own
 // and at once (tui.setStatus), while every row above it belongs to the
 // picture and the overlays (the action bar and the keyboard sit at the
@@ -65,10 +66,24 @@ func noticef(format string, args ...any) {
 	notice(fmt.Sprintf(format, args...))
 }
 
+// pasteNoticef is noticef for a notice about a paste, which the replay at exit
+// leaves out: it would leave a paste's length (a password's, say) in the
+// shell's scrollback. It still shows in the status row.
+func pasteNoticef(format string, args ...any) {
+	notices.show(fmt.Sprintf(format, args...), timeNowUnixNano())
+}
+
 // post shows msg as the notice and keeps it for the replay, or prints it on
-// stderr when the terminal UI is not running. Printing under the lock keeps a
-// message from reaching the alternate screen while start or stop runs.
-func (b *noticeBoard) post(msg string, now int64) {
+// stderr when the terminal UI is not running.
+func (b *noticeBoard) post(msg string, now int64) { b.put(msg, now, true) }
+
+// show is post for a message the replay leaves out.
+func (b *noticeBoard) show(msg string, now int64) { b.put(msg, now, false) }
+
+// put shows msg as the notice, keeping it for the replay if keep, or prints
+// it on stderr when the terminal UI is not running. Printing under the lock
+// keeps a message from reaching the alternate screen while start or stop runs.
+func (b *noticeBoard) put(msg string, now int64, keep bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.active {
@@ -78,7 +93,9 @@ func (b *noticeBoard) post(msg string, now int64) {
 	line := strings.TrimRight(msg, "\n")
 	b.text = cleanText(strings.TrimPrefix(line, "scterm: "))
 	b.until = now + int64(noticeShowFor)
-	b.keep(line)
+	if keep {
+		b.keep(line)
+	}
 	select {
 	case b.wake <- struct{}{}:
 	default: // a repaint is already on its way

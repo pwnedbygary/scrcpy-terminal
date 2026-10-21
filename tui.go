@@ -374,18 +374,22 @@ func (t *tui) setOverlay(lines []overlayLine) {
 // the action bar could stay invisible (and a hide could stay on screen) until
 // something on the device moved.
 func (t *tui) repaint() {
-	t.mu.Lock()
-	rgb := t.lastRGB
-	stale := t.lastW != t.cols || t.lastH != t.rows*2 || len(rgb) == 0
-	if stale {
-		// Nothing drawn yet (or video is off), or the snapshot is from another
-		// geometry (a resize can keep the same cell count) and would be
-		// sheared into the new grid.
-		t.paintWithoutCanvas()
-		t.mu.Unlock()
+	rgb := func() []byte {
+		t.mu.Lock()
+		defer t.mu.Unlock() // also on a panic, which handleInput recovers from
+		rgb := t.lastRGB
+		if t.lastW != t.cols || t.lastH != t.rows*2 || len(rgb) == 0 {
+			// Nothing drawn yet (or video is off), or the snapshot is from
+			// another geometry (a resize can keep the same cell count) and
+			// would be sheared into the new grid.
+			t.paintWithoutCanvas()
+			return nil
+		}
+		return rgb
+	}()
+	if rgb == nil {
 		return
 	}
-	t.mu.Unlock()
 	// draw takes the lock itself and treats the snapshot as a canvas; the
 	// copy-back is a no-op because it is the same slice.
 	t.draw(rgb)
