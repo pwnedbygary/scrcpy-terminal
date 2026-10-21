@@ -89,16 +89,17 @@ type app struct {
 }
 
 type inputEvent struct {
-	kind int // evBytes, evResize, evQuit, evTick
+	kind int // evBytes, evResize, evQuit, evTick, evTickFast, evZellijRegrab
 	buf  []byte
 }
 
 const (
-	evBytes    = 0
-	evResize   = 1
-	evQuit     = 2
-	evTick     = 3
-	evTickFast = 4 // ~16ms: flushes coalesced drag moves without waiting for evTick
+	evBytes        = 0
+	evResize       = 1
+	evQuit         = 2
+	evTick         = 3
+	evTickFast     = 4 // ~16ms: flushes coalesced drag moves without waiting for evTick
+	evZellijRegrab = 5 // openKeyboard's delayed mouse re-grab, done on the run loop
 )
 
 func newApp(sess *session, cfg config) *app {
@@ -252,6 +253,8 @@ func (a *app) loop(wake <-chan struct{}, lost <-chan error) error {
 				a.tui.setStatus(a.statusLine())
 			case evBytes:
 				a.handleInput(ev.buf)
+			case evZellijRegrab:
+				a.zellijRegrab()
 			}
 		case f := <-a.frames:
 			// Draw here, in the run loop, not in the sink: see app.frame. This
@@ -276,11 +279,12 @@ func (a *app) loop(wake <-chan struct{}, lost <-chan error) error {
 // terminalRestorer gives the terminal back (normal screen, no mouse
 // reporting, cooked mode) once, whichever of the run loop's exit and a panic
 // on another goroutine gets there first, then prints the notices the terminal
-// UI showed.
+// UI showed. From then on the app is quitting.
 func (a *app) terminalRestorer(oldMode *syscall.Termios) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			a.quitting.Store(true)
 			a.tui.shellClose()
 			restoreMode(ttyReadFD(), oldMode)
 			notices.stop(stderrWriter())
@@ -306,6 +310,9 @@ func (a *app) watchStreams() <-chan error {
 		case err == nil:
 		case a.sess.video == nil:
 			lost <- a.lostStream("audio", err)
+		case a.quitting.Load() && isClosedConnErr(err):
+			// sess.stop closed the socket on the way out. (Not before: the
+			// device ending the audio stream, EOF, is worth a notice.)
 		default:
 			noticef("scterm: audio: %v\n", err)
 		}
@@ -319,15 +326,23 @@ func (a *app) lostStream(stream string, err error) error {
 	return fmt.Errorf("lost the %s stream from %s: %w", stream, a.deviceName(), err)
 }
 
-// deviceName is the device's name fit for the screen. The device or the
-// pairing sets it, so control characters are taken out.
+// deviceName is the device's name for a sentence: "the device" when its name
+// is not known.
 func (a *app) deviceName() string {
-	if a.sess != nil {
-		if name := cleanText(a.sess.deviceName); name != "" {
-			return name
-		}
+	if name := a.knownDeviceName(); name != "" {
+		return name
 	}
 	return "the device"
+}
+
+// knownDeviceName is the device's name fit for the screen, or "" when it is
+// not known. The device or the pairing sets it, so control characters are
+// taken out.
+func (a *app) knownDeviceName() string {
+	if a.sess == nil {
+		return ""
+	}
+	return cleanText(a.sess.deviceName)
 }
 
 // paintPlaceholder says what the empty picture is waiting for. The first frame
@@ -618,6 +633,7 @@ func (a *app) setMouse(on bool) {
 // is size-dependent. The menu in particular must re-record its click rows
 // (refreshMenu does that) or a click would be matched against the old
 // geometry, up to and including the status row that runs Quit on a small pane.
+// The keyboard is laid out from the bottom of the pane, so it moves with it.
 func (a *app) onResize() {
 	a.tui.resize()
 	if a.stream != nil {
@@ -626,6 +642,8 @@ func (a *app) onResize() {
 	switch {
 	case a.menuOpen:
 		a.refreshMenu()
+	case a.kb != nil && a.kb.open:
+		a.refreshKeyboard()
 	case a.barVisible():
 		a.refreshOverlays()
 	case !a.tui.hasFrame():
@@ -664,19 +682,29 @@ func (a *app) openKeyboard() {
 	}
 	// Zellij sometimes needs the pane to be focused/clicked before mouse
 	// events flow; the first click after opening may be consumed by the
-	// frontend. Re-assert grab briefly after 300ms as a handshake nudge.
+	// frontend. Re-assert grab briefly after 300ms as a handshake nudge. The
+	// timer's goroutine only asks the run loop, which owns the app's state and
+	// the screen; a full queue drops the nudge.
 	if a.inZellij {
 		time.AfterFunc(300*time.Millisecond, func() {
-			if a.kb == nil || !a.kb.open {
-				return
-			}
-			if !a.grabbed {
-				a.setMouse(true)
-				a.kbAutoGrabbed = true
-				a.refreshKeyboard()
+			select {
+			case a.events <- inputEvent{kind: evZellijRegrab}:
+			default:
 			}
 		})
 	}
+	a.refreshKeyboard()
+}
+
+// zellijRegrab is openKeyboard's delayed re-grab, run by the run loop. Once
+// the terminal has been given back it does nothing: mouse reporting turned on
+// then would pour escape sequences into the shell.
+func (a *app) zellijRegrab() {
+	if a.quitting.Load() || a.kb == nil || !a.kb.open || a.grabbed {
+		return
+	}
+	a.setMouse(true)
+	a.kbAutoGrabbed = true
 	a.refreshKeyboard()
 }
 
@@ -793,28 +821,39 @@ type statusPart struct {
 // statusMinShrink is the fewest cells a part is cut to before it is dropped.
 const statusMinShrink = 6
 
+// statusQuitPrompt leads the parts while an overlay's Quit waits for its
+// second press. The menu says so in its Quit row too, but on a pane of 18
+// rows or fewer that row is cut off.
+const statusQuitPrompt = "press Quit again to quit"
+
 func (a *app) statusLine() string {
 	if a.tui == nil || a.audio == nil {
 		return ""
 	}
+	now := timeNowUnixNano()
 	parts := a.statusParts()
-	if n := notices.current(timeNowUnixNano()); n != "" {
+	if n := notices.current(now); n != "" {
 		// A notice stands in for the state and the stats for a few seconds.
 		parts = []statusPart{{text: n, shrink: true}}
+	}
+	if a.kb != nil && a.kb.quit.from != 0 && a.kb.quitArmed(a.kb.quit.from, now) {
+		parts = append([]statusPart{{text: statusQuitPrompt, shrink: true}}, parts...)
 	}
 	return fitStatus(a.tui.cols, parts)
 }
 
 // statusParts is what follows the hints, most important first: where input
-// goes, the software keyboard, the volume and the device, then the frame size
-// and rate and their sparkline, which are the first to go on a narrow pane.
+// goes, the software keyboard, the volume and the device's name if it is
+// known, then the frame size and rate and their sparkline, which are the
+// first to go on a narrow pane.
 func (a *app) statusParts() []statusPart {
 	var mode string
 	switch {
 	case a.grabbed:
 	case a.inZellij:
-		// handleInput drops typing while ungrabbed under Zellij.
-		mode = "keys go to Zellij · F12 gives control"
+		// handleInput drops typing while ungrabbed under Zellij; F1-F11,
+		// Alt+letters and Esc still reach the device.
+		mode = "typing goes to Zellij · F12 gives control"
 	default:
 		mode = "mouse free (F12)"
 	}
@@ -851,7 +890,7 @@ func (a *app) statusParts() []statusPart {
 		{text: mode, shrink: true},
 		{text: kb},
 		{text: vol},
-		{text: a.deviceName(), shrink: true},
+		{text: a.knownDeviceName(), shrink: true},
 		{text: strings.Join(stats, " ")},
 		{text: a.sparkline(20), join: " "},
 	}

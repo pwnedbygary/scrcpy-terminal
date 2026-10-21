@@ -7,6 +7,111 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 16: terminal polish)
+
+- Autowrap is off while the terminal UI owns the screen: `shellInit` writes
+  `\x1b[?7l` and `shellClose` writes `\x1b[?7h`, also on the panic path
+  through `terminalRestorer`, so a write that reaches the last column can no
+  longer wrap and scroll the picture. `appendStatus` still skips `\x1b[K`
+  after a full row, since the cursor sits on the last cell; its comment no
+  longer mentions a pending wrap.
+- Each frame ends with the colours reset (`\x1b[0m`) before the end of the
+  synchronized update, so text that reaches the terminal between frames no
+  longer takes the video's colours, and `shellClose` first ends a
+  synchronized update that a crash may have left open (`\x1b[?2026l`). Both
+  were suggestions from part 6's review.
+- An open on-screen keyboard is laid out again after a resize, also before
+  the first frame; it kept its old layout (part 6's review, and part 13's
+  left-alone list). Its rows follow the terminal's height, not its width.
+  With a frame drawn, the repaint is stale and clears the picture until the
+  next frame, as it already does for the menu and the bar.
+- Tests now pin what part 6's review found unpinned: the status row is
+  painted again after `resize` and `shellInit` clear it, a forced full
+  repaint paints the status row, and the no-canvas overlay test draws a
+  striped canvas, so its `▀` check can fail.
+- While Quit is armed from the bar, the menu or the keyboard, the status row
+  says "press Quit again to quit" first after the hints, also before a
+  notice (a notice shows for 4 s, an arm lasts 2 s), because the menu's
+  "Press again to quit" row is cut off at 18 rows or fewer (part 9's
+  review). On a narrow pane it is cut with "…" like the other parts: 50
+  columns show "press Quit again to…".
+- A lost mouse release lifts the finger where the device last saw it (the
+  press, or the last move actually sent), not at the new click (part 9's
+  review). A move still waiting to be sent does not count.
+- CR followed by LF in the same read is one Enter. On terminals that send
+  CR LF, one Enter on a focused QUIT used to arm and confirm it, and the
+  device got Enter and then Ctrl+J (part 9's review). CR and LF that arrive
+  in separate reads are still two keys.
+- The terminal restore no longer interleaves with a frame being drawn
+  (part 3's review): `shellClose` clears `running` and writes the restore
+  while holding the UI lock, waiting at most 100 ms for it (`lockWithin`),
+  and `screenshot` reads `running` under the same lock. The wait is a `Lock`
+  on a helper goroutine, not `TryLock` polling: `TryLock` never queues, so it
+  wins only in the brief gap between two of a busy painter's draws, while a
+  queued `Lock` is handed the mutex once the painter has kept it waiting for
+  1 ms (with polling, under `-race`, a frame was written after the restore
+  in 21 of 30 runs). A lock that comes after the 100 ms is let go again at
+  once. The bound is for a holder that is not writing, such as a panic while
+  it held the lock: after 100 ms the restore goes ahead without the lock, a
+  data race only in that stuck case. A painter blocked in a write still
+  holds the restore up, since the restore's own writes queue behind it on
+  stdout; either way the restore comes after the frame.
+- The Zellij re-grab timer only posts an event; the run loop does the
+  re-grab, and does nothing once the UI has stopped. It used to draw off the
+  run loop (part 13's left-alone list).
+- Once the terminal is restored (a quit, a lost picture, a crash restore),
+  closed-socket errors from tearing down the streams are no longer printed,
+  such as "scterm: audio: audio codec id: read tcp …: use of closed network
+  connection" (part 13's review). `terminalRestorer` now sets
+  `quitting`, which the terminal UI never set, and the stream watcher drops
+  `isClosedConnErr` errors only once it is set: that check also matches
+  `io.EOF`, and an audio stream that ends under a running picture must still
+  get part 13's notice.
+- Under Zellij the status row says "typing goes to Zellij · F12 gives
+  control"; part 13's "keys go to Zellij" was wrong for F-keys, Alt chords
+  and Esc, which still reach the device. At 80 columns the longer text drops
+  the volume part.
+- A device whose name is unknown is left out of the status row instead of
+  showing as "the device"; the placeholder and the lost-device message still
+  say "the device".
+- Verification: in the builder's tree, on part 13's round-2 files: gofmt,
+  `go vet ./...`, `go build ./...`, `go test ./...`, `-race` on all 84 tests
+  in the bar, menu, keyboard, status, notice, render and new input test
+  files, and 11 timing-sensitive tests 20 times, plain and under `-race`
+  (220 of 220 each). Against the old code (through `go test -overlay`), 13
+  of the 19 new or changed tests fail; 3 pin existing behaviour (mutations
+  that pass the old suite fail them), 2 fail only under `-race` (races of
+  `shellClose` with `draw` and with `screenshot`), and 1 guards the new lock
+  helper. 29 mutations, each caught. Merged onto part 13's round 3 and part
+  17: `app.go` and `tui_notice_test.go` merged cleanly with the same added
+  and removed lines, and the other files are as built.
+- Review round 1 found the reason given for `TryLock` polling failing wrong
+  here, the 100 ms bound overstated here and in the comments on
+  `shellCloseWait` and the restore test, and two promises no test held: the
+  prompt before a notice, and a late lock being let go. Round 2 corrects
+  the text, adds `TestStatusPromptComesBeforeANotice` and
+  `TestRestoreLetsGoOfALateLock` (each fails on the mutation the review
+  used, a notice replacing the prompt and a buffered handoff channel, which
+  the rest of the suite misses), lists every event kind on
+  `inputEvent.kind`, and holds the frame for 15 ms instead of 50 in
+  `TestRestoreWaitsForTheFrameBeingWritten`, against the 100 ms bound.
+  Round 2's checks, on the part-17 commit: gofmt, `go vet ./...`, the build,
+  `go test ./...`, `-race` on the terminal UI and exit tests, the new and
+  touched restore and status tests 20 times under `-race`, and the two lock
+  tests 50 times. Not run: a real terminal (autowrap, synchronized output, a
+  clipped wide character), Zellij, a device or a peer session.
+- Left alone: `setMouse` and `toggleGrab` write to stdout outside the UI lock
+  (older), so a crash restore on another goroutine racing a re-grab that is
+  already past its check could still turn mouse reporting back on
+  (untested); peer sessions' teardown errors were not exercised, and a
+  target that closes a media socket in the middle of a packet ends it with
+  "unexpected EOF", which `isClosedConnErr` does not match, so that line
+  could still print after a quit (untested); ESC CR LF (Alt+Enter on a CR LF
+  terminal) still sends Ctrl+J. From part 13's last review,
+  test-only and older: under `-race` with `-shuffle`, a test that swaps
+  `os.Stderr` (`captureStderr`) can race a web client goroutine left over
+  from an earlier test that logs through `logOnce`.
+
 ## Update (2026-10-21: QoL overhaul, part 17: scrcpy's exit codes)
 
 - Exit status follows scrcpy: 0 for a normal end (Quit, closing the

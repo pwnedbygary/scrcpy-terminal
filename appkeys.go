@@ -195,7 +195,8 @@ type dragState struct {
 	down    bool
 	lastNs  int64
 	pending position
-	have    bool // pending holds a real position awaiting its flush
+	have    bool     // pending holds a real position awaiting its flush
+	last    position // the last position the device was given: where its finger is
 }
 
 // setDown records the button press/release. Releasing also drops any queued
@@ -215,6 +216,21 @@ func (d *dragState) isDown() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.down
+}
+
+// sent records pos as the last position the device was given, by the press
+// or by a move.
+func (d *dragState) sent(pos position) {
+	d.mu.Lock()
+	d.last = pos
+	d.mu.Unlock()
+}
+
+// lastSent is the last position the device was given.
+func (d *dragState) lastSent() position {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.last
 }
 
 // queue stores the newest position, reporting whether the caller should send it
@@ -255,6 +271,7 @@ func (a *app) sendTouchMove(pos position) {
 	if a.ctrl == nil {
 		return
 	}
+	a.drag.sent(pos)
 	_ = a.ctrl.touchMove(pos)
 }
 

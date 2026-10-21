@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -189,7 +190,9 @@ func (t *tui) draw(rgba []byte) {
 	}
 	t.sgrBuf = out
 	if len(out) > mark {
-		out = append(out, syncEnd...)
+		// A frame that changes only video rows would leave its last cell's
+		// colours set on the terminal.
+		out = append(out, "\x1b[0m"+syncEnd...)
 		t.sgrBuf = out
 		os.Stdout.Write(out)
 	}
@@ -314,14 +317,14 @@ func (t *tui) appendOverlay(out []byte) []byte {
 }
 
 // appendStatus paints the status row and records what it now shows. It is cut
-// by display cells: a wide character past the last cell would wrap, and on
-// the bottom row that scrolls the screen.
+// by display cells, so no character is written past the row's last cell.
 func (t *tui) appendStatus(out []byte) []byte {
 	line := truncateCells(t.status, t.cols)
 	out = ap(out, "\x1b[", strconv.Itoa(t.rows+1), ";1H", statusSGR, line)
 	if cellWidth(line) < t.cols {
-		// Erase what a longer status left behind. Not after a full row: in the
-		// pending-wrap state the erase would take the row's last cell with it.
+		// Erase what a longer status left behind. Not after a full row: the
+		// cursor is then still on the row's last cell, and the erase would
+		// take that cell with it.
 		out = append(out, "\x1b[K"...)
 	}
 	out = append(out, "\x1b[0m"...)
@@ -463,15 +466,56 @@ func (t *tui) markDirty() {
 func (t *tui) shellInit() {
 	os.Stdout.WriteString("\x1b[?1049h") // alt screen
 	os.Stdout.WriteString("\x1b[?25l")   // hide cursor
+	// No autowrap: a character drawn wider than cellWidth counted it (an
+	// emoji with a variation selector) is clipped at the edge instead of
+	// wrapping, which on the bottom row would scroll the whole picture.
+	os.Stdout.WriteString("\x1b[?7l")
 	os.Stdout.WriteString("\x1b[2J\x1b[H")
 	t.statusDrawn = ""
 	t.running = true
 }
 
+// shellCloseWait bounds how long shellClose waits for the painter's lock, so
+// a holder that is not writing (a panic while it held the lock) cannot keep
+// the terminal from being given back. A painter blocked in a write still
+// holds the restore up: the restore's own writes queue behind it on stdout.
+const shellCloseWait = 100 * time.Millisecond
+
+// lockWithin takes t.mu if it can within d, and reports whether it did. It
+// waits in Lock, queued behind the painter, rather than polling TryLock: a
+// run loop drawing frame after frame takes the lock back before a poll gets
+// it. A lock that comes after d is let go again at once.
+func (t *tui) lockWithin(d time.Duration) bool {
+	got, gaveUp := make(chan struct{}), make(chan struct{})
+	go func() {
+		t.mu.Lock()
+		select {
+		case got <- struct{}{}:
+		case <-gaveUp:
+			t.mu.Unlock()
+		}
+	}()
+	timeout := time.NewTimer(d)
+	defer timeout.Stop()
+	select {
+	case <-got:
+		return true
+	case <-timeout.C:
+		close(gaveUp)
+		return false
+	}
+}
+
 func (t *tui) shellClose() {
+	if t.lockWithin(shellCloseWait) {
+		defer t.mu.Unlock()
+	}
 	t.running = false
+	// A frame cut off part way leaves the terminal holding back everything
+	// after it until the end of the synchronized update.
+	os.Stdout.WriteString(syncEnd)
 	// Always disable mouse reporting + restore the normal screen, so a crash
 	// or quit never leaves SGR garbage pouring into the shell.
 	os.Stdout.WriteString(mouseOffSeq)
-	os.Stdout.WriteString("\x1b[0m\x1b[?25h\x1b[?1049l")
+	os.Stdout.WriteString("\x1b[0m\x1b[?25h\x1b[?7h\x1b[?1049l")
 }

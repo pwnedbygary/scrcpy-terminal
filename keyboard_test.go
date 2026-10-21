@@ -1,6 +1,8 @@
 package main
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -320,5 +322,115 @@ func TestKeyboardQuitTakesTwoPresses(t *testing.T) {
 	a.handleInput([]byte{0x0d})
 	if !quitQueued(a) {
 		t.Error("Enter on the armed QUIT did not quit")
+	}
+}
+
+// rowMove is a cursor move to the start of a screen row.
+var rowMove = regexp.MustCompile(`\x1b\[\d+;1H`)
+
+// rowPainted is what out writes on screen row row: from the cursor move there
+// to the next move to the start of a row.
+func rowPainted(out string, row int) string {
+	at := "\x1b[" + strconv.Itoa(row) + ";1H"
+	i := strings.Index(out, at)
+	if i < 0 {
+		return ""
+	}
+	rest := out[i+len(at):]
+	if j := rowMove.FindStringIndex(rest); j != nil {
+		rest = rest[:j[0]]
+	}
+	return rest
+}
+
+// TestResizeMovesTheKeyboard: the keyboard sits at the bottom of the pane, so
+// a resize lays it out and paints it again at the new bottom, where a click
+// now finds its keys: before the first frame, and after it.
+func TestResizeMovesTheKeyboard(t *testing.T) {
+	for _, framed := range []bool{false, true} {
+		withTermSize(t, 80, 30)
+		a := newTestApp(newController(&capConn{}))
+		a.audio = &audioSink{}
+		a.tui = &tui{running: true}
+		a.tui.resize()
+		if framed {
+			a.tui.lastRGB = make([]byte, 80*29*2*4)
+			a.tui.lastW, a.tui.lastH = 80, 29*2
+		}
+		captureStdout(t, a.openKeyboard)
+
+		termSizeOverride = struct{ cols, rows int }{80, 40}
+		out := captureStdout(t, a.onResize)
+		_, y := kbKeyCell(t, a.kb, "QUIT", 40) // where a click finds QUIT now
+		if len(a.tui.overlay) < y || !strings.Contains(a.tui.overlay[y-1].text, "QUIT") {
+			t.Errorf("framed=%v: the keyboard was not laid out again for 40 rows (QUIT belongs on row %d)", framed, y)
+		}
+		if !strings.Contains(rowPainted(out, y), "QUIT") {
+			t.Errorf("framed=%v: QUIT is not painted on row %d after the resize: %q", framed, y, out)
+		}
+	}
+}
+
+// TestZellijRegrabRunsOnTheRunLoop: under Zellij, opening the keyboard asks
+// for a mouse re-grab 300 ms later, in case the grab was lost meanwhile. The
+// timer only hands that to the run loop and paints nothing from its own
+// goroutine (run with -race), so nothing turns mouse reporting on once the
+// terminal has been given back. The run loop does the re-grab, but not after
+// the terminal has been given back.
+func TestZellijRegrabRunsOnTheRunLoop(t *testing.T) {
+	const mouseOn = "\x1b[?1000h" // button press reporting on (xterm mode 1000)
+	withTermSize(t, 80, 30)
+	zellij := func() *app {
+		a := newTestApp(nil)
+		a.inZellij, a.grabbed = true, false
+		a.audio = &audioSink{}
+		a.tui = &tui{cols: 80, rows: 29, running: true}
+		return a
+	}
+
+	a := zellij()
+	out := captureTerminal(t, func() {
+		a.openKeyboard()
+		a.setMouse(false) // the grab is lost again, so the re-grab would apply
+		a.terminalRestorer(nil)()
+		select {
+		case <-a.events: // asked for, and never run: the run loop is gone
+		case <-time.After(2 * time.Second):
+			t.Error("the keyboard never asked the run loop for its re-grab")
+		}
+	})
+	if back := strings.LastIndex(out, "\x1b[?1049l"); back < 0 || strings.Contains(out[back:], mouseOn) {
+		t.Errorf("mouse reporting was turned on after the terminal was given back: %q", out)
+	}
+
+	b := zellij()
+	captureStdout(t, func() {
+		b.openKeyboard()
+		b.setMouse(false)
+	})
+	var regrab inputEvent
+	select {
+	case regrab = <-b.events:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the keyboard never asked the run loop for its re-grab")
+	}
+	runLoop := func() string {
+		b.events <- regrab
+		b.events <- inputEvent{kind: evQuit}
+		return captureStdout(t, func() {
+			if err := b.loop(nil, make(chan error)); err != nil {
+				t.Errorf("the run loop ended with %v", err)
+			}
+		})
+	}
+	if out := runLoop(); !b.grabbed || !b.kbAutoGrabbed || !strings.Contains(out, mouseOn) {
+		t.Errorf("the run loop did not re-grab the mouse: grabbed=%v auto=%v, %q", b.grabbed, b.kbAutoGrabbed, out)
+	}
+	captureStdout(t, func() {
+		b.setMouse(false)
+		b.terminalRestorer(nil)()
+	})
+	if out := runLoop(); b.grabbed || out != "" {
+		t.Errorf("the re-grab ran after the terminal was given back: grabbed=%v, %q", b.grabbed, out)
 	}
 }

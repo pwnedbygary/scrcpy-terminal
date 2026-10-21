@@ -93,6 +93,10 @@ func (a *app) decodeInput(pend []byte) ([]byte, int) {
 			return pend[:want], want
 		}
 		return nil, 0
+	case c == 0x0d && len(pend) > 1 && pend[1] == 0x0a:
+		// One Enter from a terminal that sends CR LF: one press, not a press
+		// on CR and another on LF (which the device gets as Ctrl+J).
+		return []byte{c}, 2
 	case c == 0x0d || c == 0x0a:
 		return []byte{c}, 1
 	case c == 0x7f:
@@ -293,10 +297,14 @@ func (a *app) adjustLocalVolume(delta int) {
 
 // screenshot saves the most recent rendered canvas as PPM (Alt+S).
 func (a *app) screenshot() {
-	if a.tui == nil || !a.tui.running {
-		return // headless mode or before shell init: nothing to capture
+	if a.tui == nil {
+		return // headless mode: nothing to capture
 	}
 	a.tui.mu.Lock()
+	if !a.tui.running {
+		a.tui.mu.Unlock()
+		return // before shell init, or after the terminal was given back
+	}
 	pw, ph := a.tui.cols, a.tui.rows*2
 	n := pw * ph * 4
 	var rgb []byte
@@ -615,10 +623,13 @@ func (a *app) mouseEvent(b []byte) bool {
 	// A press while a drag is still down means the drag's release never
 	// arrived (let go outside the window, or dropped by a multiplexer). Lift
 	// the device finger first, so it is not left down and this press is
-	// handled as the new click it is rather than as part of that drag.
+	// handled as the new click it is rather than as part of that drag. It is
+	// lifted where the device last saw it: lifted here, it would be dragged
+	// across the screen on the way up.
 	if leftPress(pressed, btnRaw) && a.drag.isDown() {
+		at := a.drag.lastSent()
 		a.drag.setDown(false)
-		a.ctrl.touchRelease(a.posAt(cellX, cellY))
+		a.ctrl.touchRelease(at)
 	}
 
 	// Menu open: clicks on a row run it; clicks elsewhere are swallowed, so a
@@ -714,8 +725,10 @@ func (a *app) mouseEvent(b []byte) bool {
 	switch btn {
 	case 0: // left
 		if pressed {
+			pos := a.posAt(cellX, cellY)
 			a.drag.setDown(true)
-			a.ctrl.touch(true, a.posAt(cellX, cellY))
+			a.drag.sent(pos)
+			a.ctrl.touch(true, pos)
 		} else {
 			a.drag.setDown(false)
 			a.ctrl.touchRelease(a.posAt(cellX, cellY))

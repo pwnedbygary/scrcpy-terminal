@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -159,6 +160,37 @@ func captureTerminal(t *testing.T, fn func()) string {
 	}()
 	_ = w.Close()
 	return string(<-got)
+}
+
+// terminalUntil is captureTerminal for output that another goroutine writes:
+// after fn it reads the pipe until want has come through (or 5 s have gone
+// by), so that goroutine is done with stdout and stderr before they are put
+// back. It returns what it read.
+func terminalUntil(t *testing.T, want string, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+	defer func() {
+		os.Stdout, os.Stderr = oldOut, oldErr
+		_ = w.Close()
+	}()
+	fn()
+	_ = r.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var got []byte
+	buf := make([]byte, 4096)
+	for !strings.Contains(string(got), want) {
+		n, err := r.Read(buf)
+		got = append(got, buf[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	return string(got)
 }
 
 // TestReplayAfterTheTerminalIsBack: restoring the terminal prints the messages
@@ -342,6 +374,84 @@ func TestLostStreamEndsTheSession(t *testing.T) {
 	case err := <-lost:
 		t.Errorf("the session ended with the audio stream under a picture: %v", err)
 	default:
+	}
+}
+
+// closeSignal is a connection whose Close says so. A demuxer defers it, so it
+// marks the demuxer's return.
+type closeSignal struct {
+	net.Conn
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *closeSignal) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+// demuxerEnded waits for the demuxer reading c to return, and gives its
+// goroutine a moment to report how it ended.
+func demuxerEnded(t *testing.T, c *closeSignal) {
+	t.Helper()
+	select {
+	case <-c.closed:
+		time.Sleep(100 * time.Millisecond)
+	case <-time.After(5 * time.Second):
+		t.Error("the audio demuxer did not end")
+	}
+}
+
+// TestTeardownSocketErrorsAreQuiet: once the terminal UI has given the
+// terminal back, on a quit or on the loss of the picture, sess.stop closes
+// the sockets, and the audio demuxer's "use of closed network connection" is
+// not printed. Another audio error after that still is.
+func TestTeardownSocketErrorsAreQuiet(t *testing.T) {
+	startNotices(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			c.Write([]byte("opus")) // then nothing, like a quiet device
+		}
+		accepted <- c
+	}()
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if device := <-accepted; device != nil {
+		t.Cleanup(func() { device.Close() })
+	}
+	audio := &closeSignal{Conn: conn, closed: make(chan struct{})}
+	a := streamApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: audio})
+	a.tui = &tui{cols: 80, rows: 23, running: true}
+	restore := a.terminalRestorer(nil)
+	a.watchStreams()
+	out := captureTerminal(t, func() {
+		restore()    // the run loop has ended
+		conn.Close() // sess.stop
+		demuxerEnded(t, audio)
+	})
+	if strings.Contains(out, "audio") {
+		t.Errorf("the socket closed on the way out was reported: %q", out)
+	}
+
+	broken := deviceStream(t, []byte{0, 0, 0, 1}) // codec 1: a config error
+	b := streamApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: broken})
+	b.tui = &tui{cols: 80, rows: 23, running: true}
+	restore = b.terminalRestorer(nil)
+	const want = "scterm: audio: audio config error\n"
+	if out := terminalUntil(t, want, func() {
+		restore()
+		b.watchStreams()
+	}); !strings.Contains(out, want) {
+		t.Errorf("an audio error after the terminal was given back was not reported: %q", out)
 	}
 }
 
