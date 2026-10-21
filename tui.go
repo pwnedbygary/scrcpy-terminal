@@ -4,7 +4,18 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"unicode/utf8"
 )
+
+// Synchronized output (DEC private mode 2026): the terminal holds what it
+// receives until the end marker, so a repaint never shows half the old frame.
+// Terminals that do not know the mode ignore it.
+const (
+	syncBegin = "\x1b[?2026h"
+	syncEnd   = "\x1b[?2026l"
+)
+
+const statusSGR = "\x1b[38;2;200;200;200m\x1b[48;2;30;30;30m"
 
 // ---------------------------------------------------------------------------
 // terminal helpers
@@ -50,7 +61,8 @@ type tui struct {
 	frameIdx        int
 	repaintInterval int // forced full redraw every N frames (desync-recovery safety net)
 	status          string
-	dirty           bool // force full repaint
+	statusDrawn     string // what the status row shows now ("" after a clear or resize)
+	dirty           bool   // force full repaint
 	running         bool
 
 	// color resolution helpers
@@ -87,6 +99,7 @@ func (t *tui) resize() {
 		}
 	}
 	t.dirty = true
+	t.statusDrawn = "" // the status row moved with the bottom edge
 }
 
 // draw renders packets of cells. rgba is the canvas (cols x 2*rows RGBA).
@@ -118,9 +131,9 @@ func (t *tui) draw(rgba []byte) {
 	forceFull := t.dirty || t.frameIdx%interval == 0
 	t.dirty = false
 
-	out := t.sgrBuf[:0]
+	out := append(t.sgrBuf[:0], syncBegin...)
+	mark := len(out)
 	if forceFull {
-		// move home + clear
 		out = append(out, "\x1b[H"...)
 	}
 	for y := 0; y < t.rows; y++ {
@@ -167,9 +180,22 @@ func (t *tui) draw(rgba []byte) {
 		// copy back the drawn row
 		copy(t.prev[row:row+w], t.keys[row:row+w])
 	}
-	// overlay: paint text rows over the video. EMPTY rows are skipped so the
-	// video stays visible above the keyboard (the keyboard only paints its
-	// own rows, and each of those has an opaque background).
+	out = t.appendOverlay(out)
+	if (forceFull && t.status != "") || t.status != t.statusDrawn {
+		out = t.appendStatus(out)
+	}
+	t.sgrBuf = out
+	if len(out) > mark {
+		out = append(out, syncEnd...)
+		t.sgrBuf = out
+		os.Stdout.Write(out)
+	}
+}
+
+// appendOverlay paints the overlay's text rows over the video. EMPTY rows are
+// skipped so the video stays visible above the keyboard (the keyboard only
+// paints its own rows, and each of those has an opaque background).
+func (t *tui) appendOverlay(out []byte) []byte {
 	if len(t.overlay) > 0 {
 		for i, ol := range t.overlay {
 			if i >= t.rows {
@@ -273,24 +299,29 @@ func (t *tui) draw(rgba []byte) {
 					out = append(out, hb[pos:]...)
 				}
 			}
-			for j := len(ol.text); j < t.cols; j++ {
+			// Pad by display cells: '·', '‹' and '›' take several bytes, and
+			// padding by bytes left old cells showing at the end of the row.
+			for j := utf8.RuneCountInString(line); j < t.cols; j++ {
 				out = append(out, ' ')
 			}
 			out = append(out, "\x1b[0m"...)
 		}
 	}
-	// status bar (redraw only when the status string changed)
-	if t.status != "" {
-		line := truncateRunes(t.status, t.cols)
-		out = ap(out, "\x1b[", strconv.Itoa(t.rows+1), ";1H")
-		out = append(out, "\x1b[38;2;200;200;200m\x1b[48;2;30;30;30m"...)
-		out = append(out, line...)
-		out = append(out, "\x1b[0m"...)
+	return out
+}
+
+// appendStatus paints the status row and records what it now shows.
+func (t *tui) appendStatus(out []byte) []byte {
+	line := truncateRunes(t.status, t.cols)
+	out = ap(out, "\x1b[", strconv.Itoa(t.rows+1), ";1H", statusSGR, line)
+	if utf8.RuneCountInString(line) < t.cols {
+		// Erase what a longer status left behind. Not after a full row: in the
+		// pending-wrap state the erase would take the row's last cell with it.
+		out = append(out, "\x1b[K"...)
 	}
-	t.sgrBuf = out
-	if len(out) > 0 {
-		os.Stdout.Write(out)
-	}
+	out = append(out, "\x1b[0m"...)
+	t.statusDrawn = t.status
+	return out
 }
 
 func rowEqual(a, b []uint64) bool {
@@ -302,9 +333,21 @@ func rowEqual(a, b []uint64) bool {
 	return true
 }
 
-// rgbStr renders "R;G;B" for a 0x00RRGGBB value (already quantized).
+// channelLevels maps each of the eight levels the cell packer keeps per
+// channel (it masks with 0xE0) to an 8-bit value. Repeating the three bits
+// across the byte spreads the levels over the whole 0..255 range; writing the
+// masked value itself capped white at 224 and darkened every colour.
+var channelLevels = func() (s [8]string) {
+	for lvl := range s {
+		v := lvl << 5
+		s[lvl] = strconv.Itoa(v | v>>3 | v>>6)
+	}
+	return s
+}()
+
+// rgbStr renders "R;G;B" for a quantized 0x00RRGGBB cell colour.
 func rgbStr(c uint32) string {
-	return strconv.Itoa(int(c>>16)&0xFF) + ";" + strconv.Itoa(int(c>>8)&0xFF) + ";" + strconv.Itoa(int(c)&0xFF)
+	return channelLevels[c>>21&7] + ";" + channelLevels[c>>13&7] + ";" + channelLevels[c>>5&7]
 }
 
 // setOverlay replaces the overlay and marks the grid dirty. The caller is
@@ -326,24 +369,60 @@ func (t *tui) repaint() {
 	t.mu.Lock()
 	rgb := t.lastRGB
 	stale := t.lastW != t.cols || t.lastH != t.rows*2 || len(rgb) == 0
-	t.mu.Unlock()
 	if stale {
-		// Nothing drawn yet, or the snapshot is from another geometry (a
-		// resize can keep the same cell count): wait for a real frame.
+		// Nothing drawn yet (or video is off), or the snapshot is from another
+		// geometry (a resize can keep the same cell count) and would be
+		// sheared into the new grid.
+		t.paintWithoutCanvas()
+		t.mu.Unlock()
 		return
 	}
+	t.mu.Unlock()
 	// draw takes the lock itself and treats the snapshot as a canvas; the
 	// copy-back is a no-op because it is the same slice.
 	t.draw(rgb)
 }
 
+// paintWithoutCanvas clears the picture and paints only the overlay and the
+// status row, so the menu, the keyboard and the bar work before the first
+// frame and with --video=false. Called with t.mu held.
+func (t *tui) paintWithoutCanvas() {
+	if !t.running || t.rows <= 0 || (!overlayHasContent(t.overlay) && t.status == "") {
+		return
+	}
+	out := append(t.sgrBuf[:0], syncBegin...)
+	out = append(out, "\x1b[0m\x1b[H\x1b[2J"...)
+	out = t.appendOverlay(out)
+	if t.status != "" {
+		out = t.appendStatus(out)
+	}
+	out = append(out, syncEnd...)
+	t.sgrBuf = out
+	t.dirty = true // the cleared rows need a full repaint from the next frame
+	os.Stdout.Write(out)
+}
+
+// overlayHasContent reports whether any overlay row paints something.
+func overlayHasContent(lines []overlayLine) bool {
+	for _, ol := range lines {
+		if ol.text != "" || (ol.hlFrom >= 0 && ol.hlTo > ol.hlFrom) || (ol.flFrom >= 0 && ol.flTo > ol.flFrom) {
+			return true
+		}
+	}
+	return false
+}
+
+// setStatus records the status line and paints its row at once: a static
+// device screen sends no frames to carry it, and the fps reading changes
+// twice a second, which must not cost a repaint of the whole screen.
 func (t *tui) setStatus(s string) {
 	t.mu.Lock()
-	if s != t.status {
-		t.status = s
-		t.dirty = true
+	defer t.mu.Unlock()
+	t.status = s
+	if !t.running || t.rows <= 0 || s == t.statusDrawn {
+		return
 	}
-	t.mu.Unlock()
+	os.Stdout.Write(t.appendStatus(make([]byte, 0, 256)))
 }
 
 // markDirty forces a full repaint on the next drawn frame.
@@ -357,6 +436,7 @@ func (t *tui) shellInit() {
 	os.Stdout.WriteString("\x1b[?1049h") // alt screen
 	os.Stdout.WriteString("\x1b[?25l")   // hide cursor
 	os.Stdout.WriteString("\x1b[2J\x1b[H")
+	t.statusDrawn = ""
 	t.running = true
 }
 

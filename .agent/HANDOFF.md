@@ -7,6 +7,27 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-20: QoL overhaul, part 6: terminal status row, colours, overlay padding)
+
+- The status row is painted on its own as soon as it changes: grab, mute and
+  volume changes no longer wait for a video frame (a static device screen may
+  send none), and the fps reading, which changes twice a second, no longer
+  forces a repaint of the whole screen. A shorter status erases what a longer
+  one left behind.
+- Each frame goes out as one synchronized update (DEC mode 2026, ignored by
+  terminals without it).
+- Cell colours use the full range: the three bits kept per channel are spread
+  over 0..255 (white was 224, and every colour came out darker).
+- Overlay rows are padded by display cells, not bytes: '·', '‹' and '›' left
+  old cells showing at the end of the row.
+- With no usable picture (before the first frame, with `--video=false`, or
+  after a resize until the next frame) the overlay and the status still paint
+  on a cleared screen, so the menu, the keyboard and the bar work; a stale
+  snapshot is still never sheared into the new grid.
+- Verification: `go vet ./...` and `go test ./...` passed; the six new tests in
+  `tui_render_test.go` fail against the base `tui.go`. Not looked at in a real
+  terminal.
+
 ## Update (2026-10-20: QoL overhaul, part 5: Android pairing, viewer Back, allow-back grant)
 
 - `MainActivity` handles its own configuration changes, like the viewer, so
