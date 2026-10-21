@@ -1,11 +1,148 @@
 # Android peer app / Go client / parity development checkpoint
 
-Read [the complete plan](../docs/ANDROID_CLIENT_PLAN.md) (section 2a lists the
+Read [the complete plan](../docs/history/ANDROID_CLIENT_PLAN.md) (section 2a lists the
 design revisions adopted on 2026-09-24), [the peer protocol](../docs/PEER_PROTOCOL.md)
 and applicable `AGENTS.md` instructions first (none exist in this repository or
 its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
+
+## Update (2026-10-21: QoL overhaul, part 21: the docs)
+
+- `README.md` is reorganised for a first-time user: what scterm is,
+  Requirements, Install, Quick start, Displays (terminal, browser with a LAN
+  warning, window), Controls (one table built from the shared catalog, then
+  mouse and touch, typing, the on-screen keyboard, screenshots, sound on this
+  computer), Peer mode, Updating, Troubleshooting, Reference (flags grouped
+  as `scterm -h` groups them, commands, environment variables, exit status,
+  files), How it works (a diagram with both the adb and the peer paths),
+  Development and Credits. It no longer links this file.
+- New docs: `docs/ARCHITECTURE.md` (the design and scrcpy protocol notes,
+  with the encoding benchmark measured again on this host),
+  `docs/DEVELOPMENT.md` (building, the checks, the six node suites, the
+  test-only variables, `check.mjs`, `gesture.mjs`, `peerctl`; it links this
+  file) and `docs/RELEASING.md` (CI, tags and versions, the signing secrets,
+  backing up the keystore, rehearsing a release). The plan moved to
+  `docs/history/ANDROID_CLIENT_PLAN.md` with a banner saying it is
+  historical and its links fixed; this file's link follows it.
+  `android/README.md` puts Build and Modules last and lists `peerctl`;
+  `docs/PEER_PROTOCOL.md` records the two-device session and lists the
+  `declined` reject code.
+- Claims corrected against the code: the requirements (adb on PATH, Go
+  1.27, a C compiler and pkg-config, Linux only, AVX2 on amd64 also when
+  built from source, NEON compiled but untested on aarch64, no 32-bit
+  builds, releases for linux/amd64 only, the Android versions sound and
+  playback capture need); what `--audio-dup` does (nothing on the device
+  with the default `output` source, while playback capture without it
+  silences the captured apps); the LAN warning (no password and no
+  encryption; the only check compares a WebSocket's Origin with the address
+  the page was opened on, which a site that uses DNS rebinding passes, even
+  at the default address, unless the browser blocks it); the Ctrl keys in
+  each front end; `--peer --window` opening at a default size; the full
+  repaint every 300 frames, not 24; screenshots (a PPM at terminal
+  resolution in the working directory, a PNG download in the browser); the
+  terminal menu having no Mute; the two-press Quit, and Ctrl+Q quitting at
+  once in the terminal's Controls menu; the version going to stderr before
+  the terminal UI starts; what `update` checks; `forget`; the Android
+  local-network permission and helper label.
+- `readme_test.go` (`TestReadmeListsEveryFlag`): the README's flag tables
+  name every flag `newFlagSet` defines, each in one row, under the heading
+  `scterm -h` puts it under (`--video`, `--audio` and `--control` under the
+  heading of their `--no-` forms), with one dash for a one-letter flag and
+  two for the others, and no other flag (`--mirror-fps` stays out). Rows
+  inside HTML comments do not count, since they do not render; the Default
+  column is not checked. Ten mutations of the README are each caught: a row
+  removed, a fake flag, a wrong heading, `--mirror-fps` listed,
+  `--control=false` dropped, the heading renamed, a row of its own for
+  `--video=false` under Audio, `--web` listed again under Peer, a flag's
+  only row inside a multi-line HTML comment, and `--s` written for `-s`
+  (the first round's version of the test missed the last four). The old
+  README fails it.
+- The orchestrator brought the README up to the parts that land before it:
+  the Zellij text and the Quit prompt on the bottom line (part 16), the exit
+  status wording (part 17), closing the `--window` window ending scterm about
+  3 s later with a reload keeping the session (part 18), the peer connection
+  messages and the search for a moved device (part 22), pasting in the
+  terminal and what the server can type (part 23), and `update`'s question,
+  `--check`, `-y`, progress and `.old` (part 24).
+- Verification: the builder's markdown checker (`/tmp/opencode/dev-21/
+  mdcheck.py`, self-tested) finds no broken relative link or anchor (47), no
+  code fence without a language and no line over 100 columns in the six
+  docs, and the moved plan's links resolve (the same after round 2); gofmt,
+  `go vet ./...` and `go test ./...` pass with the parts named above in the
+  same tree, the six node suites running. The flag test's mutations ran in
+  a scratch clone of 286d838 with this README
+  (`/tmp/opencode/dev-21b/mutate-readme.sh`). Not run: a real terminal,
+  browser or device.
+- Review round 1 found two README claims that contradicted the code: that
+  only release binaries need AVX2 (every amd64 build uses it, so a build
+  from source stops the same way), and that the WebSocket check refuses
+  pages of other websites (a site that uses DNS rebinding passes it). It
+  also found `docs/ARCHITECTURE.md` waiting 15 s for each connection (one
+  deadline covers them all, then 15 s more for the device name), a stale
+  comment placed in the wrong file below, and the flag test claiming more
+  than it checked. Round 2 fixes these, makes the flag test stricter, and
+  takes the review's suggestions on the exit replay (the last 50 different
+  messages), Ctrl+Q in the terminal's Controls menu, `pactl`,
+  `XDG_RUNTIME_DIR`, the 3 s `--window` grace and the exit status under
+  `--web`. Review round 2 found two sentences round 1 should have caught:
+  `docs/ARCHITECTURE.md` said scterm moves its sound to the default sink
+  only when that changes (the follower also moves it about a second after
+  the stream appears), and `docs/DEVELOPMENT.md` left
+  `SCTERM_TEST_SESSION_END` out of the test-only variables. Round 3
+  corrects both and takes three README notes: Go reports a missing AVX2 as
+  `SIGILL: illegal instruction` with exit status 2, `pactl` also chooses the
+  output scterm starts on, and scterm itself finds PulseAudio through
+  `XDG_RUNTIME_DIR` too. Review round 3 found round 3's sentence on what
+  happens without `pactl` wrong: scterm gives libpulse an empty string, not
+  NULL, for the default server and sink, libpulse rejects it, and so without
+  `pactl` (unless `SCT_AUDIO_DEVICE` names a sink), and whenever no sink
+  qualifies, the terminal display has no sound. Round 4 says so in the
+  README and in `docs/ARCHITECTURE.md`. Review round 4 found an older clause
+  of that `docs/ARCHITECTURE.md` sentence wrong too: scterm never prefers a
+  running sound card (see "Left alone"); round 5 drops the clause.
+- Decisions on the builder's questions: the README keeps "`--peer` has not
+  been run against a phone yet", since no later record says otherwise;
+  `docs/DEVELOPMENT.md` may link this file; whether `--audio-dup` should
+  imply the playback source, and rebuilding the bundled server jar, are left
+  for later changes (below).
+- Left alone, for later changes: without PulseAudio `--web` says "video
+  only", and the browser's status "audio error", though the browser still
+  gets sound; the bundled server jar predates
+  the game-audio patch, so playback capture over adb does not record game
+  sound (rebuilding it needs the Android build); `--audio-dup` with the
+  default source has no device effect and gives no warning (upstream scrcpy
+  is recalled to imply the playback source; unverified); `--dump-audio`
+  writes nothing with `--audio-codec raw`; `scterm peers` with no pairings
+  suggests only typed pairing; stale comments (`main.go` says the version
+  goes to the status line, `appkeys.go` (`keyboardInput`) leaves Ctrl+Q to
+  "the global handler" to quit, though outside the menu Ctrl+Q goes to the
+  device, `webui.go` says "~20 ms latency", `input.go` spells `-control`,
+  and `window.go` prints a misleading note when DISPLAY is valid);
+  `android/devicetest/ui.py` names a doc that does not exist; the browser
+  cancels Ctrl+V's keydown, which may stop the paste event (untested); the
+  historical plan keeps its 63 lines over 100 columns; the WebSocket check
+  does not stop DNS rebinding (to be fixed in a change of its own); the
+  browser pointer's hover ring, drag trail and touch ripple are not
+  described; the readiness section of `android/README.md` still says
+  "peer" and reads like implementation notes; `readme_test.go` still reads
+  table rows inside an unclosed HTML comment, a `~~~` fence or indented
+  code; the sound follower
+  (`audiofollow.go`) starts with no sink recorded, so about a second after
+  the stream appears it moves it to the desktop's default sink even when
+  that is a Bluetooth or virtual sink the start-up choice passed over;
+  scterm gives libpulse empty strings rather than NULL for the default
+  server and sink (`audio.go`), which libpulse 17 rejects, so without
+  `pactl` (unless `SCT_AUDIO_DEVICE` names a sink), or when no sink
+  qualifies, the terminal display has no sound, and the first try, at the
+  default server, always fails, which by the code costs about 0.9 s per
+  candidate sink before the `XDG_RUNTIME_DIR` socket opens the stream; the
+  stream therefore never uses `PULSE_SERVER`, though a comment in
+  `audio.go` says it does, and without `XDG_RUNTIME_DIR` there is no sound
+  even with `SCT_AUDIO_DEVICE`; and `audioDevices` reads a sink's state
+  from the wrong column of `pactl list sinks short` (the sample spec before
+  it contains spaces), so a running sound card is never preferred over a
+  suspended one (a code change of its own for all of these).
 
 ## Update (2026-10-21: QoL overhaul, part 20: Android follow-ups)
 

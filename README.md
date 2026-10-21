@@ -1,548 +1,634 @@
-# scterm — scrcpy in your terminal (or a window)
+# scterm
 
-`scrcpy` inside a terminal, built from the ground up: our own client that speaks
-the scrcpy wire protocol directly to the device. No `scrcpy` binary, no ffmpeg
-CLI, no wrapper pipelines. One Go binary plus the (Apache-2.0) scrcpy server
-that runs on the device.
+scterm shows the screen of an Android device on a Linux computer, plays its sound, and lets you
+control it with the keyboard and mouse. It shows the device in the terminal, in a web browser
+(`--web`), or in a window of its own (`--window`). It is its own client for the
+[scrcpy](https://github.com/Genymobile/scrcpy) protocol and bundles the scrcpy server, so it
+needs adb but not the scrcpy program. With the scterm Android app it can also reach a device
+over the network without adb: this is peer mode.
 
-Three display modes, one pipeline:
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Displays](#displays)
+- [Controls](#controls)
+- [Peer mode](#peer-mode)
+- [Updating](#updating)
+- [Troubleshooting](#troubleshooting)
+- [Reference](#reference)
+- [How it works](#how-it-works)
+- [Development](#development)
+- [Credits](#credits)
+
+## Requirements
+
+To run scterm you need:
+
+- Linux. On x86-64 (amd64) scterm needs a CPU with AVX2, also when it is built from source.
+  Release binaries are for amd64 only.
+- `adb` from the Android platform-tools on your `PATH` (often packaged as `android-tools` or
+  `adb`). Peer mode does not use it.
+- An Android device with USB debugging or wireless debugging turned on. The bundled server
+  works with Android 5.0 and later. Sound needs Android 11 or later.
+- The FFmpeg libraries libavcodec, libavutil, libswscale and libswresample, and
+  libpulse-simple. Release binaries are built on Ubuntu 26.04 and need the versions of these
+  libraries they were built with. If the release binary does not start because of a library,
+  build from source. If it stops with `SIGILL: illegal instruction` (exit status 2), the CPU
+  lacks AVX2, and a build from source stops the same way.
+- For sound in the terminal display: a PulseAudio server (PipeWire's PulseAudio service also
+  works) and `pactl`, which scterm uses to play on the output device the desktop selects and to
+  follow it. Without a server, or without `pactl` unless `SCT_AUDIO_DEVICE` names a sink, the
+  terminal display has no sound. The browser display plays sound without either.
+- For `--window`: a Chromium-family browser or Firefox.
+
+To build from source you also need Go 1.27 or later, a C compiler, `pkg-config`, and the
+development packages of the libraries above. On Debian or Ubuntu:
 
 ```sh
-./scterm                  # terminal UI (half-blocks, hybrid redraw)
-./scterm --web            # browser display on http://127.0.0.1:6969/
-./scterm --web --web-port 9000
-./scterm --window         # same, popped out into its own window
+sudo apt-get install gcc pkg-config libavcodec-dev libavutil-dev libswscale-dev \
+  libswresample-dev libpulse-dev
 ```
 
-```
-              ┌──────────────────────────────────────────────┐
-              │             scterm (this repo)                │
-              │  Go client: protocol demux, control, audio,  │
-              │  TUI renderer (half-blocks, hybrid redraw)   │
-              │  cgo: libavcodec/libswscale/decode+scale     │
-              │       libpulse-simple (audio out)            │
-              │  SIMD: AVX2 (x86_64) / NEON (aarch64)        │
-              └──────────┬─────────────────────┬─────────────┘
-                 adb reverse tcp (video/audio/control sockets)
-                          │
-              ┌───────────▼───────────────────▼──────────────┐
-              │  scrcpy-server (vendored, Apache-2.0)        │
-              │  MediaCodec capture → h264 + opus → sockets  │
-              │  ControlChannel → injectInputEvent           │
-              └──────────────────────────────────────────────┘
-                         Android device
-```
+Only Linux is supported: the terminal code is Linux-only. On aarch64 the C code has NEON paths,
+but aarch64 builds are untested. 32-bit targets do not build.
 
-## Build
+## Install
 
-Requires: Go (with cgo), ffmpeg dev libraries, libpulse-simple.
+### Release binary
+
+Download `scterm` from the
+[latest release](https://github.com/pwnedbygary/scrcpy-terminal/releases/latest), then install
+it in a directory on your `PATH`:
 
 ```sh
+install -m 755 scterm ~/.local/bin/scterm
+scterm version
+```
+
+### From source
+
+```sh
+git clone https://github.com/pwnedbygary/scrcpy-terminal.git
+cd scrcpy-terminal
 go build -o scterm .
+./scterm version
 ```
 
-Then run with a device connected (or `-s <serial>`):
+A build from source reports its version as `scterm dev`. Keep the binary in the checkout if you
+want `scterm update` to update it (see [Updating](#updating)).
+
+## Quick start
+
+1. On the device, turn on USB debugging. On most devices: open Settings, then About phone, tap
+   Build number seven times, then turn on USB debugging in Developer options.
+2. Connect the device with a USB cable. Unlock it and accept the "Allow USB debugging?" prompt.
+3. Run `scterm`.
+
+The device appears in the terminal. The bottom line starts with `Alt+Q quit · Alt+/ controls`:
+Alt+Q quits, and Alt+/ opens the Controls menu, which lists every action. Ctrl+C does not quit:
+it goes to the device.
+
+To use the device over Wi-Fi, connect it with `adb pair` and `adb connect` first. With several
+devices connected, choose one with `-s SERIAL`, using the serial that `adb devices` shows.
+
+## Displays
+
+### Terminal
+
+This is the default display. Each character cell shows two pixels, one above the other, so the
+terminal needs 24-bit colour. The picture keeps its shape. scterm redraws only the rows that
+change, and redraws the whole screen after a resize and every 300 frames
+(`--repaint-interval`), which clears any garbling.
+
+The mouse needs a terminal that reports it in SGR mode, as most current terminals do. While
+scterm runs, the mouse belongs to the device: it is "grabbed". F12, Ctrl+G or Alt+G gives the
+mouse back to the terminal, for example to select text, and gives it to the device again; keys
+still go to the device. In Zellij, scterm starts with the mouse and typing left to Zellij
+(F-keys, Alt chords and Esc still reach the device), and the bottom line says
+`typing goes to Zellij · F12 gives control`.
+
+The bottom line starts with the two hints. After them come where input goes (when it is not
+grabbed), the volume of the sound on this computer, the device name, and the picture size and
+frame rate. A message, such as a saved screenshot or an error, takes the place of these details
+for a few seconds. When it exits, scterm prints the messages again: the last 50 different ones,
+with a count of any older ones. After a first press on Quit
+in the action bar, the menu or the on-screen keyboard, the line says `press Quit again to quit`
+right after the hints until the second press, or for 2 seconds.
+
+If the device is lost during the session, scterm ends with a line that says why, for example
+`scterm: lost the video stream from Pixel 8: …`, and exit status 2.
+
+### Browser
 
 ```sh
-./scterm
+scterm --web
 ```
 
-Later, `./scterm update` brings it up to date: a build in its source checkout
-pulls and rebuilds itself; a release binary downloads the latest release,
-checks it against the digest GitHub publishes, and only replaces itself once
-the new binary has started on this system (it needs the same ffmpeg libraries
-it was built against). `./scterm version` prints the version.
+scterm prints the address, `http://127.0.0.1:6969/` by default. Open it in a web browser.
+`--web-port` changes the port (0 picks a free one). The terminal stays a normal terminal and
+shows log lines; Ctrl+C there ends scterm. Several browsers can watch at once. Closing a tab
+does not end the session, but Quit on the page does.
 
-## CI / releases
+Sound plays in the browser, and the speakers of the computer that runs scterm stay silent
+(`--audio-dup` plays it in both places). When the browser holds sound back until you use the
+page, a chip on the page says *Tap for sound*: any tap, click or key starts it. Opened over
+plain http from another computer, the page plays sound through a compatibility path with a
+little more delay, and the chip says *Sound: compatibility mode*. A `localhost` address, for
+example through an SSH tunnel, gives the low-delay path.
 
-Every push to `main` and every pull request is built and tested on GitHub
-Actions (`.github/workflows/build.yml`): `go vet`, `go test`, a stripped
-binary, and the Android tests, lint and debug APK, uploaded as artifacts.
-Pushing a `v*` tag also publishes a GitHub release with the binary and the
-signed Android APK attached. The version is stamped into `main.version` (shown
-in the status line) and into the APK (`v2.0.0` becomes version name 2.0.0,
-version code 20000).
+A card on the picture says what the page is waiting for: *Connecting…*, *Waiting for video
+from …*, *Connection lost. Reconnecting…* (the page reconnects by itself), or *Session ended*
+with the reason and a *Reconnect* button.
 
-The APK is signed with the release key in the repository secrets
-`SCTERM_KEYSTORE_BASE64` (the PKCS12 keystore, base64) and
-`SCTERM_KEYSTORE_PASSWORD` (key alias `scterm`). Android only accepts updates
-signed with the same key, so keep a backup of the keystore and its password:
-without them, every install would have to be removed (losing its identity and
-pairings) to move to a new key. `gh workflow run build.yml --ref <branch>`
-rehearses a release, signed APK included, without publishing anything.
+> **Warning:** by default only this computer can open the page. With `--web-addr 0.0.0.0`, or
+> any address that is not a loopback address, anyone who can reach the port can see the screen
+> and control the device. There is no password and no encryption. The only check compares a
+> WebSocket connection's Origin header with the address the page was opened on. That stops an
+> ordinary page of another website, but not a site that uses DNS rebinding (pointing its own
+> name at this computer): unless the browser blocks that, such a page could see and control the
+> device while scterm runs, even at the default address. Use other addresses only on a network
+> you trust, or keep the default address and use an SSH tunnel:
+> `ssh -L 6969:127.0.0.1:6969 HOST`.
 
-## Control
+### Window
 
-Everything works when grabbed (mouse+keys to the device). F12 or Ctrl-G toggles
-grab; in Zellij the session starts "ungrabbed" so the pane keeps its own mouse,
-and you press F12/Ctrl-G to hand the mouse over.
+```sh
+scterm --window
+```
 
-### Alt+letter: the no-F-key controls
+`--window` is `--web` in a browser window of its own. scterm prefers a Chromium-family browser
+(Chromium, Google Chrome, Brave, Microsoft Edge, Vivaldi). It opens it as an app window, with
+no tabs or address bar, and a private profile in `~/.cache/scterm/chromium`. With a new
+profile, the first window takes a few seconds to show the picture. Without Chromium, scterm
+opens Firefox with a temporary profile, in a normal window. `SCTERM_CHROME` chooses the browser,
+and `SCTERM_FIREFOX_KIOSK=1` opens Firefox full screen without toolbars.
 
-Phone keyboards (Unexpected Keyboard and friends) have Ctrl and Alt but no
-F-key row, so **Alt+`<letter>` is the primary binding** for every device
-action — in the terminal, a browser tab and `--window` alike. The letters are
-mnemonics, and the same table drives all three front ends. The punctuation
-chords (`Alt+/`, `Alt+-`, `Alt+=`) work there too: a phone reports them by
-character rather than by key code, and the player normalises that before the
-lookup.
+A Chromium window opens at the size of the picture (the device's screen, scaled down to
+`--max-size`), at most 1000 pixels tall, and `--window-size WxH` sets another size. With
+`--peer`, scterm does not know the device's screen size, so the window opens at a default size.
+Sound starts without a tap. Closing the window ends scterm about 3 seconds later; reloading
+the page keeps the session. Quitting scterm closes the window.
 
-| Chord | Action |
-|-------|--------|
-| Alt+H | Home |
-| Alt+B (or Esc) | Back |
-| Alt+T | Recents (tasks) |
-| Alt+P | Power |
-| Alt+U / Alt+D | Device volume up / down |
-| Alt+C | Collapse panels |
-| Alt+N | Notifications |
-| Alt+E | Settings shade |
-| Alt+R | Rotate device |
-| Alt+G | Toggle grab |
-| Alt+I | Show/hide the software keyboard (browser: raise the phone keyboard) |
-| Alt+S | Screenshot (local: PPM in the TUI, PNG in the browser) |
-| Alt+K | Request a keyframe |
-| Alt+Q | Quit |
-| Alt+/ | Action menu (TUI) / controls sheet (web) |
-| Alt+M | Mute the LOCAL audio stream (never the device) |
-| Alt+- / Alt+= | Local playback volume |
-| ↑/↓/←/→ | D-pad |
+When the environment names no display, as in a Zellij pane, scterm finds the Wayland or X
+socket itself and says which one it uses. When the browser exits within 15 seconds without
+showing the picture, scterm prints the browser's error lines and the address it still serves.
 
-The device's own Menu key and Mute have no chord: they live on F2/F7 and on the
-TUI action menu (Alt+/) and the web action bar.
+## Controls
 
-The classic keys still work, unchanged — nothing was taken away:
+The terminal, the browser and the window share one set of actions. Almost every action has a
+button on the action bar, which appears when you use the mouse and fades a few seconds later.
+Most actions also have an Alt+letter chord and an F-key; the Alt chords exist because phone
+keyboards have Alt but no F-keys. Alt+/ opens the Controls menu (terminal) or the Controls
+sheet (browser), which lists the actions with their keys: click a row, or in the terminal press
+its letter.
 
-| Key | Action |
-|-----|--------|
-| Esc | Back |
-| F1 | Home |
-| F2 | Menu |
-| F3 | Recents (app switch) |
-| F4 | Power |
-| F5 / F6 | Device volume down / up |
-| F7 | Device mute |
-| F8 | Rotate device |
-| F9 / F10 | Notification / settings shade |
-| F11 | Collapse panels |
-| F12 / Ctrl-G | Toggle grab (Zellij mouse path) |
-| Ctrl-K (or Ctrl-O) | Show/hide the on-screen keyboard |
-| Mouse left | Tap (down+up) |
-| Mouse left drag | Touch move (coalesced ~8ms) |
-| Wheel | Scroll |
-| Mouse right | Back |
-| Mouse middle | Home |
+The last two columns say where each action is: on the action bar and in the Controls menu in
+the terminal, on the action bar and in the Controls sheet in the browser.
 
-### Action bar and action menu
+| Action | Button | Alt | F-key | Terminal | Browser |
+| --- | --- | --- | --- | --- | --- |
+| Back | Back | Alt+B | — | bar, menu | bar, sheet |
+| Home | Home | Alt+H | F1 | bar, menu | bar, sheet |
+| Recents | Rec | Alt+T | F3 | bar, menu | bar, sheet |
+| Menu key | Menu | — | F2 | bar, menu | bar, sheet |
+| Controls | Controls | Alt+/ | — | — | bar, ☰ button |
+| Volume up | Vol+ | Alt+U | F6 | bar, menu | bar, sheet |
+| Volume down | Vol- | Alt+D | F5 | bar, menu | bar, sheet |
+| Mute device | Mute | — | F7 | bar | bar, sheet |
+| Rotate | Rot | Alt+R | F8 | bar, menu | bar, sheet |
+| Notifications | Notif | Alt+N | F9 | bar, menu | bar, sheet |
+| Settings shade | Shade | Alt+E | F10 | bar, menu | bar, sheet |
+| Collapse panels | Collapse | Alt+C | F11 | bar, menu | bar, sheet |
+| Power | Power | Alt+P | F4 | bar, menu | bar, sheet |
+| Keyboard | Keys | Alt+I | — | bar, menu | bar, sheet |
+| Screenshot | Shot | Alt+S | — | bar, menu | bar, sheet |
+| Refresh video | Redraw | Alt+K | — | bar, menu | bar, sheet |
+| Grab | Grab | Alt+G | F12 | bar, menu | bar, sheet |
+| Quit | Quit | Alt+Q | — | bar, menu | bar, sheet |
 
-The web page has a floating action bar: one button per action, arriving with
-mouse activity and fading a couple of seconds after the last movement. The
-button tooltips name the chords, so the buttons and the keyboard cannot
-disagree.
+- Esc is Back too, and the arrow keys are the D-pad.
+- Controls is the menu or the sheet itself. In the browser, the ☰ button always opens it.
+- Mute device mutes the device's own sound. It has no Alt chord; in the terminal it is on F7,
+  the action bar and the on-screen keyboard.
+- Quit: Alt+Q quits at once, and so does Ctrl+Q while the terminal's Controls menu is open. A
+  Quit button, the Quit row and the QUIT key of the on-screen keyboard ask for a second press
+  within two seconds.
+- Grab, in the terminal, gives the mouse to the device or back to the terminal (in Zellij, the
+  keys too). In the browser the mouse always goes to the device, and Grab decides where some
+  Ctrl keys go (see [Typing](#typing)).
+- Refresh video asks the device for a new keyframe, which repaints a damaged picture.
+- In the browser, Alt+F1 to Alt+F12 do the same as F1 to F12. F5 and F11 do not reload the page
+  or switch to full screen.
 
-The terminal gets the same thing drawn with the software keyboard's button
-spans: a strip of two-row pills, centered in the pane just above the status
-line, sized for pointing (inner padding and a gap between buttons). Any mouse
-activity brings it up -- hover where the terminal forwards motion (mouse
-tracking is set to SGR, with any-event motion enabled), otherwise a click or
-wheel -- and it fades a couple of seconds after the last movement, except
-while the pointer is resting on it: hiding a button from under the cursor
-would turn the next click into a device tap. Buttons run through the same
-dispatch as the chords and the menu, a click flashes the button green, and
-when the strip is wider than the pane the `‹`/`›` edges scroll it. Clicks on
-the bar never reach the device as taps, and the overlay repaints immediately
-instead of waiting for the next video frame (a static device screen may send
-none at all).
+### Mouse and touch
 
-`Alt+/` opens the keyboard-driven action menu: every action with its chord,
-letters run a row, `Esc` closes, and a mouse click on a row runs it too. The
-web page gets the same list as a clickable controls sheet behind the `☰`
-button.
+| Input | Terminal | Browser |
+| --- | --- | --- |
+| Click | Tap | Tap |
+| Drag | Swipe | Swipe |
+| Wheel | Scroll | Scroll |
+| Right click | Back | Back |
+| Middle click | Home | Home |
+| One finger | — | Tap, swipe, long press |
+| Three-finger tap | — | Show or hide your phone's on-screen keyboard |
 
-### Pointer indication (web/`--window`)
+In the terminal, the mouse reaches the device only while it is grabbed. A click on the action
+bar, the Controls menu or the on-screen keyboard runs that control and does not tap the device.
+In the browser, a long press is a long touch on the device, not Back, and only one finger
+reaches the device.
 
-The browser hides the native cursor over the video and paints its own: a ring
-that follows a mouse or pen while hovering, fills when pressed and draws a
-short trail while dragging. A finger has no hover to show, so touch gets a
-ripple that exists only while the finger is down. This indication is local — it
-shows where you are about to click; it does not move the device's own cursor.
+### Typing
 
-In `--web`/`--window` the **same table applies to the same keys**: `F1`..`F11`
-are home/menu/recents/power/vol-/vol+/mute/rotate/notif/settings/collapse and
-`F12` (or `Alt+G`) toggles grab, exactly as in the terminal — the browser used
-to send Android's own F1..F12 keycodes for those instead, so one key meant two
-different things depending on which display you were looking at. `Alt+F1..F12`
-remain as an alias for keyboards or window managers that eat a bare F-key.
-`Esc` alone is back, and the `Alt+M` / `Alt+-` / `Alt+=` local playback controls
-act on the browser's own output (the host sink is silent in these modes).
+Letters, digits and space go to the device as key events, so games see them. Other characters
+are typed as text. Enter, Backspace, Tab, Delete, the arrows, Home, End, Page Up and Page Down
+go as keys.
 
-Grab is a real mode in the browser too: with it off, the accelerators that
-belong to the browser itself (`Ctrl+W` close, `Ctrl+T`/`Ctrl+N` new tab/window,
-`Ctrl+R` reload, `Ctrl+Q`) stay with the browser — `Ctrl+W` would otherwise end
-a `--window` session. With grab on they go to the device, which is what F12
-does for Zellij in the terminal. Bare `F5`/`F11` are volume-down/collapse, not
-reload/fullscreen: the page consumes them.
+In the terminal, Ctrl with a letter goes to the device as that key with Ctrl, except that
+Ctrl+G toggles Grab and Ctrl+K and Ctrl+O show or hide the on-screen keyboard. Terminals send
+Ctrl+I, Ctrl+M and Ctrl+[ as Tab, Enter and Esc. Ctrl+C goes to the device and does not stop
+scterm. Alt with a letter that has no action does nothing.
 
-Letters/digits type as Android key events (games work); uppercase adds shift
-meta; Ctrl+A..Z send keycodes with the ctrl meta. Other printable characters
-go through text injection. Unmapped Alt+letter chords are left to the front
-end: the browser types the character, while the terminal has no use for it and
-drops it (`Alt+Z`). The `Alt+F1..F12` aliases still exist for keyboards where a
-bare F-key never arrives, but the mnemonics above are the intended path.
+A paste in the terminal goes to the device as one paste, through the device's clipboard
+(which it replaces), with its line breaks kept as line breaks; nothing in it acts as a key. A
+paired device that does not share its clipboard gets the text typed instead. A paste longer
+than 262,130 bytes is not sent, and scterm says so. Over adb, the server types accented
+letters but not the euro sign, CJK characters or emoji; a paste carries them.
+
+In the browser, Ctrl with a letter also goes to the device as that key with Ctrl, except:
+
+- Ctrl+C stays with the browser (copy), and Ctrl+V is not sent. Text pasted into the page is
+  typed on the device.
+- With Grab off (the default), Ctrl+W, Ctrl+T, Ctrl+N, Ctrl+R and Ctrl+Q stay with the
+  browser. With Grab on, the first four go to the device and Ctrl+Q ends the session. A browser
+  may still keep some of these keys for itself.
+
+Alt with a letter that has no action types that letter.
 
 ### On-screen keyboard
 
-`Alt+I` (or `Ctrl-K`/`Ctrl-O`) opens a full software keyboard over the video
-(bottom-anchored): QWERTY, digits, symbols, D-pad, Android nav (Home/Back/
-Menu/Recents/Power/Vol±/Mute), F1–F12, and system actions (Rotate/Notif/Shade/
-Collapse/Grab/Hide/Quit). Mouse-click a key to press it; arrows + Enter
-navigate; sticky Shift/Ctrl/Alt behave like a real keyboard (one-shot after a
-text key); Esc or F12 hides it. Pressed keys flash green. Clicks above the
-keyboard pass through to the device as taps.
+In the terminal, Alt+I, Ctrl+K, Ctrl+O or the Keys button opens a keyboard over the bottom of
+the picture. It has letters, digits, the D-pad, Android's own keys, F1 to F12 and a row of
+actions. Click a key, or move with the arrow keys and press Enter. Shift, Ctrl and Alt apply to
+the next key. Clicks above the keyboard still tap the device. Esc or F12 closes it.
 
-### Status bar
+In the browser, Alt+I, the Keys button or a three-finger tap shows the on-screen keyboard of
+the phone or tablet you browse from, and what you type there goes to the device. If a phone
+does not show it after Alt+I, tap the screen once.
 
-The bottom line shows device, resolution, grab state, volume, a live
-frametime sparkline (`▁▂▃▄▅▆▇`) + average ms, and a one-line hint:
-`Alt+/ actions · Alt+I keys · Alt+Q quit`. The full list is in the action menu
-(and above) — the graph makes render spikes visible while you play.
+### Screenshots
 
-## Flags
+Alt+S, or the Shot button, saves a screenshot. In the terminal, scterm saves what the terminal
+shows, at the terminal's resolution (one pixel for each half cell), as
+`scterm-YYYYMMDD-HHMMSS.ppm` in the current directory, and the bottom line names the file. In
+the browser, the page downloads the picture at the stream's resolution as
+`scterm-YYYYMMDD-HHMMSS.png`.
 
-```
--s SERIAL        device serial (default: ANDROID_SERIAL or the only device)
--max-size N      max video width (default 1280)
--video-bit-rate  default 8000000
--audio-bit-rate  default 128000
--max-fps F       cap the device frame rate (0 = device default)
--audio=false     disable audio
--video=false     disable video
--control=false   disable control (mirror only)
--no-tui          headless stats mode (mutually exclusive with --web)
--dump-frames DIR write the first frames as PPM (verification)
--keys            print all supported Android keys
--web             serve the mirror to a browser (see Web mode above)
--window          --web plus a standalone window (see Window mode above)
--web-port N      port for --web/--window (default 6969, 0 = any)
--web-addr A      bind address (default 127.0.0.1)
--web-quality Q   mjpeg qscale for the web display (default 5)
--window-size WxH initial window size for --window
-```
+### Sound on this computer
 
-## Why our own client
+Alt+M mutes the sound on this computer, and Alt+- and Alt+= turn it down and up in steps of
+10%, from 0% to 200%. They never change the device's volume; Volume up and Volume down do that.
+In the terminal they act on scterm's PulseAudio stream, and in the browser on the page's own
+volume.
 
-The old project wrapped `scrcpy`/`ffmpeg` with subprocesses and file pipes. This
-one:
+## Peer mode
 
-- decodes h264 with libavcodec in-process (same library scrcpy uses) — the
-  packet loop is ours;
-- scales straight to the terminal canvas with libswscale (SIMD asm inside);
-- packs 2-pixel half-block cells with hand-written AVX2/NEON SIMD and
-  quantizes RGB to 3-bit channels so adjacent equal cells merge into runs
-  (`▀▀▀▀` instead of per-cell SGR) — that's what keeps a terminal fast;
-- renders with a hybrid redraw: changed rows only, full repaint every 24
-  frames (recovers from any terminal/Zellij drifts);
-- sends input over scrcpy's control socket (TCP_NODELAY), the same path scrcpy
-  uses — one round trip, no `adb shell input` subprocess;
-- decodes opus/aac/flac to 48kHz stereo PCM and plays through PulseAudio with
-  a software gain (mute/volume without touching the device).
+The scterm Android app can serve its device's screen to paired devices. scterm connects to it
+over the network, without adb, and shows it in any of the displays. The app sends scrcpy's own
+stream format inside mutual TLS, so everything after the connection works as with adb. To
+install and use the app, see [android/README.md](android/README.md).
 
-## Web mode (`--web`)
+scterm's `--peer` is tested against the app's own target code running on a computer. It has
+not yet been run against a phone.
 
-`--web` serves the same decoded canvas to a browser instead of to terminal
-cells. Same adb tunnel, same server on the device, same decoder, same control
-socket — only the last hop changes:
+### Pairing
 
-```
-device → h264 --libavcodec--> BGR0 canvas --mjpeg--> WebSocket --> canvas
-                                   │
-                          (one mailbox per client, drop-old)
-```
+Pair each device once, in one of two ways:
 
-What that buys, and why it is built this way:
+- **Nearby**, on the same network. On the device, tap *Start serving*, then *Invite a
+  device…*. Run `scterm pair`. scterm looks for up to 30 seconds for a device that shows an
+  invitation, and asks which one when it finds several. Then both screens show a six-digit
+  code: check that they match, and accept on both.
+- **Typed invitation**, from any network that can reach the device, such as a VPN. The device
+  shows its invitation as an address and a code. Give both to `scterm pair`, in quotes:
+  `scterm pair "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093"`. A `scterm://pair` link also works.
 
-- **One decode, not two.** The host decodes h264 once; browsers receive JPEG
-  stills (hardware-decoded, ~2 ms). No MSE, no fragmented-MP4 muxing, no
-  keyframe hunting, no browser-side buffering.
-- **One shared canvas.** The canvas is the video's own size, rendered once per
-  frame and shared by every client; each browser scales it to its viewport with
-  CSS. A client must never choose its own canvas: the frame buffer is allocated
-  once per frame, so a client-sized canvas makes the encoder read past the end
-  of that buffer (that was a real SIGSEGV — see the regression tests).
-- **Drop-old, never backlog.** Each client owns a one-slot mailbox: a browser
-  that stalls loses frames instead of pushing back on the decoder, so input
-  latency stays flat no matter how slow the page is.
-- **Zero-copy frame path.** The JPEG is encoded directly into the buffer that
-  goes to the socket (header + payload in one write), and canvases come from a
-  small pool. One pooled encoder per canvas geometry, serialised by a mutex,
-  because an AVCodecContext is not thread-safe.
-- **Audio is raw PCM** (s16le stereo 48 kHz) into an `AudioWorklet` ring buffer:
-  ~20 ms of latency, no codec, and no autoplay gesture needed in `--window`.
-  The browser asks for it in the `hello` message (`caps:"audio"`), sent when the
-  socket opens — and again after every reconnect, because the server builds a
-  fresh client (audio off) per connection.
-- **Audio plays in the browser only.** The stream is the sole source of sound:
-  the host sink stays silent in web/window mode so nothing is ever played twice.
-  `--audio-dup` duplicates it onto the host device as well.
-- **Input is ordered, not queued behind video.** Pointer/keyboard events are
-  parsed in the socket reader and applied by one dispatcher goroutine; drag
-  moves coalesce at 8 ms exactly like the TUI.
+An invitation works once, for 10 minutes. When pairing succeeds, scterm says what the device
+allows this computer to do, and how to connect to it.
 
-Controls mirror the TUI (the Alt+letter mnemonics and the F-keys are the same
-tables — see Control): every action is on the floating action bar, and `Alt+/`
-opens a clickable controls sheet so a phone can drive everything without
-chords. Right click = back, wheel = scroll, middle click = home,
-paste = text input. Everything else is a normal keyboard: letters/digits go as
-key events, punctuation as injected text. The page also paints a local pointer
-indication (hover ring, drag trail, touch ripples) so you can see where a click
-will land even though the native cursor is hidden over the video.
-
-```
--web                 serve the mirror over HTTP (canvas display)
--web-port N          TCP port (default 6969; 0 = pick a free port)
--web-addr A          interface to bind (default 127.0.0.1; 0.0.0.0 exposes it
-                     to your network)
--web-quality Q       mjpeg qscale 2 (best, big) .. 31 (small), default 5
--audio-dup           duplicate the audio: keep it on the device while capturing,
-                     and with --web/--window play it on the host as well as in
-                     the browser (default: the stream is the only output)
-```
-
-The terminal stays a normal terminal in web mode: no alternate screen, no raw
-mode, no mouse grab — just log lines, so `scterm --web` can sit in a tmux pane
-while you use the browser.
-
-The browser client has its own suites, and `go test ./...` runs them (skipping
-if `node` is absent), because both of the faults that made the page silent were
-in it and invisible to any Go test:
+### Connecting
 
 ```sh
-node web/input_test.mjs     # pointer/keyboard mapping, terminal key parity
-node web/worklet_test.mjs   # the PCM sink: buffering, burst sizes, stats
+scterm --peer pixel                       # by the start of its name, or of a word in it
+scterm --peer=                            # the only paired device; asks when there are several
+scterm --peer "Pixel 8" --window --takeover
 ```
 
-`input_test.mjs` lifts the real `Input` (and `Net`) out of `player.js` and drives
-them, so it cannot drift from the shipped code; `worklet_test.mjs` runs the real
-`pcm-worklet.js` with the AudioWorklet globals stubbed.
+`NAME` is the device's name in any case, the start of the name or of a word in it, or the start
+of its identity (at least four characters). When several devices match, scterm asks which one,
+or names them when there is no terminal to ask on.
 
-Verify a running instance from the shell (no browser needed):
+- The device decides what this computer may do (view, hear, control, share the clipboard), and
+  can change that at any time. When it ends the session, scterm prints its reason.
+- One device controls at a time. Without `--takeover`, scterm watches while another device has
+  control, and says so; `--takeover` takes control.
+- scterm sends `--no-video`, `--no-audio`, `--no-control`, `--max-size`, `--max-fps`, `-b` and
+  `--audio-codec` to the device, and the device decides what it can do. `--audio-source`,
+  `--audio-bit-rate` and the device side of `--audio-dup` have no effect in peer mode.
+- What works depends on how the device serves. The full-control helper works like adb. Screen
+  capture on a standard install has no sound and takes one finger.
 
-```sh
-node web/check.mjs 127.0.0.1:6969 5        # frames, JPEG, PCM, geometry
-node web/check.mjs 127.0.0.1:6969 5 raw    # + BGR0 pixel content (length, bars)
-SCT_DEBUG_WEB=1 ./scterm --web             # paint/decode/encode counters
+### Managing pairings
+
+- `scterm peers` lists the paired devices without connecting: name, short identity, address,
+  and what each one allows.
+- `scterm peers --check` also connects to each device, authenticated, without starting a stream
+  or taking control, and prints *Ready* or the problem. *Ready* means viewing works; another
+  device may still have control. It checks two devices at a time, for at most five seconds
+  each. It also finds a device whose address changed on the local network, and checks its
+  identity before it saves the new address.
+- `scterm forget NAME` forgets a device. The whole name, in any case, or the identity forgets
+  it at once. Part of a name asks for confirmation, and is refused when there is no terminal to
+  ask on. The device keeps this computer in its own list until you remove it there.
+
+This computer's identity and the paired devices are in `~/.config/scterm` (see
+[Files](#files)).
+
+## Updating
+
+`scterm update` updates scterm in place:
+
+- A release binary asks GitHub for the latest release. When that is newer, scterm shows the
+  new version, its release page and the start of its release notes, and on a terminal asks
+  before it goes on (`-y` or `--yes` skips the question; without a terminal it goes on). It
+  downloads the binary next to itself, with a progress line on a terminal, and checks its size
+  and, when the release publishes one, its SHA-256 digest (it says when there is none). Then it
+  runs the new binary's `version` command, to check that it starts on this system and is the
+  expected version, and only then replaces itself. The previous binary stays beside it, with
+  `.old` added to its name, and scterm prints the `mv` command that goes back to it. When it
+  may not write to its own directory, it prints the `sudo install` command that finishes the
+  update. Releases contain a linux/amd64 binary only.
+- A build from source (`scterm dev`) runs `git pull --ff-only` in its checkout. Unless the
+  binary was built from the new commit without local changes, scterm rebuilds it with
+  `go build`, checks that it starts, and replaces itself. The binary must be in the checkout,
+  or one or two directories below it.
+
+`scterm update --check` only says whether a newer release exists, and downloads nothing.
+
+`scterm version` prints the version: `scterm 2.1.0`, for example, or `scterm dev`. A session
+prints the same line first.
+
+## Troubleshooting
+
+### The device is not found
+
+scterm uses a device that `adb devices` lists as `device`. When there is none, it says what to
+do:
+
+| `adb devices` shows | What to do |
+| --- | --- |
+| no device | Turn on USB debugging and connect the device, or use `adb pair` and `adb connect` |
+| `unauthorized` | Unlock the device and accept "Allow USB debugging?" |
+| `no permissions` | Add a udev rule for the device, or join the `plugdev` group; then replug it |
+| `offline` | Replug the device, or run `adb kill-server` |
+| `authorizing`, `connecting` | Wait a moment and run scterm again |
+| `detached` | Run `adb -s SERIAL attach` |
+| `recovery`, `sideload`, ... | Start Android normally |
+| two or more devices | Choose one with `-s SERIAL`, or set `ANDROID_SERIAL` |
+
+When `adb` itself is missing, install the Android platform-tools, or use [peer mode](#peer-mode).
+
+### The session does not start
+
+When the server on the device stops before it connects, scterm prints the server's last lines,
+which usually say why. When the device does not connect within 15 seconds, scterm says which
+connection it was waiting for.
+
+### No sound
+
+- Devices with Android 10 or older send no sound. On Android 11, unlock the device before you
+  start scterm.
+- In the terminal display, sound needs PulseAudio, and `pactl` unless `SCT_AUDIO_DEVICE` names a
+  sink. Without them, scterm prints `scterm: audio disabled: …` before it starts, and the bottom
+  line says `audio off`. The browser display still plays the sound in the browser.
+- scterm plays on the output your desktop uses, and follows it when it changes.
+  `SCT_AUDIO_DEVICE` sets a fixed sink (see `pactl list sinks short`).
+- Only one scterm plays sound at a time. When a session starts, scterm stops the sound of any
+  other scterm on this computer, running or left behind by a crash, and says how many sound
+  streams it silenced.
+- The default `--audio-source output` mutes the device while scterm runs. To hear the sound on
+  the device too, use `--audio-source playback --audio-dup` (Android 13 and later).
+- In the browser, the sound chip says what is wrong: *Tap for sound*, *Sound off · Alt+M* (the
+  page's volume is muted), *Sound: compatibility mode* (plain http, a little more delay), or
+  *No sound in this browser*.
+
+### The terminal picture is garbled
+
+Resize the terminal, or wait for the next full redraw. `--repaint-interval 60` redraws more
+often. Refresh video (Alt+K) asks the device for a new keyframe.
+
+### The window does not open
+
+- `could not open a window: no chromium/chrome or firefox found on PATH`: install one of them,
+  or set `SCTERM_CHROME`. The printed address still works in any browser.
+- `no Wayland or X socket for this user`: there is no graphical session to open a window in.
+  Use `--web` instead.
+- `this private profile is held by a running window`: close the other scterm window.
+- The browser exits at once: scterm prints its error lines and the log file with its output.
+
+### Peer mode
+
+- `scterm pair` finds nothing: the device must show an invitation (*Start serving*, then
+  *Invite a device…*) on the same network. Discovery uses multicast DNS (UDP port 5353), and a
+  firewall on this computer that drops incoming UDP can hide the device. Allow mDNS from the
+  local network, or type the invitation instead.
+- `could not reach NAME at HOST:PORT (…)`: the device must be serving. scterm connects to it
+  over TCP, on port 27300 unless the invitation named another. When the saved address fails,
+  scterm looks for the device on the local network once and, after checking that it is the
+  paired device, uses and saves its new address. Networks that keep devices apart, such as
+  some guest Wi-Fi networks, block this. `scterm peers --check` says what it finds.
+- `NAME at HOST:PORT refused the connection: …`: the message says why and what to do, for
+  example to pair again with `scterm pair`.
+- `another device has control of NAME`: add `--takeover`.
+- `NAME allows this computer to view only`: change what it allows on the device.
+
+### Help and exit status
+
+`scterm -h` or `scterm help` prints the flags, commands, environment variables and exit
+statuses, and every command answers `-h` with its own help. The exit status is:
+
+| Status | Meaning |
+| --- | --- |
+| 0 | A normal end: Quit, closing the window, or a command that worked |
+| 1 | scterm could not start (a command-line mistake too), a command failed, or the session failed |
+| 2 | The device was lost during the session (a crash exits 2 as well) |
+
+## Reference
+
+### Flags
+
+The flags, grouped as `scterm -h` groups them. Long flags also work with one dash. A flag that
+takes a value accepts `--flag value` or `--flag=value`.
+
+#### Device
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `-s`, `--serial SERIAL` | the only ready device | Device to use, as `adb devices` lists it |
+| `-n`, `--no-control`, `--control=false` | — | View only: send no input |
+
+Without `-s`, scterm uses `ANDROID_SERIAL` when it is set.
+
+#### Video
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--no-video`, `--video=false` | — | Mirror without the picture |
+| `-m`, `--max-size PIXELS` | 1280 | Cap the picture's longer side; 0 keeps the full size |
+| `--max-fps FPS` | no cap | Cap the frames per second |
+| `-b`, `--video-bit-rate RATE` | 8M | Video bits per second; K and M work, as in 1.5M |
+
+#### Audio
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--no-audio`, `--audio=false` | — | Mirror without sound |
+| `--audio-bit-rate RATE` | 128K | Audio bits per second |
+| `--audio-codec CODEC` | opus | `opus`, `aac`, `flac` or `raw` (uncompressed PCM) |
+| `--audio-source SOURCE` | output | What the device records (see below) |
+| `--audio-dup` | — | Keep playing the sound on the device (see below) |
+
+`--audio-source output` records everything the device plays, and mutes the device while scterm
+runs. `playback` (Android 13 and later) records what apps play; apps can opt out, and with the
+bundled server, game sound is not recorded. `mic` records the microphone. scrcpy's other
+sources also work: `mic-unprocessed`, `mic-camcorder`, `mic-voice-recognition`,
+`mic-voice-communication`, `voice-call`, `voice-call-uplink`, `voice-call-downlink` and
+`voice-performance`.
+
+`--audio-dup` keeps the sound playing on the device, but only with `--audio-source playback`:
+without `--audio-dup`, `playback` silences the recorded apps on the device. With the default
+source, `output`, the device stays muted and `--audio-dup` changes nothing there. With `--web`
+or `--window`, `--audio-dup` also plays the sound on this computer, as well as in the browser.
+
+#### Display
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--no-tui` | — | No picture, only a line of statistics (for tests) |
+| `--web` | — | Show the device in a web browser (see [Browser](#browser)) |
+| `--window` | — | Like `--web`, in a window of its own (see [Window](#window)) |
+| `--web-port PORT` | 6969 | Port to serve on; 0 picks a free one |
+| `--web-addr ADDRESS` | 127.0.0.1 | Address to listen on (see the warning in [Browser](#browser)) |
+| `--web-quality N` | 5 | JPEG quality in the browser: 2 is best and largest, 31 smallest |
+| `--window-size WxH` | the picture's size | Size of the `--window` window in pixels, as 720x1600 |
+
+#### Peer
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--peer NAME` | — | Connect to a paired device that runs the scterm app (see below) |
+| `--takeover` | — | With `--peer`, take control from whoever has it |
+
+`--peer=` connects to the only paired device, or asks which one. See [Peer mode](#peer-mode).
+
+#### Debugging
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--keys` | — | Print the Android keys scterm can send, and exit |
+| `--dump-frames DIR` | — | With `--no-tui`, save the first 3 frames in DIR (PPM) |
+| `--dump-audio FILE` | — | Write the device's audio packets to FILE, each after its size |
+| `--repaint-interval FRAMES` | 300 | Redraw the whole terminal every FRAMES frames |
+
+`--dump-audio` writes nothing with `--audio-codec raw`. Two environment variables also help:
+`SCT_DEBUG_WEB=1` logs each browser's paint and decode statistics, and `SCT_DEBUG_CONTROL=1`
+logs input as it is read and sent to the device.
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `scterm pair [INVITATION]` | Pair with a device that runs the scterm app |
+| `scterm peers [--check]` | List the paired devices; `--check` tests each one |
+| `scterm forget NAME` | Forget a paired device |
+| `scterm update [--check] [-y]` | Update to the latest release, or pull and rebuild |
+| `scterm version` | Print the version |
+| `scterm help` | Print the help, as `scterm -h` does |
+| `scterm COMMAND -h` | Print a command's own help |
+
+### Environment variables
+
+| Variable | What it does |
+| --- | --- |
+| `ANDROID_SERIAL` | The device to use when `-s` is not given |
+| `SCTERM_HOME` | Where scterm keeps its identity and pairings |
+| `SCTERM_CHROME` | The Chromium-family browser for `--window` (`CHROME_BIN`, `CHROMIUM_BIN` too) |
+| `SCTERM_FIREFOX_KIOSK=1` | When `--window` uses Firefox, open it full screen without toolbars |
+| `SCT_AUDIO_DEVICE` | The PulseAudio sink to play on, instead of following the desktop's choice |
+| `SCT_DEBUG_WEB=1` | Log each browser's paint and decode statistics |
+| `SCT_DEBUG_CONTROL=1` | Log input as it is read and sent to the device |
+
+scterm also reads variables that other programs set: `ZELLIJ` (set by Zellij; scterm then
+starts without Grab), `XDG_CONFIG_HOME` and `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` (where scterm
+and `pactl` find PulseAudio, and where `--window` looks for a Wayland socket), and for
+`--window` `WAYLAND_DISPLAY` and `DISPLAY`.
+
+### Exit status
+
+See [Help and exit status](#help-and-exit-status).
+
+### Files
+
+| Path | What it is |
+| --- | --- |
+| `~/.config/scterm/identity.pem` | This computer's identity for peer mode: key and certificate |
+| `~/.config/scterm/peers.json` | The paired devices |
+| `~/.cache/scterm/chromium/` | The private browser profile of `--window` |
+| `scterm-YYYYMMDD-HHMMSS.ppm` | Terminal screenshots, in the current directory |
+| `/data/local/tmp/scrcpy-server.jar` | On the device: the server, copied there at each start |
+
+`SCTERM_HOME` replaces `~/.config/scterm`. `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` replace
+`~/.config` and `~/.cache`.
+
+## How it works
+
+```text
+              ┌────────────────────────────────────────────┐
+              │ scterm, on this computer                   │
+              │ decodes video and sound (FFmpeg) and sends │
+              │ input; draws in the terminal, or sends     │
+              │ JPEG frames and sound to a browser         │
+              └───────┬────────────────────────────┬───────┘
+                      │ adb tunnel:                │ peer mode, no adb:
+                      │ video, audio, control      │ mutual TLS, TCP port 27300
+                      │                            │
+     ┌────────────────▼────────────┐   ┌───────────▼──────────────────┐
+     │ scrcpy server, bundled with │   │ scterm Android app, serving  │
+     │ scterm and started by it:   │   │ the same scrcpy stream       │
+     │ screen capture (H.264),     │   │ format, inside TLS           │
+     │ sound, input                │   │                              │
+     └─────────────────────────────┘   └──────────────────────────────┘
 ```
 
-`raw` mode is worth knowing about: decodable JPEGs prove nothing about content,
-because a valid JPEG is produced even when the host encodes the wrong bytes. Raw
-mode pins the payload to exactly `w*h*4` and inspects the pixels.
+With adb, scterm copies the scrcpy server to the device, starts it, and receives the video,
+audio and control connections through an adb tunnel. It decodes the H.264 video and the sound
+with the FFmpeg libraries. The terminal display scales each frame to the terminal and draws it
+with half-block characters. The browser display sends each frame to the page as a JPEG, and
+the sound as raw PCM. Input goes back over the control connection. In peer mode, the same
+streams come from the scterm Android app over TLS. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+has the details.
 
-Drive a touch gesture without a browser:
+## Development
 
-```sh
-node web/gesture.mjs 1478                     # lock-pattern dots 1..9 (keypad order)
-node web/gesture.mjs --swipe 960,700,960,250  # explicit device-pixel swipe
-node web/gesture.mjs --host 100.64.0.1 1478   # mirror bound to another interface
-node web/gesture.mjs --dry-run 1478           # print the path, inject nothing
-```
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): building, tests and developer tools
+- [docs/RELEASING.md](docs/RELEASING.md): CI, releases and the Android signing key
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how scterm works inside
+- [docs/PEER_PROTOCOL.md](docs/PEER_PROTOCOL.md): the peer protocol
+- [android/README.md](android/README.md): the Android app
 
-Pattern geometry and display size are read from the device with `adb` unless
-`--grid`/`--device` are given, so it survives rotation. `--host` defaults to
-`127.0.0.1`; pass the address the mirror is actually bound to. `--back` sends a
-bare Back op, which is also how to dismiss the bouncer again.
+## Credits
 
-This exists because Android marks the lock-screen bouncer `FLAG_SECURE`, so the
-pattern grid is black in the browser exactly when it is on screen (`screencap`
-fails the same way: exit 1, zero bytes). The grid is still readable from the
-accessibility tree, so the gesture is computed numerically instead.
-
-Pacing is not cosmetic. A dense slow drag is delivered and then discarded by
-gesture recognition, with no error raised anywhere; measured on a Retroid
-Pocket 6 (Android 13), raising the bouncer with an upward swipe succeeded 1/5
-times at `--step 12 --delay 12`, 0/5 at `--step 12 --delay 40`, and 6/6 at
-`--step 45 --delay 8`. The defaults are the measured-good values. `--dwell`
-repeats the touch at each intermediate dot because `InputDispatcher` coalesces
-motion events and keeps only the last of a batch, but it deliberately does *not*
-dwell on the final waypoint: a stationary hold before the lift removes the
-velocity a fling needs and turns a working swipe into a dead one.
-
-## Window mode (`--window`)
-
-`--window` is `--web` plus "put it in its own top-level window, like scrcpy
-does". The trick is that no toolkit is involved: the display is already a local
-HTTP+WebSocket endpoint, so the window is a browser in app mode pointed at it —
-one process, hardware video scaling, low-latency WebAudio, and the whole video
-pipeline still ours.
-
-- Chromium family (`chromium`, `google-chrome`, `brave` and its channels such as
-  `brave-origin-nightly`, `edge`, `vivaldi`, `ungoogled-chromium`, or
-  `$SCTERM_CHROME`/`$CHROME_BIN`): launched with
-  `--app=<url> --window-size=WxH` — a standalone window with no tabs, no URL
-  bar, sized to the device's aspect ratio. Discovery also checks `/opt/brave.com/*`
-  and similar install locations, because Brave's binary is often not on `PATH`
-  under a name a naive probe would find.
-- Firefox (no Chromium found): a throwaway profile
-  (`--new-instance --profile …`) opens a normal window; `SCTERM_FIREFOX_KIOSK=1`
-  makes it `--kiosk` (chromeless, full screen) instead. Install Chromium for
-  the proper chromeless window.
-- `-window-size WxH` overrides the initial size (default: the device's rotated
-  display size, capped to fit a laptop screen).
-
-Three things worth knowing about the window:
-
-- The browser is launched with a **private profile** (`--user-data-dir`), so
-  `--app` cannot be forwarded to your already-running browser. That forwarding
-  is what used to break the window: Chromium's single-instance model handed the
-  URL to your browser session, which ignored `--window-size` and opened the
-  mirror at its own remembered geometry — a tall portrait window, say — with the
-  picture stretched to fill it. The profile lives in
-  `~/.cache/scterm/chromium` and is reused, because a brand-new profile has to
-  build its caches before it can paint (about five seconds of black window on
-  the first run, two and a half on the next).
-- The display is **recovered from the compositor socket** when the environment
-  does not describe one. A shell inside Zellij (or anything started from a tty
-  session) can inherit no `DISPLAY`, no `WAYLAND_DISPLAY`, and a stale
-  `XDG_SESSION_TYPE=tty`; Chromium then picks its X11 backend, finds no X server,
-  prints `Missing X server or $DISPLAY`, and is gone in about a second — before a
-  window can exist. Since that pane still belongs to your graphical session,
-  `--window` finds the Wayland (or X) socket itself and says so:
-
-      scterm: window: no DISPLAY/WAYLAND_DISPLAY in this session; using the Wayland compositor wayland-0
-
-  A browser that still dies without showing anything is **reported, not
-  swallowed**: its own output is captured and, if it exits within 15 s having
-  never been connected to, the reason is printed along with the URL that is
-  still serving. (Brave's launcher script masks the exit status with `|| true`,
-  and its output used to go to `/dev/null` — which is how a segfaulting browser
-  managed to look like "the window just does not open".)
-- Audio starts on its own in `--window` (`--autoplay-policy=no-user-gesture-required`).
-  In `--web` the first tap on the page is the gesture a browser may require
-  before it will play.
-
-The window *is* the session: closing it (its last client disconnecting) ends
-`scterm` and tears the tunnel down, like closing scrcpy does. Quitting `scterm`
-closes the window with it (the whole browser process group, launcher script
-included), so no orphaned browser is left holding the private profile — a
-leftover one would silently swallow the next `--window` launch.
-
-## Server
-
-The server jar is vendored from [scrcpy](https://github.com/Genymobile/scrcpy)
-(v4.1, Apache-2.0) — `third_party/scrcpy-server.jar.d/scrcpy-server`, pushed to
-`/data/local/tmp/scrcpy-server.jar` on start. The Java server source is included
-under `third_party/scrcpy-server-src/` and the license in
-`third_party/LICENSE.scrcpy`. The client pins version `4.1`, which the server
-enforces.
-
-## Performance notes
-
-Measured on this project's reference host (Ryzen 7 7800X3D), noise-heavy
-content, which compresses far worse than a real screen and so is a pessimistic
-bound (`go test -run XXX -bench Encode -benchtime 200x`):
-
-| Canvas | qscale | Encode | Frame | Ceiling |
-|---|---|---|---|---|
-| 1280x720 (web/window default) | 5 | 1.85 ms | 27 KB | ~540 fps |
-| 1777x1000 (a large window) | 5 | 3.72 ms | 67 KB | ~270 fps |
-| 480x1080 | 5 | 0.98 ms | 14 KB | ~1000 fps |
-| 1777x1000 | 2 (best) | 5.78 ms | 167 KB | ~170 fps |
-
-The browser side adds a measured ~2 ms of JPEG decode per frame. The whole
-display path therefore costs a few milliseconds and a few MB/s at 60 fps, well
-inside one core, and the device's own capture pipeline is the limiting factor in
-practice: this phone's capture is damage-tracking, so a static screen produces
-only ~10 fps no matter what the host can do. Live counters (`jpegMs` in the
-status message, or the `SCT_DEBUG_WEB=1` per-client line) report the real
-encode/decode cost on real content.
-
-Clients share one canvas, so N clients cost N encodes of the same pixels
-(serialised on one pooled encoder). With several windows open that is the next
-thing to optimise: encode once per frame and share the payload.
-
-At 480x1080 the mjpeg encode costs ~1 ms/frame single-threaded and lands around
-14 KB/frame. `-max-size 0` streams the device's native resolution instead and
-costs proportionally more; the default 1280 keeps the canvas at the video's own
-size, which is what the display actually shows.
-
-## Development roadmap
-
-The [Android peer app and cross-mode parity plan](docs/ANDROID_CLIENT_PLAN.md)
-describes one Android APK with both server and client roles, direct paired
-control in either direction, and authenticated Go TUI/web/window connections to
-Android servers while retaining legacy ADB operation. It includes permission and
-backend constraints, existing-client gap closure, milestones and release tests. Developers and LLMs should start with the
-[current checkpoint](.agent/HANDOFF.md) and reconcile it against Git and in-flight
-work before implementing the next task.
-
-Implementation has started under [`android/`](android/README.md), speaking the
-[peer protocol](docs/PEER_PROTOCOL.md): scrcpy v4.1 framing inside mutual TLS
-with paired, pinned identities. It runs on an Android 16 phone and an Android
-13 handheld, as target and viewer; two devices pair by picking each other
-from a nearby list and comparing a six-digit code. Signed APKs are attached to
-GitHub releases from v2.0.0 (see [installing](android/README.md#install)).
-scterm's peer mode (below) connects to it without adb; its protocol layer is
-tested against the Kotlin target, but the full `--peer` path has not yet been
-run against a phone.
-
-## Peer mode (`--peer`): the scterm Android app, no adb
-
-The terminal, `--web` and `--window` displays can also show a phone running
-the scterm Android app, over the network and without adb. The app sends
-scrcpy's own stream format inside mutual TLS, so everything after the
-connection (decoding, rendering, input, audio) is the same code as above.
-
-```sh
-# on the phone: "Start serving", then "Invite a device…"
-./scterm pair                   # finds it on this network; compare the six-digit code
-./scterm pair "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093"   # or type the invitation
-./scterm peers                  # paired devices and what each allows (offline)
-./scterm peers --check          # authenticated readiness checks; no stream started
-./scterm --peer pixel           # the start of its name, or of a word in it, is enough
-./scterm --peer=                # the only paired device; asks which when there are several
-./scterm --peer pixel --window --takeover
-./scterm forget "Pixel 8"
-```
-
-- `scterm pair` finds the phone while its invitation is open (DNS-SD on the
-  local network), then both screens show the same six-digit code: check it
-  and confirm on both, as with Bluetooth. Typing the invitation instead works
-  from anywhere the phone is reachable, such as another network or Tailscale.
-- An invitation works once, for 10 minutes. Both sides prove they are the
-  ones pairing, bound to their certificates, so a relay cannot pair in the
-  middle; afterwards each connection pins the phone's identity.
-- The phone decides what this computer may do (view, hear, control,
-  clipboard) and can change or revoke that at any time; a revoked or stopped
-  session ends with the phone's reason.
-- One device controls at a time. `--takeover` takes control from whoever has
-  it; without it scterm watches while another device is in control.
-- This computer's identity and paired devices live in `~/.config/scterm`
-  (`$SCTERM_HOME` overrides it).
-- What the phone can do depends on how it serves: the full-control helper
-  (started over adb or with Shizuku, again after each reboot) matches adb
-  mode; screen capture on a normal install has no audio and single-finger
-  input.
-
-## Protocol notes (from scrcpy v4.1 source)
-
-- Sockets, in order: video, audio, control (any may be absent).
-- The first socket carries a 64-byte device name.
-- Video/audio streams: 4-byte codec id, then 12-byte packet headers
-  (session flag in MSB, config/keyframe flags in the PTS word), then payload.
-- h264 config packets (SPS/PPS) must be prepended to the next media packet.
-- Touch positions carry the *current video frame size* as screen_size; events
-  with mismatched sizes are dropped by the server.
-- Control message layouts mirror `sc_control_msg_serialize()` exactly.
-
-### Check paired-device readiness
-
-`scterm peers --check` authenticates each paired target without starting capture,
-opening a viewing session, or taking control. It prints Ready, an actionable
-limitation, or a failed-check reason beside each device. Ready means viewing is
-available; another controller may still hold control. Plain `scterm peers`
-remains an offline list.
-
-Checks use two workers and a five-second budget per peer. Serving-presence
-DNS-SD helps recover changed LAN addresses, but every candidate must match the
-paired identity before metadata is saved. The stored address is tried even if
-multicast discovery fails. Older targets may report status unavailable while
-normal viewing still works. Updates and forgetting pairings behave as before.
+scterm uses the protocol of [scrcpy](https://github.com/Genymobile/scrcpy), by Genymobile and
+its contributors, and bundles the scrcpy v4.1 server, which is licensed under the Apache
+License 2.0 ([third_party/LICENSE.scrcpy](third_party/LICENSE.scrcpy)). The server's source is
+in [third_party/scrcpy-server-src](third_party/scrcpy-server-src). scterm decodes video and
+sound with the [FFmpeg](https://ffmpeg.org/) libraries and plays sound through PulseAudio.
