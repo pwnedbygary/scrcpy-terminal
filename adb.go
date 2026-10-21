@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,13 +46,23 @@ func (a *adbRunner) run(args ...string) ([]byte, error) {
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return out.Bytes(), errADBNotFound
+		}
 		return out.Bytes(), fmt.Errorf("adb %s: %v: %s", strings.Join(args, " "), err, errb.String())
 	}
 	return out.Bytes(), nil
 }
 
+var errADBNotFound = errors.New("adb not found: install Android platform-tools (often packaged as android-tools or adb), or use --peer to reach the scterm Android app without it")
+
 // findDevice returns -s, else ANDROID_SERIAL, else the only device adb can use.
+// However the device is named, the session runs adb, so a missing adb is
+// reported first.
 func findDevice(serial string) (string, error) {
+	if _, err := exec.LookPath("adb"); errors.Is(err, exec.ErrNotFound) {
+		return "", errADBNotFound
+	}
 	if serial != "" {
 		return serial, nil
 	}
@@ -60,7 +71,7 @@ func findDevice(serial string) (string, error) {
 	}
 	out, err := exec.Command("adb", "devices").Output()
 	if errors.Is(err, exec.ErrNotFound) {
-		return "", errors.New("adb not found: install Android platform-tools (often packaged as android-tools or adb), or use --peer to reach the scterm Android app without it")
+		return "", errADBNotFound
 	}
 	if err != nil {
 		return "", fmt.Errorf("adb devices: %v", err)
@@ -190,41 +201,110 @@ func (a *adbRunner) startServer(params []string, out io.Writer) (*exec.Cmd, erro
 	return cmd, nil
 }
 
-// tailBuffer keeps the last max bytes written to it.
+// tailBuffer keeps the last lines written to it, up to max bytes of them, and
+// the last few error, warning and exception lines even once a long Java trace
+// has pushed those out: they say why the server stopped.
 type tailBuffer struct {
-	mu  sync.Mutex
-	buf []byte
-	max int
+	mu      sync.Mutex
+	max     int
+	lines   []tailLine // the newest whole lines
+	size    int        // bytes in lines, newlines included
+	partial []byte     // the line being written, up to max bytes of it
+	kept    []tailLine // the newest notable lines, at most keptLines
+	seq     int        // lines ended so far
 }
+
+// tailLine is a line of output and its place in the output.
+type tailLine struct {
+	seq  int
+	text string
+}
+
+const keptLines = 8
 
 func (t *tailBuffer) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.buf = append(t.buf, p...)
-	if len(t.buf) > t.max {
-		t.buf = append(t.buf[:0], t.buf[len(t.buf)-t.max:]...)
+	for rest := p; len(rest) > 0; {
+		line, after, ended := bytes.Cut(rest, []byte{'\n'})
+		if room := t.max - len(t.partial); room > 0 {
+			t.partial = append(t.partial, line[:min(room, len(line))]...)
+		}
+		if !ended {
+			break
+		}
+		l := tailLine{seq: t.seq, text: string(t.partial)}
+		t.seq++
+		t.partial = t.partial[:0]
+		t.lines = append(t.lines, l)
+		t.size += len(l.text) + 1
+		for t.size > t.max && len(t.lines) > 1 {
+			t.size -= len(t.lines[0].text) + 1
+			t.lines = t.lines[1:]
+		}
+		if notableLine(l.text) {
+			t.kept = append(t.kept, l)
+			if len(t.kept) > keptLines {
+				t.kept = t.kept[1:]
+			}
+		}
+		rest = after
 	}
 	return len(p), nil
 }
 
-// lastLines returns up to n of the last non-empty lines written, leaving out
-// Java stack frames: the server's error line and the exception say why it
-// stopped, and a long trace would otherwise push them out.
+// lastLines returns up to n of the last non-empty lines written, in the order
+// they were written, leaving out Java stack frames. Error, warning and
+// exception lines say why the server stopped, so neither a trace longer than
+// max nor plainer lines after them push them out: past n, plainer lines are
+// left out before them, oldest first, except the newest line, which stays.
 func (t *tailBuffer) lastLines(n int) []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	oldest := t.seq
+	if len(t.lines) > 0 {
+		oldest = t.lines[0].seq
+	}
+	var all []tailLine
+	for _, l := range t.kept {
+		if l.seq < oldest {
+			all = append(all, l)
+		}
+	}
+	all = append(all, t.lines...)
+	if len(t.partial) > 0 {
+		all = append(all, tailLine{seq: t.seq, text: string(t.partial)})
+	}
 	var lines []string
-	for _, l := range strings.Split(string(t.buf), "\n") {
-		l = strings.TrimSpace(l)
-		if l == "" || strings.HasPrefix(l, "at ") || (strings.HasPrefix(l, "...") && strings.HasSuffix(l, " more")) {
+	var notable []bool
+	for _, l := range all {
+		text := strings.TrimSpace(l.text)
+		if text == "" || strings.HasPrefix(text, "at ") || (strings.HasPrefix(text, "...") && strings.HasSuffix(text, " more")) {
 			continue
 		}
-		lines = append(lines, l)
+		lines = append(lines, text)
+		notable = append(notable, notableLine(text))
 	}
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	for len(lines) > max(n, 0) {
+		drop := slices.Index(notable[:len(notable)-1], false)
+		if drop < 0 {
+			drop = 0
+		}
+		lines = slices.Delete(lines, drop, drop+1)
+		notable = slices.Delete(notable, drop, drop+1)
 	}
 	return lines
+}
+
+// notableLine reports whether a line of server output says what went wrong:
+// the server's own error or warning, or the exception a Java trace names.
+func notableLine(l string) bool {
+	l = strings.TrimSpace(l)
+	if strings.HasPrefix(l, "[server] ERROR:") || strings.HasPrefix(l, "[server] WARN:") {
+		return true
+	}
+	name, _, _ := strings.Cut(strings.TrimPrefix(l, "Caused by: "), ":")
+	return !strings.ContainsAny(name, " \t") && (strings.HasSuffix(name, "Exception") || strings.HasSuffix(name, "Error"))
 }
 
 func (a *adbRunner) getprop(name string) string {

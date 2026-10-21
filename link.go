@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -77,6 +78,10 @@ func (s *session) start(video, audio, control bool, params []string) error {
 		fmt.Sprintf("scid=%08x", s.scid),
 		"log_level=info",
 	}, params...)
+	if s.forwardMode {
+		// Unless told otherwise the server connects out, through adb reverse.
+		serverParams = append(serverParams, "tunnel_forward=true")
+	}
 	s.serverOut = &tailBuffer{max: 4096}
 	cmd, err := s.adb.startServer(serverParams, s.serverOut)
 	if err != nil {
@@ -172,45 +177,23 @@ func (s *session) connect(video, audio, control bool) error {
 			*conns[i] = conn
 		}
 	} else {
-		// Forward: server listens on the device abstract socket; we dial
-		// through adb forward. The first socket gets a dummy byte from the
-		// device which we must consume before reading meta.
-		addr := fmt.Sprintf("127.0.0.1:%d", s.forwardPort)
+		// Forward: the server listens on the device abstract socket and
+		// accepts in order, like the reverse sockets; we dial through adb
+		// forward. All of it shares one deadline, as the accepts do.
+		deadline := time.Now().Add(connectTimeout)
+		conns := []*net.Conn{&s.video, &s.audio, &s.control}
+		enabled := []bool{video, audio, control}
 		first := true
-		for _, enabled := range []bool{video, audio, control} {
-			if !enabled {
+		for i := range conns {
+			if !enabled[i] {
 				continue
 			}
-			var conn net.Conn
-			var err error
-			for attempt := 0; attempt < 200; attempt++ {
-				conn, err = net.DialTimeout("tcp", addr, 250*time.Millisecond)
-				if err == nil {
-					break
-				}
-				if s.serverExited() {
-					return s.serverStoppedError()
-				}
-				time.Sleep(50 * time.Millisecond)
-			}
+			conn, err := s.dialForward(i, first, deadline)
 			if err != nil {
-				return fmt.Errorf("dial %s: %w%s", addr, err, s.serverOutputNote())
+				return err
 			}
-			if first {
-				var b [1]byte
-				if _, err := io.ReadFull(conn, b[:]); err != nil {
-					conn.Close()
-					return fmt.Errorf("dummy byte: %w", err)
-				}
-				first = false
-			}
-			if s.video == nil {
-				s.video = conn
-			} else if s.audio == nil {
-				s.audio = conn
-			} else {
-				s.control = conn
-			}
+			*conns[i] = conn
+			first = false
 		}
 	}
 
@@ -240,6 +223,82 @@ func (s *session) connect(video, audio, control bool) error {
 	_ = first.SetReadDeadline(time.Time{})
 	s.deviceName = cstring(meta[:])
 	return nil
+}
+
+// dialForward dials socket i through adb forward, retrying until deadline.
+// adb accepts a dial even before the server listens, then hangs up, so the
+// first socket only counts once the dummy byte the server sends on it arrives.
+// A server that exits ends the wait at once, even mid-dial or mid-read.
+func (s *session) dialForward(i int, first bool, deadline time.Time) (net.Conn, error) {
+	addr := fmt.Sprintf("127.0.0.1:%d", s.forwardPort)
+	exited, stopWatching := s.watchServer()
+	defer stopWatching()
+	dialer := net.Dialer{Timeout: 250 * time.Millisecond}
+	for {
+		conn, err := dialer.DialContext(exited, "tcp", addr)
+		dialed := err == nil
+		if dialed && first {
+			if err = readDummyByte(exited, conn, deadline); err != nil {
+				conn.Close()
+			}
+		}
+		if err == nil {
+			return conn, nil
+		}
+		if s.serverExited() {
+			return nil, s.serverStoppedError()
+		}
+		if time.Until(deadline) < 50*time.Millisecond {
+			if !dialed {
+				return nil, fmt.Errorf("dial %s: %w%s", addr, err, s.serverOutputNote())
+			}
+			return nil, fmt.Errorf("the device did not connect its %s socket within %s%s",
+				socketName(i), connectTimeout, s.serverOutputNote())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// watchServer returns a context that ends when the server exits, and a
+// function that ends it anyway and returns once nothing watches any more.
+func (s *session) watchServer() (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := s.serverDone
+	watching := make(chan struct{})
+	go func() {
+		defer close(watching)
+		select {
+		case <-done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		cancel()
+		<-watching
+	}
+}
+
+// readDummyByte waits until deadline for the byte the server sends first on
+// its first socket. ctx ending closes conn, which ends the wait at once; it
+// then fails even if the byte came, since conn is closed.
+func readDummyByte(ctx context.Context, conn net.Conn, deadline time.Time) error {
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		conn.Close()
+		close(closed)
+	})
+	var b [1]byte
+	_ = conn.SetReadDeadline(deadline)
+	_, err := io.ReadFull(conn, b[:])
+	if !stop() {
+		<-closed
+		return net.ErrClosed
+	}
+	if err == nil {
+		_ = conn.SetReadDeadline(time.Time{})
+	}
+	return err
 }
 
 // connectTimeout bounds each wait for the device side to connect or speak.

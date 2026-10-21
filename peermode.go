@@ -10,11 +10,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -248,9 +246,11 @@ func newPeerSession(query string, cfg config) (*session, error) {
 		VideoCodecs:  []string{"h264"},
 		AudioCodecs:  audioCodecPreference(cfg.audioCodec),
 	}
-	ps, err := client.Connect(rec.Host, rec.Port, pin, req)
+	ps, err := connectPeer(store, rec, req, func(host string, port int) (*peer.Session, error) {
+		return client.Connect(host, port, pin, req)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("connecting to %s at %s: %w", rec.Name, net.JoinHostPort(rec.Host, strconv.Itoa(rec.Port)), err)
+		return nil, err
 	}
 	s := &session{peer: ps, video: ps.Video, audio: ps.Audio, deviceName: rec.Name}
 	if d := ps.Welcome.Device; d != nil && d.Name != "" {

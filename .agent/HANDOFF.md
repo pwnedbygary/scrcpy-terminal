@@ -7,6 +7,109 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 22: adb and peer connection errors)
+
+- The adb forward fallback can now connect (shown against a fake adb
+  modelled on the server's source). scterm falls back to `adb forward` when
+  `adb reverse` fails, but never passed `tunnel_forward=true`, so the
+  vendored server connected out instead of listening and the fallback could
+  never connect; `start` now passes it. In forward mode the sockets land in
+  their slots by index, as in reverse mode; they took the first empty slot,
+  so with video or audio off the next socket landed in the wrong one.
+- The forward wait is bounded: one deadline for all the sockets, where the
+  dummy-byte read had none and each dial had its own budget (about 10 to 60
+  s); the device-name read that follows keeps its own 15 s, as in reverse
+  mode. It retries while adb accepts and hangs up before the server listens,
+  stops as soon as the server exits, also in the middle of a dial or of the
+  wait for the first socket's dummy byte (that connection is closed), and on
+  a timeout says what reverse mode says, with the server's last lines.
+- A missing adb is reported first, also with `-s` or `ANDROID_SERIAL`, as
+  "scterm: adb not found: install Android platform-tools (often packaged as
+  android-tools or adb), or use --peer to reach the scterm Android app
+  without it"; `adbRunner.run` gives the same hint. With a named device it
+  used to fail later on a raw exec error.
+- The server output tail keeps whole lines and, separately, the last 8
+  error, warning and exception lines, so an error survives a long trace. It
+  keeps the written order, never drops the newest line, gives up plain lines
+  first, and no longer starts with a cut-off fragment. An error is now kept
+  even without an overflow, ahead of plain lines that came after it.
+- `--peer` failures name the device and address and say what to try, as in
+  "could not reach Pixel 8 at ADDR (connection refused): check that it is
+  serving and on this network, or run scterm peers --check", and a refusal
+  says why and what to do ("Pixel 8 at ADDR refused the connection: pairing
+  no longer accepted; pair again with scterm pair"). The target's own text,
+  the device name, the address and the dial error are stripped of control
+  characters. A `forbidden` refusal says what was asked and is not allowed,
+  in the words `scterm peers` uses ("it does not allow this computer to
+  control it; on Pixel 8, allow that, or ask for what it does allow (scterm
+  peers --check lists it)", the second choice only when the request left a
+  stream out), and `bad_token`, a session that ended or a token that expired
+  before the video or audio connection came, says "try again". The other
+  phrases reuse `ProbeLabel`'s and the Android viewer's wording, copied into
+  `peercheck.go` so `peers --check` output is unchanged. When the saved
+  address fails (other than an authenticated refusal), scterm runs the
+  `peers --check` presence search once and saves a new address only after
+  the pinned TLS connection there succeeds.
+- Verification: gofmt, `go vet ./...`, the build, `go test -count=1 ./...`
+  (the node suites included), `-race` on the 28 new and touched tests and on
+  the whole package, the new tests 20 times. New tests (`adb_test.go`,
+  `link_test.go`, `peerconnect_test.go`, `peerwords_test.go`):
+  `TestSocketsLandInTheirSlots` (7 stream combinations in both modes; 4
+  forward ones fail on the old code), `TestForwardModeAsksTheServerToListen`
+  (the real `start()` against a fake adb whose server listens only when
+  asked to; the old code fails with "dummy byte: EOF"), four forward-wait
+  tests, `TestMissingADBIsReportedFirst`,
+  `TestADBRunCarriesTheMissingADBHint`, the guard
+  `TestNamedDeviceSkipsTheLookup` (passes on the old code by design), three
+  tail tests, and the peer tests (unreachable, the refusals, a moved device
+  found again, one that must prove itself, one that refuses at the new
+  address, the wording). Every other new test fails on the old code, and 27
+  mutations are each caught. Round 2 adds `TestForbiddenSaysWhatWasAsked`
+  (a fake target that applies the device's rule to the request it gets),
+  `TestForwardDummyByteWaitEndsWhenTheServerStops`, the guard
+  `TestForwardSocketsOutliveTheWait` (a successful connect leaves nothing
+  running that could close a socket later), `TestFailureCleansTheDeviceName`
+  and `TestPeerConnectFailureIsClean`, and drops the `forbidden` row from
+  `TestPeerRefusalsSayWhyAndWhatToTry`. The 23 tests in the four test files
+  pass 20 times under `-race`; the other new ones fail on the round-1 files
+  (the peer ones through a shim that only adds the request parameter),
+  while the guard `TestForwardSocketsOutliveTheWait` passes there by design
+  (round 1 had no watcher), and 12 more mutations are each caught.
+  `TestForwardDummyByteWaitIsBounded` also checks that nothing of connect
+  is left running after a timeout (round 3): stopping the watcher only on
+  success passes the round-2 tests and fails this one. Tests that touch adb put an empty
+  directory or a fake adb first on `PATH`. `peermode.go` was merged three
+  ways onto part 17's change, cleanly, with the same added and removed
+  lines. Not run: a real device, adb or scrcpy server (the forward behaviour
+  is modelled from the server's source and comments), a real multicast
+  search, a real 10 s dial timeout (a synthetic one covers the wording), the
+  Kotlin target.
+- Review round 1 found `forbidden` worded as a missing view permission
+  whatever was asked (the device sends it when none of what was asked is
+  allowed), the forward wait ignoring the server's exit while blocked on the
+  dummy byte, two overstated sentences in this entry, and the device name
+  unfiltered in these messages; round 2 fixes all four and takes its
+  `bad_token` suggestion. Review round 2 found that this entry claimed the
+  guard fails on the round-1 files; round 3 corrects that and adds the
+  timeout path's leak check.
+- Left alone: `peers --check` calls a refusal it has no label for (such as
+  `busy`) "Not reachable"; an identity mismatch at the saved address now
+  starts the search too, and keeps its old message when nothing better turns
+  up; in forward mode only the first socket gets the dummy byte, so a server
+  that dies right after it is noticed at the next socket's dial or, at the
+  latest, at the device-name read (the protocol
+  allows no better); the rediscovery tries one candidate and does not say
+  the device moved (`scterm peers` shows the new address); the device name
+  in other peer notices ("this computer has control of …") is still not
+  cleaned; the last "connecting to …" error keeps its cause unfiltered so
+  that `errors.Is` works (an identity mismatch can repeat the host, in
+  practice an IP address); `ProbeLabel` still says "Viewing permission
+  missing" for `forbidden`, which the probe never receives; aborting a dial
+  in flight is not tested on its own; when a trace has more than 6 notable
+  lines, the `[server] ERROR:` line can be the one left out; a server line
+  over 4 KB keeps only its first 4 KB; a failing `--peer` takes about 1 s
+  longer because of the search.
+
 ## Update (2026-10-21: QoL overhaul, part 23: typing beyond ASCII, and pasting, in the terminal)
 
 - Characters beyond ASCII typed in the terminal UI (é, ñ, €, CJK, emoji)
