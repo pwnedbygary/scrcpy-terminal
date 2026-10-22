@@ -140,9 +140,17 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   before Android 13) has stopped them by then, and has its sink open.
 - In the browser display, the browser plays the sound, and scterm opens no PulseAudio stream
   unless `--audio-dup` is given (`app.go`). The `audio` field of the hello and status messages
-  says whether the session's sound is on: on while the session has a sound stream that the
-  device has not turned off, whether or not this computer's stream opened. `hostAudio` says
-  whether this computer plays the sound too (`web.go`).
+  says whether the session's sound is on: on while the session has a sound stream that has not
+  stopped (see below), whether or not this computer's stream opened. `hostAudio` says whether
+  this computer plays the sound too. Once this computer's stream has failed, at open or since
+  (`failure` in `audio.go`), `hostAudio` is false, `gain` and `muted` say 100 and false, and
+  the `gain` op changes nothing (`web.go`, `webinput.go`).
+- The session's sound stops when the audio demuxer ends for any reason but scterm's quit: the
+  device turns the stream off (codec id 0), sends an audio config error (codec id 1) or a
+  codec scterm cannot decode, or the stream ends or fails to decode while the picture goes on
+  (`runAudio` in `stream.go`, which keeps why). From then on the `audio` field says off, the
+  terminal's bottom line says `audio off` instead of the volume, and `--no-tui`'s statistics
+  line says `audio=off`.
 
 ## The browser display
 

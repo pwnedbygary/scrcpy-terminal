@@ -471,7 +471,9 @@ connection it was waiting for.
   gives, if any, for example
   `scterm: no sound from Pixel 8: Audio disabled: it is not supported before Android 11`.
   In the terminal display, the bottom line then says `audio off`. In the browser display, the
-  line at the bottom of the page says `audio off` in place of the device volume.
+  line at the bottom of the page says `audio off` in place of the device volume. Both say
+  `audio off` too once the sound stops later in the session while the picture goes on: when
+  the device sends an audio error or a codec scterm cannot decode, or its sound stream ends.
 - In the terminal display, sound needs a PulseAudio server. Without one, scterm prints
   `scterm: audio disabled: …` before it starts, and the bottom line says `audio off`. The
   browser display still plays the sound in the browser, and shows the device volume.

@@ -88,10 +88,12 @@ func TestNoSoundFromTheDeviceIsSaid(t *testing.T) {
 	}
 }
 
-// TestSoundThatStartedIsNotSaidToBeOff: in the terminal UI, an audio stream
-// that started and then ended is reported as it was before, and is not said to
-// be off; the status row keeps its volume.
-func TestSoundThatStartedIsNotSaidToBeOff(t *testing.T) {
+// TestSoundThatStartedIsNotSaidToBeTurnedOff: in the terminal UI, an audio
+// stream that started and then ended is reported as it was before, and is not
+// said to be turned off by the device. The session has no sound from then on,
+// so the status row says audio off, as when the device turns it off; before,
+// it kept the volume.
+func TestSoundThatStartedIsNotSaidToBeTurnedOff(t *testing.T) {
 	startNotices(t)
 	a := statusApp(80, "Pixel 8")
 	a.sess = &session{deviceName: "Pixel 8", video: videoSocket(t), audio: deviceStream(t, []byte("opus")),
@@ -100,8 +102,8 @@ func TestSoundThatStartedIsNotSaidToBeOff(t *testing.T) {
 	a.watchStreams()
 	waitNotice(t, "audio: audio stream ended: EOF")
 	ageNotice(5 * time.Second)
-	if got := a.statusLine(); !strings.Contains(got, "vol 100%") {
-		t.Errorf("status row: %q", got)
+	if got, want := a.statusLine(), statusHintsText+" | audio off · Pixel 8 · 1080x2400 16.0ms 62.5fps"; got != want {
+		t.Errorf("status row once the notice is gone:\n got %q\nwant %q", got, want)
 	}
 	var replay strings.Builder
 	notices.stop(&replay)

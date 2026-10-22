@@ -1516,7 +1516,7 @@ type webStatus struct {
 	Gain    int     `json:"gain"`
 	Muted   bool    `json:"muted"`
 	// Audio is the session's sound as the browser gets it: "on" while the
-	// session has a sound stream that the device has not turned off, and
+	// session has a sound stream that has not stopped (soundStopped), and
 	// "off" otherwise. The PCM tap feeds the browser whether or not this
 	// computer's sink opened, so the sink only decides HostAudio.
 	Audio string `json:"audio"`
@@ -1543,8 +1543,8 @@ type webStatus struct {
 	// listening.
 	AudioPeak int16 `json:"audioPeak"`
 	// HostAudio reports whether this computer plays the sound too
-	// (--audio-dup, with a sink that opened); false means the browser is the
-	// sole audio output, or that the sound is off.
+	// (--audio-dup, with a sink that opened and has not failed since); false
+	// means the browser is the sole audio output, or that the sound is off.
 	HostAudio bool `json:"hostAudio"`
 }
 
@@ -1573,7 +1573,7 @@ func (c *webClient) sendStatus() {
 	c.mu.Unlock()
 	gain := 100
 	muted := false
-	if c.srv.audio != nil && c.srv.audio.err == nil {
+	if c.srv.audio != nil && c.srv.audio.failure() == nil {
 		gain = c.srv.audio.gainPercent()
 		muted = gain == 0
 	}

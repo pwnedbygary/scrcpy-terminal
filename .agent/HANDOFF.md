@@ -7,6 +7,179 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 46: the sound status tells the truth after audio errors)
+
+- The session's sound has one account, `streamState.soundEnd`
+  (`stream.go`), read through `soundStopped()`. `runAudio` sets it, with
+  its error, however it ends other than at scterm's quit: codec id 0 as
+  before, and now an audio config error (codec id 1), a codec scterm
+  cannot decode, a codec id cut short, and the stream ending or failing
+  to decode while the picture goes on. `audioOff` and `audioTurnedOff()`
+  are gone. Before, only codec id 0 counted: after any other end, every
+  display still said the sound was on.
+- Readers: the browser's hello and status (`soundOn()`: `audio` off,
+  `hostAudio` false), the terminal's status row (`audio off`, no
+  `vol N%`) and `--no-tui`'s statistics line (`audio=off`, no pcm, peak
+  or lag). The page's HUD already says `audio off` for any status but
+  "on", so `web/player.js`'s code is unchanged (round 2 rewords a comment
+  there). The terminal's notice when the stream ends is unchanged.
+- Quit: `newApp` gives the stream the app's `quitting` flag, and once it
+  is set the end is not recorded. The error cannot tell a quit:
+  `isClosedConnErr` also matches EOF, and a peer session's teardown can
+  end the read with EOF. main stops the session only after `run`
+  returns, so no display reads the account then anyway.
+- `--audio-dup`: `sendStatus` (`web.go`) and the `gain` op
+  (`webinput.go`) read the sink through `failure()`, not `err`. A sink
+  whose write fails mid-session now shows as one that did not open:
+  `hostAudio` false (as before), `gain` 100, `muted` false, and the
+  `gain` op leaves its volume alone, as the terminal's volume keys do.
+  The two reads were no data race (since part 37, `err` is set before
+  the sink is shared, and a failed write sets the atomic `writeFailed`),
+  but they were blind to a failed write.
+- Docs: README's "No sound" bullet (both bottom lines say `audio off`
+  once the sound stops later); docs/ARCHITECTURE.md's sound bullets (how
+  the sound stops and what each display then says; `hostAudio`, `gain`,
+  `muted` and the `gain` op once this computer's stream has failed).
+- New tests: `TestSoundThatStopsIsOffEverywhere` (six ways the sound
+  stops, each in the browser's hello and status, the status row and its
+  replay, and the statistics line after `runHeadless` says why),
+  `TestQuitIsNotTheSoundStopping` (`newApp`: an end at the quit leaves
+  the sound on, one before it stops it) and
+  `TestBrowserSeesTheSinkFailWhilePlaying` (`runWeb`, `--audio-dup`, a
+  write that fails, then a gain op and a quit op over the websocket).
+  `TestSoundThatStartedIsNotSaidToBeOff` pinned `vol 100%` after the
+  stream ended: renamed `TestSoundThatStartedIsNotSaidToBeTurnedOff`, it
+  wants `audio off`.
+- Checks (builder's tree, base `19c898d`, go1.27.1, iso.env, bwrap):
+  - gofmt, vet, build and `git diff --check` clean.
+  - `go test ./...`: 502 passed, 3 skipped, 0 failed (base 499, 3, 0;
+    +3 new, 1 renamed). `-race ./...`: 502, 3, 0, no race.
+  - The 4 new or changed tests: `-race -count=20` 80/80, no race;
+    `-count=20` 80/80.
+  - On the base's `stream.go`, `app.go`, `web.go` and `webinput.go`,
+    with a shim giving `soundStopped()` the base's meaning (codec id 0
+    only), the main package has 468 passed, 1 skipped, 4 failed: the 4
+    new or changed tests. There, the sink test under `-race` fails 3 of
+    3 runs on the volume, with no race reported.
+  - 9 of 9 mutants killed: the account for codec id 0 only; `soundOn`,
+    the row and the statistics line each without it; no quit check;
+    `newApp` without the flag; status and gain op back on `err`; one
+    fixed reason for every end.
+  - Docs tests 10 pass; mdcheck: 2 files, 36 relative links, 0 problems.
+  - Node suites (`web/` untouched in the builder's tree): audio 183,
+    conn 61, input 130, page 286, pointer 17, worklet 41 pass, 0 fail.
+- Left alone: once the sound has stopped with the sink still open, the
+  terminal's volume keys and the `gain` op still set its volume, which
+  plays nothing, and the browser's status gives that volume (the
+  terminal's row says `audio off`); the follower still follows the
+  desktop's sink. `--web` prints no line when the sound stream simply
+  ends (as before). `web/check.mjs` says "browser only (host sink stays
+  silent)" whenever `hostAudio` is false. A mutant that swaps the two
+  defers in `runAudio` was not run (a microsecond window, so no test
+  catches it reliably); the comment states the order.
+- Not run by the builder: a real device, sound server, browser or
+  `--window` window; the scterm binary end to end; a decoder failure
+  (libavcodec reports a bad Opus packet when it is sent, which
+  `runAudio` skips); the desktop-like decoy-socket sandbox; CI; Android.
+- Intake: the builder's base had part 44's first round; part 44's second
+  round changed two of its tests. `audio_here_test.go` was merged three
+  ways: the merge adds exactly this part's 137 changed lines and keeps
+  part 44's second round's 31. The other eight files were taken as
+  built, byte for byte; part 44's second round changes none of them.
+- Verification, snapshot round 1 (`/tmp/opencode/review-46`, on part 44's
+  second round; go1.27.1, iso.env, every Go command in the bwrap
+  sandbox): gofmt, vet and build clean; `go test ./...` 502 passed, 3
+  skipped, 0 failed; the 38 sound tests under `-race -count=3`; the 4 new
+  and changed tests 20 times and 5 times under `-race`. On the base's
+  four files with the builder's shim, all 4 fail, and the sink test fails
+  3 of 3 runs under `-race`; each of the 9 mutants fails between 1 and 3
+  of the related tests. Docs: 2 files, 36 relative links, no problem; the
+  docs tests pass. In the decoy sandbox the tests made no connection, and
+  the positive control two. `git diff --check` and the hashes agree. The
+  checks ran on a first build, kept as review-46.checked; the rebuild
+  with this bullet changed only the handoff.
+- Review round 1 (PASS), with one LOW and two NITs. LOW, from reading the
+  code: nothing orders the status the 500 ms ticker works out and the one
+  the dispatcher sends after a gain op, so a tick's status worked out at
+  100% before the op could be written after the op's 40%, and
+  `TestBrowserSeesTheSinkFailWhilePlaying` then took it for the status
+  after the sink failed, and failed on `hostAudio` true. Part 44's test
+  uses the same helper, but never waits for a volume it had before, so
+  an older status cannot match there. NITs: two comments outside the
+  delta still said the device turned the sound off (`web/player.js`'s
+  `audioLabel`, `TestBrowserIsToldTheSessionsSound`); this entry said
+  "the status" gives a stopped sink's volume, where only the browser's
+  does, and pointed at the builder's brief. The review re-ran the
+  snapshot's checks, with the 4 new and changed tests 10 times and 4
+  times under `-race` and 3 of the builder's 9 mutants (M5, M7, M8), and
+  the whole module under `-race` too (502 passed, 3 skipped, 0 failed);
+  of its own mutants, R7 (`muted` outside the `failure()` check: the
+  same, as a muted sink writes nothing that could fail) and R1 (the
+  defers swapped) survive.
+- Round 2 changes `audio_write_test.go`, the two comments,
+  `TestQuitIsNotTheSoundStopping` and this entry. After the failure, the
+  sink test waits for a status at 100% with `hostAudio` false, and it
+  logs the last status it read when none comes (on the old code: 40%,
+  `hostAudio` false; the old code saw the failure in `hostAudio`, through
+  `plays()`, but not in the volume). `TestQuitIsNotTheSoundStopping`
+  calls `isolatePulse`, so a sink its sessions opened would reach no
+  real server. Not taken: a line from `--web` when the sound stream ends
+  with EOF (left alone above).
+- Verification, round 2 (`/tmp/opencode/dev-46b`, in the worktree, every
+  Go command in the bwrap sandbox): with `web.go` changed to force that
+  order (`mkforced.py`: a status every 20 ms; the receive loop held for
+  100 ms after the hello, so the gain op is read late; a status at 100%
+  with the sink playing written 300 ms late), round 1's sink test failed
+  10 of 10 runs, on `hostAudio` true, and round 2's passed 10 of 10.
+- Verification, snapshot round 2 (`/tmp/opencode/review-46b`, on part 44's
+  second round, which landed as 10bbfbf; every Go command in the bwrap
+  sandbox with `iso.env`): gofmt, vet and build clean; 502 tests pass, 3
+  skip, 0 fail; the 38 related tests pass three times under `-race`, and
+  the 4 new and changed tests 20 times, and 5 times under `-race`. With the
+  base's four files and the builder's shim, all 4 fail, and the sink test
+  fails 3 of 3 under `-race`, on the volume, with no race reported; each of
+  the builder's 9 mutants fails a test. With the order forced as above,
+  round 2's sink test passes 20 of 20 runs and round 1's fails 20 of 20, on
+  `hostAudio` true. Docs: 2 files, 36 links, no problem; the docs tests
+  pass. In the decoy sandbox (decoy sound, display, D-Bus and adb sockets)
+  no test connected; the positive control did, twice. The checks ran before
+  this bullet was written; packing again with it changed only the handoff.
+- Review round 2 (NEEDS CHANGES), on this entry and one comment. LOW:
+  round 2's bullet said the old code's last status had `hostAudio` true;
+  the builder's logs and the review's run of the old code show 40% with
+  `hostAudio` false (corrected above, with the reason, as the review
+  suggested). NITs: this entry called `web/player.js` unchanged after
+  round 2 changed a comment there, gave the node suites' `web/` as
+  untouched without saying it was the builder's tree, and said round 1's
+  review re-ran every check; a comment in the sink test called a status
+  at 40% the op's own, where a ticker status worked out after the op
+  says 40% too (all corrected). The review forced three orders
+  (round 1's; a status worked out across the failure; the op's own
+  status written after the failure): round 2's sink test passed all
+  three, round 1's failed only round 1's. It ran the node suites on
+  round 2's `web/player.js` (0 failed; `go test` runs them too, through
+  `TestWebClientSuites`), and saw `isolatePulse` keep a session that does
+  open a sink off the decoy sound server (18 connections without it, 0
+  with it). Its other suggestion, taken: the forced copy holds the
+  receive loop, which handles the hello, so it is the gain op that is
+  read late (the `mkforced.py` bullet above).
+- Round 3 changes only this entry and that comment in
+  `audio_write_test.go`; the part's other files are round 2's bytes.
+- Verification, snapshot round 3 (`/tmp/opencode/review-46c`, on part 44's
+  second round, which landed as 10bbfbf; every Go command in the bwrap
+  sandbox with `iso.env`): the same checks as round 2's, with the same
+  results. gofmt, vet and build clean; 502 tests pass, 3 skip, 0 fail; the
+  38 related tests three times under `-race`; the 4 new and changed tests
+  20 times, and 5 times under `-race`. The base's four files with the
+  builder's shim fail all 4, and the sink test fails 3 of 3 under `-race`,
+  waiting for the volume to read 100% again, with no race reported; each
+  of the builder's 9 mutants fails a test. With the order forced, round
+  3's sink test passes 20 of 20 runs and round 1's fails 20 of 20, each on
+  `hostAudio` true. Docs: 2 files, 36 links, no problem; 13 docs tests
+  pass. In the decoy sandbox no test connected; the positive control did,
+  twice. The checks ran before this bullet was written; packing again
+  with it changed only the handoff.
+
 ## Update (2026-10-21: QoL overhaul, part 44: a browser-only session leaves this computer's sound alone)
 
 - Behaviour: a session whose only sound output is the browser (`--web`

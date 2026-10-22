@@ -1836,7 +1836,7 @@ function geomLabel(st) {
 // (st.audio "on", whether or not the computer running scterm plays it too),
 // the DEVICE's media volume -- what the volume keys change, as a percentage of
 // the device's own scale, "—" until the first reading -- and otherwise "audio
-// off": the session has no sound, or the device turned it off. It is not this
+// off": the session has no sound, or its sound has stopped. It is not this
 // browser's volume (the sound chip reports that), hence "device vol". The
 // underruns are this page's.
 function audioLabel(st, underruns) {

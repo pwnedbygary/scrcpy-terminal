@@ -591,10 +591,10 @@ func webRunTells(t *testing.T, cfg config, sess *session, sink *audioSink, ended
 
 // TestBrowserIsToldTheSessionsSound: the browser's hello and status say
 // whether the session's sound is on as the browser gets it: on while the
-// session has a sound stream that the device has not turned off, whether or
-// not this computer's sink opened, and off otherwise. hostAudio is true only
-// when this computer plays the sound too. The same without an app, as the web
-// tests run the server.
+// session has a sound stream that has not stopped, whether or not this
+// computer's sink opened, and off otherwise. hostAudio is true only when this
+// computer plays the sound too. The same without an app, as the web tests run
+// the server.
 func TestBrowserIsToldTheSessionsSound(t *testing.T) {
 	// runWeb takes SIGINT/SIGTERM/SIGHUP for the app and never gives them back.
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
@@ -882,4 +882,142 @@ func TestNoSoundReasonKeepsNoControlCharacters(t *testing.T) {
 	// Its statistics line goes to stdout, and must not run into the test's output.
 	captureStdout(t, func() { out = stderrUntil(t, b, b.runHeadless, "no sound") })
 	clean("--no-tui", out)
+}
+
+// TestSoundThatStopsIsOffEverywhere: however the session's sound stops while
+// the picture goes on, each display says that it is off from then on, as when
+// the device turns it off (codec id 0): the browser's hello and status (audio
+// off, and hostAudio false though this computer's sink plays), the terminal's
+// status row (audio off, and no volume) and the statistics line of --no-tui
+// (audio=off, without the PCM and its peak). The sound stops with an audio
+// config error (codec id 1), a codec scterm cannot decode, a codec id cut
+// short, or a stream that plays and then ends or is cut off. The stream keeps
+// how it stopped, and the terminal and --no-tui say it, as before. Before,
+// only codec id 0 turned the sound off: after any other way, the displays
+// still said that it was on, with its volume.
+func TestSoundThatStopsIsOffEverywhere(t *testing.T) {
+	// runHeadless takes these signals for the app and never gives them back.
+	t.Cleanup(func() { signal.Reset(syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
+	isolatePulse(t) // no adb or pactl to reach anything with
+	// packet is a media packet as the server sends it: its timestamp in
+	// microseconds (bit 62 marks a codec's setup), its size, then itself.
+	packet := func(pts uint64, payload []byte) []byte {
+		header := binary.BigEndian.AppendUint64(nil, pts)
+		return append(binary.BigEndian.AppendUint32(header, uint32(len(payload))), payload...)
+	}
+	opusHead := []byte("OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00")
+	for _, way := range []struct {
+		name string
+		head [][]byte // what the device sends before it hangs up
+		why  string   // how the demuxer says the sound stopped
+	}{
+		{"an audio config error", [][]byte{{0, 0, 0, 1}}, "audio config error"},
+		{"a codec scterm cannot decode", [][]byte{[]byte("abcd")}, "unsupported audio codec 0x61626364"},
+		{"a codec id cut short", [][]byte{{0, 0}}, "audio codec id: unexpected EOF"},
+		{"an Opus stream that played and ended", [][]byte{[]byte("opus"), packet(1<<62, opusHead),
+			packet(20000, []byte{0xf8, 0xff, 0xfe})}, "audio stream ended: EOF"}, // 20 ms of silence
+		{"an Opus packet cut off", [][]byte{[]byte("opus"), packet(20000, make([]byte, 100))[:22]},
+			"audio packet: unexpected EOF"},
+		{"a raw stream that played and ended", [][]byte{[]byte("\x00raw"), packet(20000, make([]byte, 960))},
+			"audio raw: EOF"},
+	} {
+		// The browser, from a server run as the web tests run it, without an
+		// app, whose sink here plays, as with --audio-dup.
+		cfg := config{web: true, audio: true, audioDup: true, webAddr: "127.0.0.1"}
+		sess := &session{deviceName: "Pixel 8", audio: deviceStream(t, way.head...)}
+		stream := &streamState{cfg: cfg, sess: sess}
+		sink := &audioSink{gain: 256, pct: 100}
+		if err := stream.runAudio(sink); fmt.Sprint(err) != way.why || fmt.Sprint(stream.soundStopped()) != way.why {
+			t.Errorf("%s: the demuxer ended with %v, and the sound stopped with %v; want %s",
+				way.name, err, stream.soundStopped(), way.why)
+		}
+		srv := newWebServer(cfg, sess, stream, sink, nil, nil)
+		go func() { _ = srv.run(false) }()
+		select {
+		case <-srv.ready:
+		case <-time.After(3 * time.Second):
+			t.Fatal("the web server never started listening")
+		}
+		t.Cleanup(srv.stop)
+		if got := browserTold(t, srv); got != (soundTold{false, "off", false}) {
+			t.Errorf("%s: the browser is told %+v, want the sound off", way.name, got)
+		}
+
+		// The terminal's status row, which shows the volume until then.
+		startNotices(t)
+		a := statusApp(80, "Pixel 8")
+		a.sess = &session{deviceName: "Pixel 8", video: videoSocket(t), audio: deviceStream(t, way.head...)}
+		a.stream = newStreamState(a.sess, a.cfg, nil)
+		if got := a.statusLine(); !strings.Contains(got, " | vol 100% · ") {
+			t.Errorf("%s: the status row before the sound stops: %q", way.name, got)
+		}
+		lost := a.watchStreams()
+		waitNotice(t, "audio: "+way.why)
+		ageNotice(5 * time.Second)
+		if got, want := a.statusLine(), statusHintsText+" | audio off · Pixel 8 · 1080x2400 16.0ms 62.5fps"; got != want {
+			t.Errorf("%s: the status row once the notice is gone:\n got %q\nwant %q", way.name, got, want)
+		}
+		select {
+		case err := <-lost:
+			t.Errorf("%s: the session ended with its sound: %v", way.name, err)
+		default:
+		}
+		var replay strings.Builder
+		notices.stop(&replay)
+		if got, want := replay.String(), "scterm: audio: "+way.why+"\n"; got != want {
+			t.Errorf("%s: the replay at exit %q, want %q", way.name, got, want)
+		}
+
+		// The statistics line of --no-tui, which gives the volume until then.
+		h := streamApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: deviceStream(t, way.head...)})
+		h.cfg, h.audio = config{noTUI: true, audio: true}, &audioSink{gain: 256, pct: 100}
+		if got := h.statistics(); got != "0x0 fps=0 audio=100%" {
+			t.Errorf("%s: the statistics line before the sound stops: %q", way.name, got)
+		}
+		// Its statistics line goes to stdout, and must not run into the test's output.
+		captureStdout(t, func() { stderrUntil(t, h, h.runHeadless, "scterm: audio: "+way.why) })
+		if got, want := h.statistics(), "0x0 fps=0 audio=off"; got != want {
+			t.Errorf("%s: the statistics line once the sound stopped: %q, want %q", way.name, got, want)
+		}
+	}
+}
+
+// TestQuitIsNotTheSoundStopping: the audio stream that ends as scterm quits,
+// as its socket closes on the way out, leaves the session's sound on: only an
+// end before the quit stops it. newApp gives the stream the app's flag.
+func TestQuitIsNotTheSoundStopping(t *testing.T) {
+	isolatePulse(t) // a sink these sessions opened would reach no real server
+	// ended runs the audio demuxer of a browser-only session, which opens no
+	// sink here, until its stream has started and then ends: as the device
+	// hangs up or, with quit, as scterm closes the socket once it is quitting.
+	ended := func(quit bool) *streamState {
+		t.Helper()
+		conn, device := net.Pipe()
+		t.Cleanup(func() { device.Close() })
+		a := newApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: conn},
+			config{audio: true, web: true, webAddr: "127.0.0.1"})
+		done := make(chan error, 1)
+		go func() { done <- a.playAudio() }()
+		if _, err := device.Write([]byte("opus")); err != nil { // returns once the demuxer has it
+			t.Fatal(err)
+		}
+		if quit {
+			a.quitting.Store(true)
+			conn.Close() // sess.stop
+		} else {
+			device.Close()
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the audio demuxer did not end")
+		}
+		return a.stream
+	}
+	if s := ended(false); s.soundOn() || s.soundStopped() == nil {
+		t.Errorf("the stream ended before the quit: the sound is on %v, stopped by %v; want it off", s.soundOn(), s.soundStopped())
+	}
+	if s := ended(true); !s.soundOn() || s.soundStopped() != nil {
+		t.Errorf("the stream ended at the quit: the sound is on %v, stopped by %v; want it on", s.soundOn(), s.soundStopped())
+	}
 }

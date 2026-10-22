@@ -141,6 +141,7 @@ func newApp(sess *session, cfg config) *app {
 	// The demux loops live for as long as the app; they must exist before the
 	// web server (which sinks decoded frames) is built.
 	a.stream = newStreamState(sess, cfg, a.ctrl)
+	a.stream.quitting = &a.quitting
 	if !cfg.noTUI {
 		a.tui = newTUI()
 		a.tui.repaintInterval = cfg.repaintInterval
@@ -705,11 +706,11 @@ func (a *app) statistics() string {
 }
 
 // audioState is the sound for the statistics line of --no-tui, where this
-// computer's sink is what plays: off with --no-audio, once the device has
-// turned the sound off, and when the sink did not open; muted or the volume
+// computer's sink is what plays: off with --no-audio, once the sound has
+// stopped (soundStopped), and when the sink did not open; muted or the volume
 // otherwise.
 func audioState(a *app) string {
-	if !a.cfg.audio || a.audio.failure() != nil || a.stream.audioTurnedOff() {
+	if !a.cfg.audio || a.audio.failure() != nil || a.stream.soundStopped() != nil {
 		return "off"
 	}
 	if a.audio.gainPercent() == 0 {
@@ -981,7 +982,7 @@ func (a *app) statusParts() []statusPart {
 	var vol string
 	if a.cfg.audio {
 		vol = "audio off"
-		if a.audio.failure() == nil && !a.stream.audioTurnedOff() {
+		if a.audio.failure() == nil && a.stream.soundStopped() == nil {
 			vol = "vol " + strconv.Itoa(a.audio.gainPercent()) + "%"
 		}
 	}

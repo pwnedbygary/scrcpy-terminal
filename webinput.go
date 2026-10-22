@@ -111,7 +111,7 @@ func (s *webServer) applyControl(c *webClient, ev *webEvent) {
 		if a == nil {
 			break
 		}
-		if a.audio != nil && a.audio.err == nil {
+		if a.audio != nil && a.audio.failure() == nil {
 			if ev.Gain != nil && *ev.Gain >= 0 {
 				a.audio.setGain(*ev.Gain)
 			}

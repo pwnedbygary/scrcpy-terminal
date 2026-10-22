@@ -71,10 +71,18 @@ type streamState struct {
 	packets   int64       // audio media packets received
 	pktSizes  map[int]int // histogram: config/first packets
 
-	// audioOff is set once the device has turned the audio stream off (see
-	// errAudioOff): from then on the session has no sound. The terminal's
-	// status row and the browser's status read it from other goroutines.
-	audioOff atomic.Bool
+	// soundEnd is why the session's sound stopped: runAudio ended other than
+	// at scterm's quit, because the device turned the audio stream off (see
+	// errAudioOff), sent an audio config error or a codec scterm cannot
+	// decode, or the stream ended or failed to decode. From then on the
+	// session has no sound. The terminal's status row, the statistics line of
+	// --no-tui and the browser's status read it from other goroutines.
+	soundEnd atomic.Pointer[error]
+
+	// quitting is the app's flag that scterm has begun to quit (newApp), nil
+	// for a stream without an app. The sockets close then, so the audio
+	// stream's end is the quit's, not the sound stopping.
+	quitting *atomic.Bool
 
 	// A/V lag probe: the device timestamps audio packets and video frames on
 	// the same monotonic clock, so ptsLagUs = video.pts - audio.pts at arrival
@@ -154,16 +162,23 @@ func (s *streamState) audioBytesSeen() int64 {
 	return s.audioBytes
 }
 
-// audioTurnedOff reports whether the device has turned the audio stream off.
-func (s *streamState) audioTurnedOff() bool {
-	return s != nil && s.audioOff.Load()
+// soundStopped is why the session's sound stopped (see soundEnd), or nil while
+// it plays and in a session without sound.
+func (s *streamState) soundStopped() error {
+	if s == nil {
+		return nil
+	}
+	if err := s.soundEnd.Load(); err != nil {
+		return *err
+	}
+	return nil
 }
 
 // soundOn reports whether the session's sound is on: the session has a sound
-// stream, and the device has not turned it off. The browser gets that sound
-// whether or not this computer's sink opened.
+// stream, and the sound has not stopped. The browser gets that sound whether
+// or not this computer's sink opened.
 func (s *streamState) soundOn() bool {
-	return s != nil && sessionHasSound(s.cfg, s.sess) && !s.audioOff.Load()
+	return s != nil && sessionHasSound(s.cfg, s.sess) && s.soundStopped() == nil
 }
 
 type videoFrame struct {
@@ -585,19 +600,26 @@ func (s *streamState) fpsCounter() func() float64 {
 	}
 }
 
-// runAudio demuxes the audio socket.
-func (s *streamState) runAudio(audioOut *audioSink) error {
+// runAudio demuxes the audio socket. However it ends, other than at scterm's
+// quit, the session's sound has stopped, and soundStopped says why.
+func (s *streamState) runAudio(audioOut *audioSink) (err error) {
 	if s.sess.audio == nil {
 		return nil
 	}
 	defer s.sess.audio.Close()
+	// Deferred after the Close, so it runs first: once the socket has closed,
+	// soundEnd is final.
+	defer func() {
+		if s.quitting == nil || !s.quitting.Load() {
+			s.soundEnd.Store(&err)
+		}
+	}()
 
 	codecID, err := readCodecID(s.sess.audio)
 	if err != nil {
 		return fmt.Errorf("audio codec id: %w", err)
 	}
 	if codecID == 0 {
-		s.audioOff.Store(true)
 		return errAudioOff
 	}
 	if codecID == 1 {
