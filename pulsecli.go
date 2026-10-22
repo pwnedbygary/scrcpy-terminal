@@ -7,7 +7,8 @@ import (
 )
 
 // pactlTool is pactl as found on PATH, with the environment it runs in: the
-// process's when it was found, aimed at the user session socket.
+// process's when it was found, aimed at the user session socket, in the C
+// locale (cLocaleEnv).
 type pactlTool struct {
 	path string
 	env  []string
@@ -24,8 +25,25 @@ func findPactl() (pactlTool, error) {
 
 func (p pactlTool) run(args ...string) ([]byte, error) {
 	cmd := exec.Command(p.path, args...)
-	cmd.Env = p.env
+	cmd.Env = cLocaleEnv(p.env)
 	return cmd.Output()
+}
+
+// cLocaleEnv is env in the C locale, for a program whose output scterm reads.
+// pactl translates what it prints with gettext (the "Sink:" of its listings,
+// the field names of pactl info), and in the C locale gettext translates
+// nothing: LC_ALL=C overrides LANG and the other LC_ variables. gettext then
+// ignores LANGUAGE too; it goes all the same, so that the output does not
+// depend on that rule. Names and properties come out of pactl byte for byte
+// the same in the C locale as in any other. The rest of env stays.
+func cLocaleEnv(env []string) []string {
+	kept := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if name, _, _ := strings.Cut(kv, "="); name != "LC_ALL" && name != "LANGUAGE" {
+			kept = append(kept, kv)
+		}
+	}
+	return append(kept, "LC_ALL=C")
 }
 
 // pulseCmd runs the pulseaudio CLI (pactl) via the user session socket.

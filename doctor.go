@@ -158,7 +158,7 @@ func doctorOutput(env []string, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), doctorTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = append(append(os.Environ(), "LC_ALL=C"), env...)
+	cmd.Env = cLocaleEnv(append(os.Environ(), env...))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	// Whatever the program leaves running must not keep Wait waiting.

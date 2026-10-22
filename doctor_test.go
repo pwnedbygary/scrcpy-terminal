@@ -36,6 +36,7 @@ func doctorHost(t *testing.T) string {
 		t.Setenv(v, "")
 	}
 	t.Setenv("LC_ALL", "fr_FR.UTF-8") // doctor reads its programs in the C locale whatever the user's
+	t.Setenv("LANGUAGE", "fr")        // and without the user's LANGUAGE
 	t.Setenv("SCTERM_HOME", t.TempDir())
 	noDisplayEnv(t)
 	oldGlobs, oldCPU, oldTimeout := chromiumGlobs, cpuinfoPath, doctorTimeout
@@ -93,11 +94,11 @@ func adbScript(listing string, versions map[string]string) string {
 	return b.String()
 }
 
-// The fake pactl of a working desktop: pactl info in the C locale (and in
-// French otherwise), and its sinks.
+// The fake pactl of a working desktop: pactl info in the C locale without
+// LANGUAGE (and in French otherwise), and its sinks.
 const workingPactl = `case "$*" in
 info)
-  if [ "$LC_ALL" = C ]; then
+  if [ "$LC_ALL" = C ] && [ -z "${LANGUAGE+set}" ]; then
     printf 'Server String: /run/user/1000/pulse/native\nServer Name: PulseAudio (on PipeWire 1.4.2)\nDefault Sink: alsa_output.pci-0000_0c_00.4.analog-stereo\n'
   else
     printf 'Nom du serveur : PulseAudio (on PipeWire 1.4.2)\n'

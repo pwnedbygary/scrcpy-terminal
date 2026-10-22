@@ -7,6 +7,47 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 45: pactl is read the same in every language)
+
+- pactl translates what scterm reads (gettext domain "pulseaudio"): the
+  "Sink Input #N" and "Sink: N" of its listing, and pactl info's field
+  names. Under another language the follower found no scterm stream and
+  never moved the sound. One builder, `cLocaleEnv` (`pulsecli.go`), now
+  gives every pactl run `LC_ALL=C` without `LANGUAGE`, keeping the rest of
+  the environment: `pactlTool.run` (the follower, `pulseCmd`,
+  `pulseDefaultSink`) and doctor's `doctorOutput`, which kept `LANGUAGE`.
+- The start-up cleanup runs no pactl (libpulse API): unchanged.
+- Checked: the gettext 1.0 manual and man 3 gettext (no translation in C,
+  `LANGUAGE` ignored there); glibc 2.44 does the same for C, POSIX and
+  C.UTF-8; pactl prints names and properties through printf and
+  pa_proplist, with no charset change (its one pa_locale_to_utf8 call is
+  for -n). C changes no text scterm reads, so C.UTF-8 is not needed.
+- Real probe, inside bwrap, on a private PipeWire 1.6.9, with the real
+  pactl 17.0 and a stand-in ja catalog (the host has no pulseaudio.mo):
+  - BASE in LANG=ja_JP.UTF-8 LANGUAGE=ja read "シンク入力 #45" and never
+    moved the stream; the fix moved it to the default in 500 ms, then to a
+    sink named scterm_テスト_ü in 250 ms.
+  - Doctor and the cleanup worked on both.
+  - Names, descriptions and properties were byte-identical in C, C.UTF-8,
+    en_US.UTF-8 and ja_JP.UTF-8.
+- New tests (`pulsecli_test.go`): `TestCLocaleEnvChangesOnlyTheLocale`,
+  `TestEveryPactlRunIsInTheCLocale`, `TestAudioFollowerFollowsInAnyLanguage`.
+  `doctor_test.go`: doctorHost sets LANGUAGE=fr; `workingPactl` answers in
+  English only with LC_ALL=C and no LANGUAGE. On BASE: 6 tests fail (4
+  doctor, 2 new); the unit test does not build. 10 of 10 mutants killed.
+- Checks (afe9ebe, go1.27.1, iso.env, bwrap): gofmt, vet, build and
+  `git diff --check` clean; `go test ./...` 483 passed, 3 skipped, 0
+  failed (BASE 480, 3, 0); `-race ./...` 483/3/0, no race; `-race` on 31
+  touched tests 31/0/0; the new tests `-race -count=20` 60/60.
+- Not run: a real pulseaudio catalog (none on this host); pactl's source
+  (its binary and the probes only); musl or other glibc versions; a real
+  PulseAudio daemon; the scterm binary end to end; the node suites (`web/`
+  untouched); Android.
+- Intake: the worktree's copies of the four files were this part's base
+  (`afe9ebe`), so they were taken as built, byte for byte. Parts 48 and
+  47, taken in first and landing first, change none of them. The builder's
+  optional sentence for `docs/ARCHITECTURE.md` is left out.
+
 ## Update (2026-10-21: QoL overhaul, part 47: device text cleaned in the last places)
 
 - Device text reaches the terminal cleaned in the command line's last
