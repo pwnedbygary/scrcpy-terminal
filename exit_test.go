@@ -433,7 +433,8 @@ func TestSessionEndCleansThePeersReason(t *testing.T) {
 
 // TestCommandLineExitStatus: a mistake in the command line is a failure to
 // start, status 1, with its one line on stderr, as are adb missing and a
-// device that has not allowed USB debugging; the help and the version exit 0.
+// device that has not allowed USB debugging; the help, the version and the
+// licenses exit 0.
 // Each runs main in a child process with nothing, or only a fake adb, on PATH
 // and a scratch home, so none can reach a real device.
 func TestCommandLineExitStatus(t *testing.T) {
@@ -470,6 +471,7 @@ func TestCommandLineExitStatus(t *testing.T) {
 		{[]string{"--audio-dup", "--audio-source", "mic"}, "", 1, "",
 			"scterm: --audio-dup needs --audio-source playback, not mic: only playback capture keeps the sound playing on the device\n"},
 		{[]string{"version", "x"}, "", 1, "", "scterm: usage: scterm version (it takes no arguments)\n"},
+		{[]string{"licenses", "x"}, "", 1, "", "scterm: usage: scterm licenses (it takes no arguments)\n"},
 		{[]string{"update", "--bogus"}, "", 1, "", "scterm: usage: scterm update [--check] [-y|--yes] (\"--bogus\" is not one of these)\n"},
 		{[]string{"peers", "--bogus"}, "", 1, "", "scterm: usage: scterm peers [--check]\n"},
 		{[]string{"forget"}, "", 1, "", "scterm: usage: scterm forget NAME (scterm peers lists the names)\n"},
@@ -482,7 +484,9 @@ func TestCommandLineExitStatus(t *testing.T) {
 		{[]string{"-h"}, "", 0, "scterm - scrcpy in your terminal", ""},
 		{[]string{"help"}, "", 0, "scterm - scrcpy in your terminal", ""},
 		{[]string{"version"}, "", 0, "scterm dev", ""},
+		{[]string{"licenses"}, "", 0, "scterm is released under the MIT License:", ""},
 		{[]string{"doctor", "-h"}, "", 0, "usage: scterm doctor", ""},
+		{[]string{"licenses", "-h"}, "", 0, "usage: scterm licenses", ""},
 	} {
 		home := t.TempDir()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestCommandLineExitStatus$")

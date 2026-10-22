@@ -144,3 +144,10 @@ Release builds and the signing key are described in
   input), or serves a test pattern as a target on loopback. Build it with
   `./gradlew :peerctl:installDist`; see
   [docs/DEVELOPMENT.md](../docs/DEVELOPMENT.md#peerctl).
+
+## License
+
+The app is released under the MIT License ([LICENSE](../LICENSE)). The scrcpy
+server compiled into it keeps its own license, the Apache License 2.0
+([third_party/LICENSE.scrcpy](../third_party/LICENSE.scrcpy)). The APK carries
+both texts, as `assets/LICENSE` and `assets/LICENSE.scrcpy`.

@@ -7,6 +7,68 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 48: the scrcpy server's licence comes with every release)
+
+- scterm is MIT and bundles the scrcpy server, under the Apache License
+  2.0, in the Linux binary (the embedded jar) and in the APK (the helper
+  built from `third_party/scrcpy-server-src`). Neither carried the Apache
+  text, which its §4(a) asks recipients to get.
+- `scterm update` fetches only the binary, so the binary now carries both
+  texts. `scterm licenses` (`licenses.go`) prints `LICENSE` and
+  `third_party/LICENSE.scrcpy` whole, as `go:embed` takes them from the
+  repository, each after a line saying what it covers. It exits 0, `-h`
+  prints its help, and an argument is a usage error with exit status 1. It
+  is in scterm -h's Commands, the `commands` list (`scterm licence` gets
+  "did you mean licenses?") and the README's table of commands.
+- The release job attaches `LICENSE` and `third_party/LICENSE.scrcpy`
+  (uploaded as `LICENSE.scrcpy`) next to the binary and the APK. Both
+  updaters pick their asset by name, so neither sees the new ones.
+- The APK carries both texts as `assets/LICENSE` and
+  `assets/LICENSE.scrcpy`: copies under `android/app/src/main/assets`,
+  with no Gradle or UI change. A Go test keeps them identical to their
+  sources.
+- `third_party/README.md` (new) lists scterm's changes to the vendored
+  server: `AudioPlaybackCapture.java`, commit `afcd41b` (playback capture
+  also records game and untagged audio). A test keeps the list equal to
+  the files marked `scterm patch`. There is no NOTICE file to carry
+  (§4(d)). The vendored source and the jar are unchanged (part 49).
+- Docs: the README's License section says where the texts are and links
+  the list. `docs/RELEASING.md` names the release's files.
+  `android/README.md` has a License section.
+- Tests: `TestSubcommandHelp`, `TestHelpIsGrouped`,
+  `TestLeftoverWordsAreRefused` and `TestCommandLineExitStatus` cover the
+  command. Five new tests in `licenses_test.go` cover the output (checked
+  against the files), the APK copies, the release's `files` list (the
+  action only warns about a missing file), the README and the list.
+- Verification, every Go command in the bwrap sandbox with `iso.env`:
+  - At BASE, the new tests do not build (`runLicensesCommand` undefined).
+    With a stub that handles nothing, as BASE's main does, all 9 new or
+    changed tests fail.
+  - 16 mutations, 16 caught.
+  - `go test ./...`: 485 passed, 3 skipped, 0 failed (BASE: 480, 3, 0).
+  - `-race` on the 9 tests passes, and so does `-count=20` on the 5 new
+    ones.
+  - gofmt, vet, build and a release-flags build are clean. The binary
+    prints 12580 bytes, at most 79 columns.
+  - The docs checker finds 44 relative links and 0 problems.
+  - aapt2 link with `-A` packs both assets unchanged.
+  - `git diff --check` flags only the blank line that ends the
+    byte-identical copy of `LICENSE.scrcpy`.
+- Left alone: the APK's `/META-INF/{AL2.0,LGPL2.1}` exclusion (a Gradle
+  change), and the BSD licences of Go's standard library, `golang.org/x/net`
+  and `golang.org/x/sys` in the binary.
+- Not run: CI (the release job's two new lines), Gradle and the APKs it
+  builds (AGP's packing of the assets), the node suites (`web/` untouched).
+- Intake: the worktree was this part's base (`afe9ebe`), so the 13 files
+  were taken as built, byte for byte. Intake adds `.gitattributes`, which
+  stops `git diff --check` flagging the blank line that ends
+  `assets/LICENSE.scrcpy` (`whitespace=-blank-at-eof`, for that file only):
+  the copy must stay identical to `third_party/LICENSE.scrcpy`, which ends
+  the same way. For part 49, which rebuilds the jar:
+  the README's line saying the bundled server records no game sound
+  (README.md:588 here) becomes false, and `third_party/README.md` could
+  name its build script and provenance file.
+
 ## Update (2026-10-21: QoL overhaul, part 43: two noise messages from the second phone run)
 
 - Found on the second real-device run (sound and control): `scterm --no-tui`

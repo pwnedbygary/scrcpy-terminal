@@ -147,3 +147,5 @@ jobs:
           files: |
             scterm
             scterm-android-*.apk
+            LICENSE
+            third_party/LICENSE.scrcpy

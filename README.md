@@ -641,6 +641,7 @@ variables also help: `SCT_DEBUG_WEB=1` logs each browser's paint and decode stat
 | `scterm doctor` | Check what scterm needs on this computer, and say what to do about problems |
 | `scterm update [--check] [-y]` | Update to the latest release, or pull and rebuild |
 | `scterm version` | Print the version |
+| `scterm licenses` | Print the licenses of scterm and of the scrcpy server it bundles |
 | `scterm help` | Print the help, as `scterm -h` does |
 | `scterm COMMAND -h` | Print a command's own help |
 
@@ -737,3 +738,8 @@ sound with the [FFmpeg](https://ffmpeg.org/) libraries and plays sound through P
 scterm, the Android app included, is released under the MIT License: see [LICENSE](LICENSE).
 The scrcpy server, which scterm and the app both bundle, keeps its own license, the Apache
 License 2.0 (see above); other third-party files, such as the Gradle wrapper, keep theirs too.
+
+Both license texts come with every copy of scterm: `scterm licenses` prints them, each release
+attaches them as `LICENSE` and `LICENSE.scrcpy` next to the binary and the APK, and the APK
+holds them as `assets/LICENSE` and `assets/LICENSE.scrcpy`. scterm's changes to the server's
+source are listed in [third_party/README.md](third_party/README.md).

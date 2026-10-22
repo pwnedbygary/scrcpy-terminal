@@ -16,8 +16,9 @@ and when you start it by hand. It has three jobs:
   signed release APK and uploads it as `scterm-android-release`.
 - **release**, for a tag or a manual run: builds the release binary with the version stamped
   into it and fetches the signed APK. For a tag only, it publishes a GitHub release named
-  `scterm vX.Y.Z`, with `scterm` and `scterm-android-X.Y.Z.apk` attached and the tagged commit's
-  message as its notes.
+  `scterm vX.Y.Z`, with the tagged commit's message as its notes. It attaches `scterm`,
+  `scterm-android-X.Y.Z.apk`, and the license texts `LICENSE` (scterm's) and `LICENSE.scrcpy`
+  (the scrcpy server's).
 
 ## Make a release
 
