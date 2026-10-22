@@ -92,8 +92,9 @@ func TestPeerChooserCleansTheNames(t *testing.T) {
 
 // TestForgetCleansTheName: scterm forget's question and what it says it did
 // name the device cleaned. Without a terminal, part of the name is refused
-// with the whole name as stored, quoted, which is what to type; typed, it
-// forgets the device without a question.
+// with a command that forgets the device, which names it by its identity, as
+// the name is not plain text, and no other text of the device's; the whole
+// name as stored, typed, forgets the device without a question.
 func TestForgetCleansTheName(t *testing.T) {
 	withInteractive(t, true)
 	pairedStore(t, dirtyPixel8)
@@ -117,7 +118,7 @@ func TestForgetCleansTheName(t *testing.T) {
 
 	withInteractive(t, false)
 	store := pairedStore(t, dirtyPixel8)
-	want := `"pix" is only part of "Pixel\x1b]0;owned\a 8\u202e": give the whole name to forget it`
+	want := `"pix" only partly matches a paired device: to forget it, run scterm forget 0000-0000-0000-0000`
 	if err := forgetCommand([]string{"pix"}); err == nil || err.Error() != want {
 		t.Errorf("forget pix: %q\nwant %q", err, want)
 	}
@@ -190,7 +191,8 @@ func servePeerOnce(t *testing.T, serve func(conn net.Conn, self, controller peer
 // answer its search, which anyone on the network can name, and the device it
 // pairs with, in its chooser, its questions, what it says it did and why it
 // failed; each name reaches the terminal cleaned, and the pairing is stored
-// with the name as the device gave it.
+// with the name as the device gave it. The command to connect names the
+// device by its identity, as the name is not plain text.
 func TestPairNearbyCleansWhatTheDevicesSay(t *testing.T) {
 	oldInput, oldSearch := terminalInput, invitationSearch
 	t.Cleanup(func() { terminalInput, invitationSearch = oldInput, oldSearch })
@@ -241,7 +243,7 @@ func TestPairNearbyCleansWhatTheDevicesSay(t *testing.T) {
 			t.Fatalf("pair: %v; this computer's identity: %v", err, idErr)
 		}
 		wantOut := waited + "Paired with Pixel 2J 9 (" + target.Short() + "); it allows this computer to view, control.\n" +
-			"This computer is " + local.Fingerprint.Short() + `. Connect with: scterm --peer "Pixel\u009b2J\r 9\u200b"` + "\n"
+			"This computer is " + local.Fingerprint.Short() + ". Connect with: scterm --peer " + target.Short() + "\n"
 		if wantErr := fmt.Sprintf(asked, port); stdout != wantOut || stderr != wantErr || unclean(stdout+stderr) {
 			t.Errorf("stdout %q\nwant   %q\nstderr %q\nwant   %q", stdout, wantOut, stderr, wantErr)
 		}
@@ -266,7 +268,8 @@ func TestPairNearbyCleansWhatTheDevicesSay(t *testing.T) {
 // TestPairByInvitationCleansWhatTheDeviceSays: scterm pair with an invitation
 // names the device it paired with, or gives its refusal; both reach the
 // terminal cleaned, and the pairing is stored with the name as the device
-// gave it.
+// gave it. The command to connect names the device by its identity, as the
+// name is not plain text.
 func TestPairByInvitationCleansWhatTheDeviceSays(t *testing.T) {
 	secret := []byte("ten bytes!")
 	// invite serves one pairing by invitation, answering it with what answer
@@ -300,7 +303,7 @@ func TestPairByInvitationCleansWhatTheDeviceSays(t *testing.T) {
 			t.Fatalf("pair: %v; this computer's identity: %v", err, idErr)
 		}
 		want := "Paired with Pixel ]0;owned 8 (" + target.Short() + "); it allows this computer to view.\n" +
-			"This computer is " + local.Fingerprint.Short() + `. Connect with: scterm --peer "Pixel\x1b]0;owned\a 8\u202e"` + "\n"
+			"This computer is " + local.Fingerprint.Short() + ". Connect with: scterm --peer " + target.Short() + "\n"
 		if stdout != want || unclean(stdout) {
 			t.Errorf("stdout %q\nwant   %q", stdout, want)
 		}

@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"scterm/peer"
 )
@@ -129,16 +131,64 @@ func pairCommand(args []string) error {
 	if err := store.Put(rec); err != nil {
 		return err
 	}
-	reportPaired(client, name, res.Fingerprint, res.Grants)
+	reportPaired(client, store, name, res.Fingerprint, res.Grants)
 	return nil
 }
 
 // reportPaired says what was paired. The name is the device's own text: the
-// sentence shows it cleaned, and the command quotes it as stored, which is
-// what --peer matches (%q escapes control and format characters).
-func reportPaired(client *peer.Client, name string, fp peer.Fingerprint, grants []string) {
+// sentence shows it cleaned, and the command names the device as pasteArg
+// writes it; when pasteArg gives none, the line says that scterm cannot give
+// one.
+func reportPaired(client *peer.Client, store *peer.Store, name string, fp peer.Fingerprint, grants []string) {
 	fmt.Printf("Paired with %s (%s); it allows this computer to %s.\n", cleanText(name), fp.Short(), describeGrants(grants))
-	fmt.Printf("This computer is %s. Connect with: scterm --peer %q\n", client.Identity.Fingerprint.Short(), name)
+	self := client.Identity.Fingerprint.Short()
+	if arg, ok := pasteArg(store, name, fp); ok {
+		fmt.Printf("This computer is %s. Connect with: scterm --peer %s\n", self, arg)
+		return
+	}
+	fmt.Printf("This computer is %s. scterm cannot give a command that selects only this device: scterm peers lists the pairings.\n", self)
+}
+
+// pasteArg is how a command printed for the user to paste (scterm --peer ARG,
+// scterm forget ARG) names the pairing with identity fp: by its name, in
+// single quotes, when that is plain and finds this pairing and no other; else
+// by its short or its whole identity, whichever finds it alone, so that the
+// command never carries text the device chose. It reports false when none
+// does (other pairings can be named after both identities, or the pairings
+// cannot be read), and then no command should be printed.
+// The quotes are there even when the name needs none: an interactive zsh
+// expands a global alias wherever a bare word names one.
+// A plain name is not empty, is UTF-8 and has only printable characters, none
+// of them a backslash (fish reads one even inside single quotes, where sh,
+// bash and zsh do not), no space at either end (a query loses them) and no
+// two together, so cleanText leaves it as it is; and it is not a word that
+// asks a command for its help.
+func pasteArg(store *peer.Store, name string, fp peer.Fingerprint) (string, bool) {
+	recs, err := store.All()
+	// finds reports whether query means this pairing: Find gives it, and no
+	// other pairing has that name in any case (Find gives the first of them).
+	finds := func(query string) bool {
+		for _, r := range recs {
+			if r.Fingerprint != fp.Hex() && strings.EqualFold(r.Name, query) {
+				return false
+			}
+		}
+		rec, findErr := store.Find(query)
+		return err == nil && findErr == nil && rec.Fingerprint == fp.Hex()
+	}
+	plain := name != "" && utf8.ValidString(name) && strings.TrimSpace(name) == name && !strings.Contains(name, "  ") &&
+		!isHelpArg(name) && !strings.ContainsFunc(name, func(r rune) bool { return r == '\\' || !unicode.IsPrint(r) })
+	if plain && finds(name) {
+		return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'", true
+	}
+	// Another pairing can be named after this one's short identity, or after
+	// its whole one.
+	for _, id := range []string{fp.Short(), fp.Hex()} {
+		if finds(id) {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 func peersCommand(args ...string) error {
@@ -179,9 +229,17 @@ func forgetCommand(args []string) error {
 	name := cleanText(rec.Name)
 	if !namesExactly(rec, query) {
 		if !interactive() {
-			// The whole name as stored is what to type, so it is quoted (%q
-			// escapes control and format characters), not cleaned.
-			return fmt.Errorf("%q is only part of %q: give the whole name to forget it", query, rec.Name)
+			// No text of the device's comes before the command, where it
+			// could pose as one; the command names the device as pasteArg
+			// writes it, and ends the line.
+			fp, err := rec.ID()
+			if err != nil {
+				return err
+			}
+			if arg, ok := pasteArg(store, rec.Name, fp); ok {
+				return fmt.Errorf("%q only partly matches a paired device: to forget it, run scterm forget %s", query, arg)
+			}
+			return fmt.Errorf("%q only partly matches a paired device, and scterm cannot give a command that selects only that device: forget it from a terminal, where scterm asks first", query)
 		}
 		answer, err := ask(fmt.Sprintf("Forget %s? [y/N] ", name))
 		if err != nil {

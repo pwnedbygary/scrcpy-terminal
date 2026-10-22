@@ -356,7 +356,13 @@ Pair each device once, in one of two ways:
   `scterm pair "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093"`. A `scterm://pair` link also works.
 
 An invitation works once, for 10 minutes. When pairing succeeds, scterm says what the device
-allows this computer to do, and how to connect to it.
+allows this computer to do, and prints a `scterm --peer` command that connects to it. The
+command is safe to paste into sh, bash, zsh or fish: it names the device by its name, in single
+quotes, or else by its identity. The identity is used when the name is not plain printable text
+(it has control characters, a backslash, or spaces at either end, for example), when it is a
+word scterm reads another way (`help`), or when it would select another paired device too, or
+instead (one with the same name in another case, say). When neither selects the device alone,
+scterm prints no command, and says that it cannot give one.
 
 ### Connecting
 
@@ -390,8 +396,10 @@ or names them when there is no terminal to ask on.
   each. It also finds a device whose address changed on the local network, and checks its
   identity before it saves the new address.
 - `scterm forget NAME` forgets a device. The whole name, in any case, or the identity forgets
-  it at once. Part of a name asks for confirmation, and is refused when there is no terminal to
-  ask on. The device keeps this computer in its own list until you remove it there.
+  it at once. Part of a name asks for confirmation; when there is no terminal to ask on, it is
+  refused, with the command that forgets the device, written as after pairing (or, when scterm
+  cannot give one, a note to forget it from a terminal). The device keeps this computer in its
+  own list until you remove it there.
 
 This computer's identity and the paired devices are in `~/.config/scterm` (see
 [Files](#files)).

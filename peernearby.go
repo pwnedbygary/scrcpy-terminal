@@ -86,7 +86,7 @@ func pairNearbyCommand() error {
 	if err := store.Put(rec); err != nil {
 		return err
 	}
-	reportPaired(client, name, r.Pair.Fingerprint, r.Pair.Grants)
+	reportPaired(client, store, name, r.Pair.Fingerprint, r.Pair.Grants)
 	return nil
 }
 

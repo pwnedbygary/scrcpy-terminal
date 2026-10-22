@@ -7,6 +7,254 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-22: QoL overhaul, part 50: suggested commands are safe to paste)
+
+- "Connect with: scterm --peer %q" (after `scterm pair`, typed or nearby)
+  wrote the device's name as a Go string literal. Pasted, its double
+  quotes let sh, bash and zsh run `$(...)` and backticks, fish run
+  `$(...)`, `$VAR` expand, and an interactive bash or zsh expand `!`;
+  `%q`'s escapes (`\x1b`, `\u202e`) reached the shell as backslashes.
+  `scterm forget` refused part of a name with the stored name in that form.
+- New `pasteArg` (peermode.go) gives the argument for both: the name, in
+  single quotes with `'\''` for each `'`, when it is plain and finds this
+  pairing alone; else the short identity, or the whole one when another
+  pairing's name takes the short one (or two identities start alike),
+  each only when it finds the pairing alone; and nothing when neither
+  does, or when the pairings cannot be read, so that no command is
+  printed. Round 1 quoted names through update.go's `shellQuote`, which
+  leaves ASCII letters, digits and `./_-` bare, and gave the short
+  identity unchecked when neither identity found the pairing alone; round
+  2 changed both (below).
+- Plain: not empty, UTF-8, every rune `unicode.IsPrint`, no backslash
+  (fish reads one inside single quotes), no space at either end nor two
+  together (so `cleanText` leaves it as it is), and not `help`, `-h`,
+  `-help` or `--help` (`scterm forget help` prints the help). Finds alone:
+  no other pairing has the name in any case (Find gives the first of two),
+  and `Store.Find` gives this pairing for it (Find lowercases `İzmir` to
+  `izmir`, which can be another pairing's name).
+- `reportPaired` takes the store its two callers hold (round 2; round 1
+  kept its signature and opened the store again through `peerHome`). The
+  sentence before keeps the cleaned name; the line does not say why it
+  shows an identity, which that sentence shows in parentheses. When
+  pasteArg gives nothing, the line says "scterm cannot give a command
+  that selects only this device: scterm peers lists the pairings." (round
+  3; round 2's words, that no command could select the device, were not
+  true: below).
+- forget's refusal is one line, and no text of the device's comes before
+  its command: `"pix" only partly matches a paired device: to forget it,
+  run scterm forget 'Pixel 8'`. When pasteArg gives nothing, it ends ",
+  and scterm cannot give a command that selects only that device: forget
+  it from a terminal, where scterm asks first" (round 3's words). Round 1
+  put the cleaned name before the command (round 2, below).
+- `%` and `=` are quoted: fish 4.9.3 expanded `%self` to its PID and zsh
+  5.9.2 `=ls` to `/usr/bin/ls`. `-x` is `--peer`'s value: Go's flag
+  package gives `--peer` the next argument whatever it starts with.
+- README: the pairing paragraph says how the command is written, when it
+  gives the identity and when scterm prints none; the forget bullet says
+  the refusal gives the command, or a note to use a terminal. flags.go's
+  "quote a value with spaces, as --peer "Pixel 8"" hint is left alone: the
+  user's own words, and a backslash would need a rule of its own for fish.
+- Tests: pastecmd_test.go (new) has `TestConnectWithPastesAsPrinted` and
+  `TestForgetRefusalPastesAsPrinted`. They paste the printed command into
+  /usr/bin/sh, bash, zsh and fish (`-c`) and into interactive bash and zsh
+  (lines on stdin), with a clean environment, scratch HOME and working
+  directory, setsid, and scterm a function that prints its arguments. They
+  check the arguments, that no MARKER file appears, that `parseArgs` and
+  `pickPeer` (no question) find the pairing, and that the pasted forget
+  command forgets it. pastearg_test.go (new) had
+  `TestPasteArgNamesByPlainNamesOnly`, `TestPasteArgNeedsAName` and
+  `TestPasteArgFallsBackToTheWholeIdentity`; rounds 2 and 3 add one test
+  each (below). devicetext_test.go: the forget refusal and both
+  Connect-with pins. Round 1 had 49 pairings (48 names and a no-name
+  pairing) and 5 forget cases; round 2 adds to these (below).
+- Verification (builder's tree, base `ed3d204`, iso.env, bwrap, go1.27.1):
+  gofmt, vet, build and `git diff --check` clean. `go test -count=1 -v
+  ./...`: 512 pass, 3 skip, 0 fail (base 507, 3, 0; +5 new); `-race`: the
+  same, no race. 16 touched and related tests under `-race`: 16/16; the 5
+  new x20: 100/100, under `-race` 100/100. On base's peermode.go the 2
+  paste tests and the 3 pins fail (base's line ran `touch` from a name in
+  all 6 shell modes; `"Hi!x"` failed in interactive bash and zsh); the 3
+  helper tests do not build. Mutants: 19 of 19 killed.
+- Left alone: `Store.Matches` lets a whole name win over an identity, so a
+  device named after another's short identity takes `--peer IDENTITY`
+  typed by hand or kept in shell history (peer/store.go); nearby pairing
+  can store an empty name (peernearby.go; the line gives the identity);
+  update.go's "To go back to it" quotes a path with `shellQuote`, which
+  fish misreads only for a path with a backslash.
+- Not run by the builder: a person pasting into a real terminal; dash and
+  ksh (not installed); fish interactive; adb, a phone, a peer target or
+  the Android app; the node suites (web/ untouched).
+- Intake: the worktree was clean at `ed3d204`, the builder's base, so the
+  five files were taken as built, byte for byte.
+- Verification, snapshot round 1 (`/tmp/opencode/review-50`, on `ed3d204`;
+  go1.27.1, iso.env, every Go command in the bwrap sandbox): gofmt, vet,
+  build and `git diff --check` clean; `go test -count=1 -v ./...` 512 pass,
+  3 skip, 0 fail; `-race -count=3` on 36 related tests (every test of
+  devicetext_test.go, cli_test.go, peerwords_test.go and the two new files)
+  passes; the 5 new tests and the 3 pins pass 20 times and 5 times under
+  `-race`. With the base's peermode.go (pastearg_test.go stubbed) all 5
+  fail: the Connect-with paste test in all 6 shell modes, the forget one on
+  the refusal, which has no command, and the 3 pins (the forget refusal
+  and both Connect-with lines in devicetext_test.go). Each of the builder's
+  19 mutants fails at least one related test. Docs checker: README.md, 34
+  links, no problem; the docs tests pass. The whole module, in a sandbox
+  set up like a desktop session, connects to none of its decoy sockets; a
+  positive control reaches two. The checks ran on a first build, kept as
+  review-50.checked; the rebuild with this bullet changed only the
+  handoff.
+- Review round 1 (NEEDS CHANGES), one MEDIUM, three LOWs and two NITs.
+  MEDIUM: forget's refusal put the cleaned name, bare, before the command,
+  with the same words around it, so a device named `Pixel: to forget it,
+  run scterm forget Pixel;touch MARKER #` planted a command that ran when
+  pasted from the first "run": the review's sixth case of the forget test
+  ran `touch` in all 6 shell modes. LOWs: an interactive zsh rewrites a
+  bare name that names a global alias (oh-my-zsh's `...` for `../..`; with
+  `alias -g L='| touch …'`, a device named `L` ran touch); the last
+  fallback was not checked, so with other pairings named after both
+  identities the short identity selected the impostor named after it; and
+  four mutations survived the 36 related tests (forget's command from the
+  cleaned name, a looser `shellQuote`, `unicode.IsGraphic` for `IsPrint`,
+  the whole identity unchecked). NITs: the refusal for a name that cleans
+  to nothing read "is only part of :", and wording: `shellQuote`'s bare
+  set is ASCII only, the README's reasons for the identity left out the
+  help words and a name Find reads as another pairing's, and the snapshot
+  bullet did not name the three pins (corrected above).
+- Round 2 changes peermode.go, peernearby.go (its call of `reportPaired`),
+  README.md, the tests and this entry. forget's refusal has no text of the
+  device's before its command, so it never shows a name that cleans to
+  nothing, nor says "only part of NAME" for a query that began the
+  identity; every name is in single quotes, which an interactive zsh never
+  alias-expands; when neither identity selects the device alone, no
+  command is printed and both lines say so (round 3 corrects what they
+  say); `reportPaired` takes the store. Tests: pasteNames gains `L`,
+  `...`, `#x`, `{a,b}`, `}`, `?`, `[a]`, `^x`, `end`, a no-break space and
+  an ideographic space (60 pairings); a seventh shell mode, interactive
+  zsh with `alias -g ...='../..' L='| touch MARKER-alias-L'`; the forget
+  test gains the review's planted name and `Pixel 8\u202e`, which cleaned
+  is `Pixel 8` and only partly matches it (7 cases), and checks that its
+  refusal begins with the query and fixed words (round 3 checks the whole
+  line); new `TestNoCommandWhenNothingSelectsThePairingAlone` (other
+  pairings named after both identities: no argument, the two lines, the
+  pairing kept); `pasteInto` sets `cmd.WaitDelay`; cli_test.go's
+  `TestForgetNeedsTheWholeName` looks for the new words.
+- Verification, round 2, in the worktree (iso.env, every Go command in the
+  bwrap sandbox): gofmt and vet clean; the 37 related tests pass. Each
+  mutant of round 2's peermode.go (`/tmp/opencode/dev-50b/mkmut.py`: the
+  builder's M01 to M18 ported, M05 to pasteArg's own quoting; M19, which
+  changed `shellQuote`'s bare set, has no port, as pasteArg no longer calls
+  it; the review's R01, R03, R04, R16 and R22; and N1 to N5) fails a
+  related test. N1, round 1's refusal, fails the forget test on its first
+  words, `TestForgetCleansTheName` and `TestForgetNeedsTheWholeName`; N2,
+  round 1's bare names, fails the plain-name test, and makes
+  MARKER-alias-L and turns `...` into `../..` in the global-alias mode of
+  the Connect-with paste test; N3, round 1's unchecked short identity, N4,
+  the Connect-with line without an argument, and N5, forget's command with
+  the short identity anyway, fail the new test; R01 fails the forget test
+  on `Pixel 8\u202e`; R03 the plain-name test and the Connect-with paste
+  test, on the two spaces; R04 the new test; R16 the plain-name test, and
+  the Connect-with paste test in all 7 shell modes (`#x` loses its value,
+  `}` stops zsh and fish parsing, `?` and `[a]` find no match); R22 the
+  Connect-with paste test.
+- Left alone in round 2: the "Paired with NAME (SHORT)" sentence before
+  the Connect-with line still shows the cleaned name, as it did before
+  this part, so a device can put text there that reads like a
+  Connect-with command (the review's suggestion); quotes around it would
+  not stop a reader copying from inside them, and showing the name only
+  after the command would change part 47's output. CI installs neither zsh
+  nor fish, so their subtests skip there; its /usr/bin/sh is dash, which
+  runs the sh mode. fish's abbreviations, which only its interactive
+  reader expands, are not tested.
+- Verification, snapshot round 2 (`/tmp/opencode/review-50b`, on
+  `ed3d204`; go1.27.1, iso.env, every Go command in the bwrap sandbox):
+  gofmt, vet, build and `git diff --check` clean; `go test -count=1 -v
+  ./...` 513 pass, 3 skip, 0 fail; `-race -count=3` on the 37 related tests
+  passes; the 6 new tests and the 4 changed ones (the 3 pins and
+  `TestForgetNeedsTheWholeName`) pass 20 times and 5 times under `-race`.
+  Each of the 28 mutants fails at least one related test, the same ones as
+  in the worktree; N2, run against the global-alias mode alone, fails it
+  (MARKER-alias-L made, `...` read as `../..`). Docs checker: README.md,
+  34 links, no problem; the docs tests pass. The whole module, in a
+  sandbox set up like a desktop session, connects to none of its decoy
+  sockets; a positive control reaches two. The checks ran before this
+  bullet was written; packing again with it changed only the handoff.
+- Review round 2 (NEEDS CHANGES), two LOWs and two NITs. LOW: the lines
+  printed instead of a command said that no command could select the
+  device, which was not true: in the new test's own setup `scterm --peer
+  pix` selects it, and its whole name, typed with bash's `$'…'`, forgets
+  it at once. A store that cannot be read gave that line too, though the
+  cause was the read, and no test covered that branch: a pasteArg giving
+  the short identity there passed every related test. LOW: device text
+  can still read as scterm's own instruction. Inside the quoted name,
+  copied from the device's own "scterm forget", `'Pixel: to forget it,
+  run scterm forget Pixel;touch …'` runs `touch` in five of the seven
+  shell modes (copied whole, the command is safe in all seven); and in the
+  "Paired with" sentence (left alone in round 2, above). Both are older
+  than this part, and the review accepts leaving them to a later part.
+  NITs: the forget test checked only its line's first words, so a refusal
+  ending in `# NAME` failed only in the interactive zsh modes and
+  `TestForgetCleansTheName`; and wording: pastearg_test.go's tests, N1's
+  and N2's failing tests, update.go's quoting, and a name that Find reads
+  as another pairing's, which it selects instead, not too (corrected
+  above). The review checked round 1's six findings fixed, and pasted 243
+  hostile names into 16 shell modes in two locales: each reached scterm
+  as the name or the identity, ran nothing and selected its pairing.
+- Round 3 changes peermode.go's two lines without a command, README.md,
+  the tests and this entry. After pairing: "This computer is SHORT. scterm
+  cannot give a command that selects only this device: scterm peers lists
+  the pairings."; forget ends ", and scterm cannot give a command that
+  selects only that device: forget it from a terminal, where scterm asks
+  first". The README says that scterm then prints no command, and says it
+  cannot give one; and that a name which would select another paired
+  device "too, or instead" is given by identity. Tests: new
+  `TestNoCommandFromPairingsThatCannotBeRead` (a peers.json that does not
+  read: no argument, and the line without a command; after a pairing and
+  in forget the pairings were read just before, so this does not happen
+  there); `TestNoCommandWhenNothingSelectsThePairingAlone` checks that
+  `pix` still finds the pairing, and expects the new words; the forget
+  test checks its whole line: the query, the fixed words and `scterm
+  forget` with the name in single quotes, or the short identity, as
+  written out by hand in the test; pastecmd_test.go's comment on `?` says
+  it is a glob in sh, bash and zsh (fish 4.9.3 takes it as it is).
+- Verification, round 3, in the worktree (iso.env, every Go command in the
+  bwrap sandbox): gofmt and vet clean; the 38 related tests (round 2's 37
+  and the new one) pass. Each of 38 mutants of round 3's peermode.go
+  (`/tmp/opencode/dev-50c/mkmut.py`: round 2's 28, N5's text to replace
+  in round 3's words; the review's X1 to X8; and N6 and N7, round 2's two
+  lines put back) fails at least one related test. X7, a store that
+  cannot be read giving the short identity, fails only the new test; the
+  review's own X7, on a copy of round 2's snapshot, passes all 37 of
+  round 2's related tests. X2, the cleaned name as a shell comment after
+  forget's command, fails the forget test on its line, before any shell
+  runs; round 2's forget test failed it only in the two interactive zsh
+  modes, besides `TestForgetCleansTheName`
+  (`/tmp/opencode/dev-50c/gaps.sh`).
+- Left alone in round 3, for a later part: device text that reads like
+  scterm's own instruction, inside the quoted name and in the "Paired
+  with" sentence (the review's second LOW, above); the real command is
+  safe, copied whole. The review's other remedy, a stricter "plain"
+  without shell metacharacters (`;&|<>()$`, the backquote, `#*?[]{}~!`),
+  so that no part of a quoted name could run anything, is not taken: such
+  names would then be given by identity. forget's other lines that show
+  the cleaned name ("Forget NAME? [y/N]", "Kept NAME.", "Forgot NAME.",
+  the list of names that match) are as they were before this part.
+- Verification, snapshot round 3 (`/tmp/opencode/review-50c`, on
+  `ed3d204`; go1.27.1, iso.env, every Go command in the bwrap sandbox):
+  gofmt, vet, build and `git diff --check` clean; `go test -count=1 -v
+  ./...` 514 pass, 3 skip, 0 fail; `-race -count=3` on the 38 related
+  tests passes; the 7 new tests and the 4 changed ones pass 20 times and 5
+  times under `-race`. Each of the 38 mutants fails at least one related
+  test, the same ones as in the worktree; N2, run against the global-alias
+  mode alone, fails it. With round 2's files
+  (`/tmp/opencode/dev-50c/r2files`), the review's X7 passes all 37 of
+  round 2's related tests, and its X2 fails only `TestForgetCleansTheName`
+  and the forget test's two interactive zsh modes; round 2's peermode.go
+  under round 3's tests fails the two tests of the lines without a
+  command. Docs checker: README.md, 34 links, no problem; the docs tests
+  pass. The whole module, in a sandbox set up like a desktop session,
+  connects to none of its decoy sockets; a positive control reaches two.
+  The checks ran before this bullet was written; packing again with it
+  changed only the handoff.
+
 ## Update (2026-10-21: QoL overhaul, part 49: adb mode runs the scrcpy server built from the vendored source)
 
 - The Linux binary embedded the official scrcpy 4.1 server (733706 bytes,

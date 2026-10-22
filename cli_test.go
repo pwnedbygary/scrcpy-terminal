@@ -627,7 +627,7 @@ func TestForgetNeedsTheWholeName(t *testing.T) {
 	} else if _, ok := err.(usageErr); !ok {
 		t.Errorf("forget with no name: %v is not a usage error", err)
 	}
-	if err := forgetCommand([]string{"pix"}); err == nil || !strings.Contains(err.Error(), "only part of") {
+	if err := forgetCommand([]string{"pix"}); err == nil || !strings.Contains(err.Error(), "only partly matches") {
 		t.Errorf("forget pix: %v, want a refusal", err)
 	}
 	if recs, _ := store.All(); len(recs) != 1 {
