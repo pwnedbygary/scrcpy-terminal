@@ -7,6 +7,70 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 47: device text cleaned in the last places)
+
+- Device text reaches the terminal cleaned in the command line's last
+  places, each through `cleanText`: the names in `Store.Find`'s error when
+  a `--peer` or `scterm forget` query means several devices; the `--peer`
+  chooser; `scterm pair`'s chooser (names from the search, which anyone on
+  the network can answer), its two prompts, `nearbyFailure` (the name, a
+  refusal's words, any other failure's text) and "Paired with NAME"; a
+  refusal of `scterm pair "HOST:PORT CODE"`; `scterm forget`'s question,
+  "Kept NAME." and "Forgot NAME."; and what adb writes to stderr, in
+  `adbRunner.run`'s errors, now on one line (the "adb reverse unavailable
+  (...)" line no longer breaks, and an error no longer ends in a line
+  break). Text without control or format characters reads as before, but
+  runs of spaces fold into one and spaces at either end go.
+- Names are stored, and matched, as the device gave them: `--peer` and
+  `scterm forget` take the whole stored name, and "Connect with: scterm
+  --peer %q" and forget's "is only part of" refusal quote it as stored
+  (`%q` escapes control and format characters).
+- `cleanText` everywhere: it also takes out format characters (bidi
+  overrides that reorder the row, zero-width characters) and keeps adb's
+  lines apart; `cleanPeerText` deletes control characters and trims the
+  ends (it does not clip), so a format character passes and adb's lines run
+  together. Its sites (`scterm peers`, `--peer` failures, doctor) are as
+  they were.
+- `Store.Find` returns `*peer.AmbiguousError` (the query and the matches)
+  when a query means several devices, worded as before; `findPeer`
+  (peernearby.go) cleans each name in a copy. Cleaning the whole message
+  left a space before a comma after a name ending in a control or format
+  character, and folded spaces in the quoted query. The peer package does
+  no cleaning.
+- `nearbyFailure` says "NAME declined" for a refusal whose words clean to
+  nothing; it and `pairCommand` no longer wrap the cause (`%w`), which no
+  caller unwraps. `invitationSearch` (peernearby.go) holds
+  `peer.DiscoverNearby`, so tests stay off the network.
+- Tests: devicetext_test.go (new) has `TestSeveralMatchesListCleanNames`,
+  `TestPeerChooserCleansTheNames`, `TestForgetCleansTheName`,
+  `TestNearbyFailureCleansWhatTheDeviceSaid`,
+  `TestPairNearbyCleansWhatTheDevicesSay` (a faked search, a loopback
+  target speaking the nearby protocol),
+  `TestPairByInvitationCleansWhatTheDeviceSays` and
+  `TestADBFailureCleansWhatADBSaid` (a fake adb); peer_test.go has
+  `TestStoreFindHandsBackSeveralMatches`. Inputs hold OSC and CSI
+  sequences, a C1 CSI, BEL, CR, a right-to-left override, an isolate,
+  zero-width and soft-hyphen characters, and a lone 0x9b byte.
+- Verification (builder's tree, base `afe9ebe`, iso.env, bwrap, go1.27.1):
+  gofmt, vet, build and `git diff --check` clean. `go test -count=1 -v
+  ./...`: 488 pass, 3 skip, 0 fail (base 480, 3, 0; +8 new); `-race`: the
+  same, no race. The 8 new and 19 related tests under `-race`: 27/27; the
+  new tests x20: 160/160, under `-race` 160/160. On the base files
+  (peernearby.go with only `invitationSearch` added) the 7 new main tests
+  fail; the peer test does not build. Mutants: 30 of 30 killed.
+- Left alone: `cleanPeerText` lets format characters through (`scterm
+  peers`, `--peer` failures, doctor), and `peers --check` stores the name
+  it probes that way; `adb devices` serials (a USB device's comes from the
+  device) reach `pickDevice`'s errors raw, where a serial is also shown to
+  be typed back; a name that cleans to nothing leaves "Waiting for  to
+  accept…" and the like without a name; the `--peer %q` hint is in double
+  quotes, where a shell expands `$`.
+- Not run: a real terminal, adb, phone, peer target, Android app or
+  multicast search; the node suites (web/ untouched).
+- Intake: the worktree's copies of the six files were this part's base
+  (`afe9ebe`), so they were taken as built, byte for byte. Part 48, taken
+  in first and landing first, changes none of them.
+
 ## Update (2026-10-21: QoL overhaul, part 48: the scrcpy server's licence comes with every release)
 
 - scterm is MIT and bundles the scrcpy server, under the Apache License

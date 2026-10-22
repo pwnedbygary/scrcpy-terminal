@@ -290,6 +290,32 @@ func TestStoreFind(t *testing.T) {
 	}
 }
 
+// TestStoreFindHandsBackSeveralMatches: a query that means several targets
+// fails with an *AmbiguousError holding them, worded with their names as
+// stored.
+func TestStoreFindHandsBackSeveralMatches(t *testing.T) {
+	s := OpenStore(t.TempDir())
+	for _, r := range []Record{
+		{Fingerprint: strings.Repeat("ab", 32), Name: "Pixel 8", Host: "10.0.0.2", Port: DefaultPort},
+		{Fingerprint: strings.Repeat("cd", 32), Name: "Pixel\x07 9", Host: "10.0.0.3", Port: DefaultPort},
+	} {
+		if err := s.Put(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for query, want := range map[string]string{
+		"":       "2 devices are paired (Pixel 8, Pixel\x07 9); name one",
+		"  ":     "2 devices are paired (Pixel 8, Pixel\x07 9); name one",
+		" pixel": `" pixel" matches Pixel 8, Pixel` + "\x07" + ` 9; give more of the name`,
+	} {
+		_, err := s.Find(query)
+		var several *AmbiguousError
+		if !errors.As(err, &several) || len(several.Matches) != 2 || several.Query != query || err.Error() != want {
+			t.Errorf("Find(%q): %q\nwant %q, holding both", query, err, want)
+		}
+	}
+}
+
 // fakeTarget is a minimal target: enough protocol to exercise the client's
 // TLS pinning, handshake and control-channel demultiplexing.
 type fakeTarget struct {

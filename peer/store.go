@@ -138,7 +138,8 @@ func startsNameOrWord(name, q string) bool {
 	return false
 }
 
-// Find is Matches narrowed to exactly one target.
+// Find is Matches narrowed to exactly one target; when the query means
+// several, the error is an *AmbiguousError.
 func (s *Store) Find(query string) (Record, error) {
 	hits, err := s.Matches(query)
 	if err != nil {
@@ -148,15 +149,27 @@ func (s *Store) Find(query string) (Record, error) {
 	switch {
 	case len(hits) == 1:
 		return hits[0], nil
-	case len(hits) > 1 && q == "":
-		return Record{}, fmt.Errorf("%d devices are paired (%s); name one", len(hits), Names(hits))
 	case len(hits) > 1:
-		return Record{}, fmt.Errorf("%q matches %s; give more of the name", query, Names(hits))
+		return Record{}, &AmbiguousError{Query: query, Matches: hits}
 	case q == "":
 		return Record{}, errors.New("no paired devices yet: pair one first")
 	default:
 		return Record{}, fmt.Errorf("no paired device matches %q", query)
 	}
+}
+
+// AmbiguousError is Find's error when the query means more than one target:
+// Matches holds them, and the message lists their names as stored.
+type AmbiguousError struct {
+	Query   string
+	Matches []Record
+}
+
+func (e *AmbiguousError) Error() string {
+	if strings.TrimSpace(e.Query) == "" {
+		return fmt.Sprintf("%d devices are paired (%s); name one", len(e.Matches), Names(e.Matches))
+	}
+	return fmt.Sprintf("%q matches %s; give more of the name", e.Query, Names(e.Matches))
 }
 
 // Names lists records' names for messages: "Pixel, Tablet".

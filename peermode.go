@@ -119,7 +119,7 @@ func pairCommand(args []string) error {
 	}
 	res, err := client.Pair(inv, 0)
 	if err != nil {
-		return fmt.Errorf("pairing with %s: %w", inv.Address(), err)
+		return fmt.Errorf("pairing with %s: %s", inv.Address(), cleanText(err.Error())) // a refusal carries the device's words
 	}
 	name := res.Device.Name
 	if name == "" {
@@ -133,8 +133,11 @@ func pairCommand(args []string) error {
 	return nil
 }
 
+// reportPaired says what was paired. The name is the device's own text: the
+// sentence shows it cleaned, and the command quotes it as stored, which is
+// what --peer matches (%q escapes control and format characters).
 func reportPaired(client *peer.Client, name string, fp peer.Fingerprint, grants []string) {
-	fmt.Printf("Paired with %s (%s); it allows this computer to %s.\n", name, fp.Short(), describeGrants(grants))
+	fmt.Printf("Paired with %s (%s); it allows this computer to %s.\n", cleanText(name), fp.Short(), describeGrants(grants))
 	fmt.Printf("This computer is %s. Connect with: scterm --peer %q\n", client.Identity.Fingerprint.Short(), name)
 }
 
@@ -169,27 +172,30 @@ func forgetCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	rec, err := store.Find(query)
+	rec, err := findPeer(store, query)
 	if err != nil {
 		return err
 	}
+	name := cleanText(rec.Name)
 	if !namesExactly(rec, query) {
 		if !interactive() {
+			// The whole name as stored is what to type, so it is quoted (%q
+			// escapes control and format characters), not cleaned.
 			return fmt.Errorf("%q is only part of %q: give the whole name to forget it", query, rec.Name)
 		}
-		answer, err := ask(fmt.Sprintf("Forget %s? [y/N] ", rec.Name))
+		answer, err := ask(fmt.Sprintf("Forget %s? [y/N] ", name))
 		if err != nil {
 			return err
 		}
 		if a := strings.ToLower(answer); a != "y" && a != "yes" {
-			fmt.Printf("Kept %s.\n", rec.Name)
+			fmt.Printf("Kept %s.\n", name)
 			return nil
 		}
 	}
 	if _, err := store.Remove(rec.Fingerprint); err != nil {
 		return err
 	}
-	fmt.Printf("Forgot %s. Its own list still names this computer until it is removed there.\n", rec.Name)
+	fmt.Printf("Forgot %s. Its own list still names this computer until it is removed there.\n", name)
 	return nil
 }
 

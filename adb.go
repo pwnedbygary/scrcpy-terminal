@@ -40,6 +40,9 @@ func (a *adbRunner) cmd(args ...string) *exec.Cmd {
 	return exec.Command("adb", args...)
 }
 
+// run runs adb and returns its output. When adb fails, the error carries
+// what it wrote to stderr, which can come from the device and is printed as
+// it is, so it is cleaned to one line.
 func (a *adbRunner) run(args ...string) ([]byte, error) {
 	cmd := a.cmd(args...)
 	var out, errb bytes.Buffer
@@ -49,7 +52,7 @@ func (a *adbRunner) run(args ...string) ([]byte, error) {
 		if errors.Is(err, exec.ErrNotFound) {
 			return out.Bytes(), errADBNotFound
 		}
-		return out.Bytes(), fmt.Errorf("adb %s: %v: %s", strings.Join(args, " "), err, errb.String())
+		return out.Bytes(), fmt.Errorf("adb %s: %v: %s", strings.Join(args, " "), err, cleanText(errb.String()))
 	}
 	return out.Bytes(), nil
 }

@@ -18,8 +18,14 @@ import (
 // nearbySearch is how long `scterm pair` keeps looking for an inviting device.
 const nearbySearch = 30 * time.Second
 
+// invitationSearch finds devices inviting on this network; a variable so
+// tests stay off the network.
+var invitationSearch peerDiscovery = peer.DiscoverNearby
+
 // pairNearbyCommand pairs with a device inviting on this network: both
-// screens show a six-digit code, and both users confirm it.
+// screens show a six-digit code, and both users confirm it. The names are
+// the devices' own text: they are cleaned where they are shown, and stored
+// as the device gave them.
 func pairNearbyCommand() error {
 	client, store, err := openPeerClient()
 	if err != nil {
@@ -34,7 +40,7 @@ func pairNearbyCommand() error {
 	if len(devices) > 1 {
 		labels := make([]string, len(devices))
 		for i, n := range devices {
-			labels[i] = fmt.Sprintf("%s (%s)", n.Name, net.JoinHostPort(n.Host, strconv.Itoa(n.Port)))
+			labels[i] = fmt.Sprintf("%s (%s)", cleanText(n.Name), net.JoinHostPort(n.Host, strconv.Itoa(n.Port)))
 		}
 		i, err := choose("Pair with which device?", labels)
 		if err != nil {
@@ -50,7 +56,7 @@ func pairNearbyCommand() error {
 	if name == "" {
 		name = d.Name
 	}
-	fmt.Fprintf(os.Stderr, "\n    %s\n\nCheck that %s shows the same code, then accept there too.\n", peer.DisplayCode(p.Code), name)
+	fmt.Fprintf(os.Stderr, "\n    %s\n\nCheck that %s shows the same code, then accept there too.\n", peer.DisplayCode(p.Code), cleanText(name))
 	answer := make(chan string, 1)
 	go func() {
 		a, _ := ask("Does it match? [y/N] ")
@@ -68,7 +74,7 @@ func pairNearbyCommand() error {
 		}
 	}
 	p.Confirm() // if this fails, the result says why
-	fmt.Printf("Waiting for %s to accept…\n", name)
+	fmt.Printf("Waiting for %s to accept…\n", cleanText(name))
 	r := <-p.Result()
 	if r.Err != nil {
 		return nearbyFailure(name, r.Err)
@@ -88,7 +94,7 @@ func pairNearbyCommand() error {
 func findNearby() ([]peer.NearbyDevice, error) {
 	deadline := time.Now().Add(nearbySearch)
 	for hinted := false; ; {
-		devices, err := peer.DiscoverNearby(context.Background(), 3*time.Second)
+		devices, err := invitationSearch(context.Background(), 3*time.Second)
 		if err != nil || len(devices) > 0 {
 			return devices, err
 		}
@@ -103,13 +109,15 @@ func findNearby() ([]peer.NearbyDevice, error) {
 }
 
 // nearbyFailure words a failed nearby pairing for the person at this terminal.
+// The name and the refusal are the device's own text, so they are cleaned.
 func nearbyFailure(name string, err error) error {
+	name = cleanText(name)
 	var rej *peer.RejectError
 	switch {
 	case errors.Is(err, peer.ErrPairingCancelled):
 		return errors.New("pairing cancelled")
-	case errors.As(err, &rej) && rej.Code == peer.RejectDeclined && rej.Message != "":
-		return fmt.Errorf("not paired: %s", rej.Message)
+	case errors.As(err, &rej) && rej.Code == peer.RejectDeclined && cleanText(rej.Message) != "":
+		return fmt.Errorf("not paired: %s", cleanText(rej.Message))
 	case errors.As(err, &rej) && rej.Code == peer.RejectDeclined:
 		return fmt.Errorf("not paired: %s declined", name)
 	case errors.As(err, &rej) && rej.Code == "no_invitation":
@@ -119,7 +127,7 @@ func nearbyFailure(name string, err error) error {
 	case errors.As(err, &rej) && rej.Code == "bad_proof":
 		return fmt.Errorf("%s did not follow the pairing protocol, so nothing was paired", name)
 	default:
-		return fmt.Errorf("pairing with %s: %w", name, err)
+		return fmt.Errorf("pairing with %s: %s", name, cleanText(err.Error()))
 	}
 }
 
@@ -133,7 +141,7 @@ func pickPeer(store *peer.Store, query string) (peer.Record, error) {
 	if len(hits) > 1 && interactive() {
 		labels := make([]string, len(hits))
 		for i, r := range hits {
-			labels[i] = fmt.Sprintf("%s (%s)", r.Name, net.JoinHostPort(r.Host, strconv.Itoa(r.Port)))
+			labels[i] = fmt.Sprintf("%s (%s)", cleanText(r.Name), net.JoinHostPort(r.Host, strconv.Itoa(r.Port)))
 		}
 		i, err := choose("Connect to which device?", labels)
 		if err != nil {
@@ -141,7 +149,25 @@ func pickPeer(store *peer.Store, query string) (peer.Record, error) {
 		}
 		return hits[i], nil
 	}
-	return store.Find(query) // the one match, or why there is none
+	return findPeer(store, query) // the one match, or why there is none
+}
+
+// findPeer is store.Find for the terminal: when the query means several
+// devices, the error lists their names, which are the devices' own text, so
+// each is cleaned.
+func findPeer(store *peer.Store, query string) (peer.Record, error) {
+	rec, err := store.Find(query)
+	var several *peer.AmbiguousError
+	if errors.As(err, &several) {
+		shown := *several
+		shown.Matches = make([]peer.Record, len(several.Matches))
+		for i, r := range several.Matches {
+			r.Name = cleanText(r.Name)
+			shown.Matches[i] = r
+		}
+		return rec, &shown
+	}
+	return rec, err
 }
 
 var terminalInput = bufio.NewReader(os.Stdin)
