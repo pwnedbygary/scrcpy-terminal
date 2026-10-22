@@ -584,8 +584,8 @@ Without `-s`, scterm uses `ANDROID_SERIAL` when it is set.
 | `--audio-dup` | — | Keep playing the sound on the device (see below) |
 
 `--audio-source output` records everything the device plays, and mutes the device while scterm
-runs. `playback` (Android 13 and later) records what apps play; apps can opt out, and with the
-bundled server, game sound is not recorded. `mic` records the microphone. scrcpy's other
+runs. `playback` (Android 13 and later) records what apps play, game sound included; apps can
+opt out. `mic` records the microphone. scrcpy's other
 sources also work: `mic-unprocessed`, `mic-camcorder`, `mic-voice-recognition`,
 `mic-voice-communication`, `voice-call`, `voice-call-uplink`, `voice-call-downlink` and
 `voice-performance`.
@@ -730,9 +730,11 @@ has the details.
 
 scterm uses the protocol of [scrcpy](https://github.com/Genymobile/scrcpy), by Genymobile and
 its contributors, and bundles the scrcpy v4.1 server, which is licensed under the Apache
-License 2.0 ([third_party/LICENSE.scrcpy](third_party/LICENSE.scrcpy)). The server's source is
-in [third_party/scrcpy-server-src](third_party/scrcpy-server-src). scterm decodes video and
-sound with the [FFmpeg](https://ffmpeg.org/) libraries and plays sound through PulseAudio.
+License 2.0 ([third_party/LICENSE.scrcpy](third_party/LICENSE.scrcpy)). scterm builds the server
+from its source in [third_party/scrcpy-server-src](third_party/scrcpy-server-src), with one
+change: playback capture also records the sound of games and of apps that do not say what they
+play, not only media. scterm decodes video and sound with the [FFmpeg](https://ffmpeg.org/)
+libraries and plays sound through PulseAudio.
 
 ## License
 

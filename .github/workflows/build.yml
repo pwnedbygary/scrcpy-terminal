@@ -69,6 +69,13 @@ jobs:
           :protocol:test :peer:test :app:testDebugUnitTest
           :app:lintDebug :app:assembleDebug :peerctl:assemble
 
+      # The scrcpy server that the Linux binary embeds must be what the vendored
+      # source builds to, with the toolchain that its provenance file names.
+      - name: Rebuild the embedded scrcpy server and compare
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;36.0.0" "platforms;android-37.0"
+          ../third_party/build-scrcpy-server.sh --check
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
         with:

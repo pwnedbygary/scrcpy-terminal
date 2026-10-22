@@ -9,7 +9,9 @@ and its contributors, which is licensed under the Apache License 2.0:
 - [scrcpy-server-src](scrcpy-server-src) is the server's source. The Android app compiles it into
   its full-control helper (the module [android/scrcpy-server](../android/scrcpy-server)).
 - `scrcpy-server.jar.d/scrcpy-server` is the server that the Linux binary embeds and copies to
-  the device in adb mode.
+  the device in adb mode. [build-scrcpy-server.sh](build-scrcpy-server.sh) builds it from that
+  source, with the changes below, and `scrcpy-server.jar.d/scrcpy-server.provenance` records
+  how.
 
 The APK carries a copy of `LICENSE.scrcpy` in `android/app/src/main/assets`: when the file
 changes, copy it there too (`TestAppCarriesTheLicenses` checks that the two are the same).

@@ -18,6 +18,29 @@ A build from source reports its version as `dev`. Release builds stamp the versi
 go build -trimpath -ldflags "-s -w -X main.version=2.1.0" -o scterm .
 ```
 
+### The scrcpy server
+
+The binary embeds the scrcpy server that adb mode copies to the device,
+`third_party/scrcpy-server.jar.d/scrcpy-server`. `third_party/build-scrcpy-server.sh` builds it
+from `third_party/scrcpy-server-src`, the source that the Android app builds its helper from:
+scrcpy 4.1 with one change of scterm's, in `AudioPlaybackCapture.java`. After a change to that
+source, rebuild the server and commit the jar with `scrcpy-server.provenance`, which the script
+writes next to it: the jar's SHA-256, the source's git tree hash, the version name and the
+toolchain.
+
+```sh
+ANDROID_HOME=/path/to/sdk third_party/build-scrcpy-server.sh
+```
+
+The script needs git, the JDK 17 `javac` and `jar` (another JDK version builds a different jar),
+and an Android SDK with platform android-37.0 and build-tools 36.0.0; it uses no network. The
+build is reproducible: with `--check`, the script builds the server again and fails unless the
+result is the embedded jar, byte for byte, and the provenance records its SHA-256, the source's
+tree hash and the script's version name. CI's android job runs that check. `go test` checks that
+the embedded jar and the source are the ones the provenance names, so it fails after a change to
+the source until the server is rebuilt, and that the provenance's version name is the script's
+and the one scterm passes the server.
+
 ## Checks
 
 CI runs `go vet ./...` and `go test ./...` on every push to `main` and every pull request

@@ -338,8 +338,8 @@ func (a *adbRunner) forwardRemove(port uint16) error {
 // The server rejects mismatched versions, so we must pass exactly what the
 // jar was built for.
 func (a *adbRunner) serverVersion() string {
-	// The system scrcpy-server at /usr/share/scrcpy is v4.1; the client must
-	// pass the same version string.
+	// The embedded server is scrcpy 4.1, built from third_party/scrcpy-server-src
+	// with VERSION_NAME 4.1 (third_party/build-scrcpy-server.sh).
 	return "4.1"
 }
 

@@ -12,8 +12,10 @@ and when you start it by hand. It has three jobs:
   `go vet ./...` and `go test ./...`, and builds a stripped binary, uploaded as the artifact
   `scterm-linux-x86_64`.
 - **android**: runs the Android unit tests and lint, builds the debug APK and `peerctl`, and
-  uploads the debug APK as `scterm-android-debug`. For a tag or a manual run, it also builds the
-  signed release APK and uploads it as `scterm-android-release`.
+  uploads the debug APK as `scterm-android-debug`. It rebuilds the scrcpy server that the binary
+  embeds, and fails unless the result is the embedded jar (see
+  [DEVELOPMENT.md](DEVELOPMENT.md#the-scrcpy-server)). For a tag or a manual run, it also builds
+  the signed release APK and uploads it as `scterm-android-release`.
 - **release**, for a tag or a manual run: builds the release binary with the version stamped
   into it and fetches the signed APK. For a tag only, it publishes a GitHub release named
   `scterm vX.Y.Z`, with the tagged commit's message as its notes. It attaches `scterm`,

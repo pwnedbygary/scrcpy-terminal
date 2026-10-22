@@ -1,0 +1,12 @@
+# The scrcpy server that scterm embeds (scrcpy-server, next to this file),
+# built from third_party/scrcpy-server-src by third_party/build-scrcpy-server.sh,
+# which wrote this file. To check that the jar is what the source builds to:
+#     ANDROID_HOME=/path/to/sdk third_party/build-scrcpy-server.sh --check
+sha256: aa2dc6a2ceabd5172dca6401171b15f7afb73ef6129998262b7450ccd92a743a
+source tree: fedb1c82e7501f5efa8aa7f2056314701e769d1a
+version name: 4.1
+javac: javac 17.0.20.1, -source 1.8 -target 1.8
+platform: android-37.0, Pkg.Revision=2, android.jar sha256 bf1b4387cc7ca94fc6ef684f040d9d16fbf16248e181819f020736ea2053f177
+build-tools: 36.0.0, D8 8.10.9-dev (build a7ad18a70460b799d0482e497c109a75bf7f91de from go/r8bot (luci-r8-custom-ci-archive-0-mt8s)), d8.jar sha256 4097ff9c46c185c6e7214da7fe9b1befb5adeea5cc9ca349270e0249904f9240
+d8: --release --min-api 21 --lib android.jar
+command: ANDROID_PLATFORM=37.0 ANDROID_BUILD_TOOLS=36.0.0 third_party/build-scrcpy-server.sh

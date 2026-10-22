@@ -7,6 +7,270 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 49: adb mode runs the scrcpy server built from the vendored source)
+
+- The Linux binary embedded the official scrcpy 4.1 server (733706 bytes,
+  sha256 `deacb991…`), so adb mode lacked the vendored source's one local
+  patch (`afcd41b`: playback capture also matches `USAGE_GAME` and
+  `USAGE_UNKNOWN`), which the Android app's helper compiles in. The owner
+  chose to rebuild the jar from the patched source.
+- New `third_party/build-scrcpy-server.sh` builds the server offline from
+  `third_party/scrcpy-server-src` (git, JDK 17 `javac` and `jar`, platform
+  android-37.0, build-tools 36.0.0) and writes
+  `third_party/scrcpy-server.jar.d/scrcpy-server.provenance` next to the
+  jar: its sha256, the source's git tree hash, the version name, the
+  toolchain and the command. `--check` builds again in a temporary
+  directory and fails unless the result is the embedded jar, byte for byte.
+- It follows the source's `build_without_gradle.sh` (aidl, javac, d8),
+  changed thus. Platform android-37.0, as the helper; android-34 fails (4
+  errors, first `VANILLA_ICE_CREAM`), android-36 is not installed. javac
+  also compiles the aidl output that no source imports
+  (`IOnPrimaryClipChangedListener`), as Gradle does. d8 `--release
+  --min-api 21 --lib android.jar`, as the Gradle release build: with that
+  script's `--classpath`, d8 gives the server's lambdas methods that
+  forward to `java/util/Comparator$-CC` and `Predicate$-CC`, which no
+  device has. The jar stores classes.dex with a fixed date and no
+  manifest, so its bytes depend on the dex only (not the JDK's zlib), and
+  zipalign puts it on 4 bytes, so ART can map it in place.
+- The new jar: 215087 bytes, sha256 `aa2dc6a2…`; classes.dex 214956 bytes,
+  DEX 035, 160 classes; source tree `fedb1c82…`; javac 17.0.20.1, d8
+  8.10.9-dev. `AudioPlaybackCapture.java` gained a notice at its top that
+  scterm changed it (2026-09-24, `afcd41b`, and what), built after.
+  `VERSION_NAME` stays 4.1: `Options.parse` compares it with what
+  `serverVersion` passes, and the patch keeps the protocol.
+- Against the official jar: 1083 of its 1246 classes are the Kotlin stdlib
+  and annotations (AGP 9.1.0's built-in Kotlin; the source has none). Of
+  the other 163, the new jar lacks `R` (unused) and 17 that compilers made
+  (12 lambda classes numbered otherwise, 3 `-IA`, an API outline, a
+  try-with-resources helper) and has 15 of its own (12 lambda classes, 3
+  `$1`). Of the 145 common classes, 132 declare the same members;
+  `BuildConfig` lacks 3 unused AGP fields; in 11, members the compilers
+  made differ (accessors named `access$NNN` against `-$$Nest$...`,
+  synthetic package-private constructors taking `$1` in place of `-IA`,
+  or both); and the name `AudioEncoder$$ExternalSyntheticLambda2` stands
+  for another lambda. The server code's 580 framework and Java references
+  are all among the official's 592 (the 12 others are in that helper). Left
+  out: AndroidManifest.xml, resources.arsc, META-INF, kotlin_builtins.
+- The patch is in the new jar only: its `createAudioRecord` has 2 `setUsage`
+  call sites and 12 `Method.invoke` calls (the official 1 and 11), with an
+  int array {14, 0} (`USAGE_GAME`, `USAGE_UNKNOWN`) looped over with
+  `addMixRule` (dexdump; javap before d8 agrees).
+- New tests (`server_jar_test.go`): `TestEmbeddedServerIsTheBuiltOne`
+  (sha256 of the embedded bytes), `TestServerSourceIsTheBuiltOne` (the
+  source's git tree hash, computed in Go), `TestServerVersionIsTheBuiltOne`
+  (`serverVersion()` against the provenance) and `TestGitTreeHash` (the
+  helper against `git write-tree`). CI's android job runs `--check` after
+  installing build-tools 36.0.0 and android-37.0 with sdkmanager.
+- Docs: README Credits say scterm builds the server from its source with
+  one change; the `--audio-source` paragraph no longer says the bundled
+  server leaves out game sound; `docs/DEVELOPMENT.md` gains "The scrcpy
+  server" (rebuild and check); `docs/RELEASING.md` names the CI check;
+  `adb.go`'s `serverVersion` comment no longer speaks of a system jar.
+- Checks by the builder (on `afe9ebe`; go1.27.1, `iso.env`, bwrap): three
+  clean builds (in the clone; from /tmp with `TZ=Asia/Tokyo`; in a copy at
+  a path with a space), and `--check` on BASE plus the diff, give the same
+  jar and provenance; d8 gives the same dex with 1 thread and in reverse
+  input order; javac 17.0.20.1 twice gives the same 125 class files (javac
+  8 and 27 give other dex). gofmt, vet and build clean; `go test ./...` 484
+  passed, 3 skipped, 0 failed (the base 480, 3, 0: the 4 new tests); the
+  new tests 80/80 under `-race -count=20`; the binary holds the new jar,
+  not the old. On the base's jar, its Java file, or both without the
+  provenance, the new tests fail; each of 8 Go mutants fails a test; 8
+  recipe mutants each make `--check` fail, and without `--date` two builds
+  differ.
+- Left alone: `android/README.md` (it does not say adb mode differs); the
+  vendored `build_without_gradle.sh` and its `--classpath` problem;
+  `docs/ARCHITECTURE.md` (still right); upstream's
+  `voiceCommunicationCaptureAllowed(true)`, called on the rule builder
+  after `build()`; part 48's list of local modifications.
+- Not run: the CI step (Temurin 17's javac may compile differently from
+  17.0.20.1, failing the android job, which the release job needs;
+  sdkmanager's path on ubuntu-26.04); the new jar on any device (round 3
+  ran it on the test phone: the "On a device" bullet below); Android 5 to
+  12; the node suites alone (`web/` untouched).
+- Intake: `README.md`, `docs/RELEASING.md` and `build.yml` were merged three
+  ways with part 48's changes, and `adb.go` with part 47's; each merge adds
+  exactly this part's changed lines. The other files were taken as built,
+  byte for byte. Intake also adds one sentence to the first section of
+  part 48's `third_party/README.md` (its list of local modifications is
+  unchanged): `build-scrcpy-server.sh` builds the embedded jar from that
+  source, with the changes listed, and the provenance file records how.
+- Review round 1 (PASS), with one LOW and one NIT. LOW: `--check` did not
+  compare the provenance's version name with the script's `VERSION_NAME`,
+  so a hand edit that set both `serverVersion` and the provenance to 4.2
+  kept every guard green, while every adb session would fail the server's
+  version check (`Options.parse`). NIT: the 145 common classes match in
+  their declared members only (corrected above). The review rebuilt the
+  jar byte for byte, also with JetBrains' JDK 17.0.14 (JDK 25 builds other
+  bytes), and in the dex found only the patch changed: 677 strings the
+  same, 835 of 842 methods with the same lines. It asked for a run on a
+  device before landing: the version check, no class or method missing or
+  failing to verify, video and control, Alt+Q, and on Android 13 or later
+  playback capture with media and game sound (`dumpsys audio` listing the
+  MEDIA, GAME and UNKNOWN usage rules); and on a device with Android 5 to
+  11, if one is at hand, a start, video and control with no "Rejecting
+  class" in its log, as the new jar has no API outline class, so those
+  versions check such calls when they run.
+- Round 2 changes the build script and `docs/DEVELOPMENT.md`; the jar, the
+  provenance, the Go test and `adb.go` are round 1's. `--check` also fails
+  unless the provenance's `version name` is the script's `VERSION_NAME`,
+  which `server_jar_test.go` reads as the jar's; the build stops when d8
+  writes anything but `classes.dex`; DEVELOPMENT.md says another JDK
+  version builds a different jar.
+- Verification, round 2 (`/tmp/opencode/dev-49b/verify2.sh`, offline in
+  the sandbox): the jar, the provenance, `server_jar_test.go` and `adb.go`
+  are round 1's; `--check` passes; the four guard tests pass. With the
+  provenance and `serverVersion` both 4.2, round 2's `--check` fails and
+  round 1's passes (the gap); a script that leaves a `classes2.dex` after
+  d8 stops with "d8 wrote more than classes.dex".
+- Intake, round 2: after round 1 the part was taken out of the worktree
+  (it lands last, after a run on a device), and it is taken in again on
+  top of parts 44 and 46, where round 1 sat on part 45. `README.md` was
+  merged three ways with the changes of parts 48, 44 and 46,
+  `docs/RELEASING.md` and `build.yml` with part 48's, and `adb.go` with
+  part 47's; each merge adds exactly this part's changed lines, and the
+  last three give round 1's files. The other files were taken as built,
+  byte for byte; the sentence in `third_party/README.md` is round 1's.
+- Verification, snapshot round 2 (`/tmp/opencode/review-49b`, on part 46's
+  first round; go1.27.1, iso.env, every Go command in the bwrap sandbox):
+  gofmt, vet and build clean; `go test ./...` 506 passed, 3 skipped, 0
+  failed; the 14 related tests under `-race -count=3`; the 4 guard tests
+  20 times and 5 times under `-race`. `--check` on the snapshot's tree
+  finds the embedded jar to be what the source builds to, offline, and
+  leaves the tree and its git objects as they were. On copies: the base's
+  jar, its Java file, or both without the provenance, and each of the 8
+  Go mutations, fail a guard test; each of the script's 8 mutations makes
+  `--check` fail; two builds without `--date` differ; with the provenance
+  and `serverVersion` both 4.2, `TestServerVersionIsTheBuiltOne` passes
+  and `--check` fails (round 1's script passes it, the gap); a
+  `classes2.dex` after d8 stops the build. Docs: 4 files, 50 relative
+  links, no problem; the docs tests pass. In the decoy sandbox the tests
+  made no connection, and the positive control two. `git diff --check`
+  and the hashes agree. The checks ran on a first build, kept as
+  review-49b.checked; the rebuild with this bullet changed only the
+  handoff.
+- Review round 2 (PASS), with one LOW and three NITs. LOW: the sentence
+  round 2 corrected still miscounted: of the 145 common classes, 13
+  differ, not 4 (corrected above). NITs: the d8 guard
+  (`find . -type f ! -name classes.dex`) let a `classes.dex` in a
+  subdirectory, or a symlink named `classes2.dex`, through (d8 writes
+  neither); `--check`'s FAILED line said the jar differed when only the
+  version name did; this entry's account of round 1's device request left
+  out failing verification and the Android 5 to 11 run (corrected above).
+  Of the provenance variants the review tried, none passes both the Go
+  guards and round 2's `--check` while the jar and `serverVersion`
+  disagree. Not taken: pinning Temurin's patch level in CI, as `--check`
+  already fails if another JDK builds other bytes.
+- Round 3 changes the build script, `server_jar_test.go`,
+  `docs/DEVELOPMENT.md` and this entry; the jar, the provenance, `adb.go`
+  and the Java file are round 1's. The build stops when d8 leaves
+  anything but `classes.dex` in its output
+  (`find . -mindepth 1 ! -path ./classes.dex`); `--check`'s FAILED line
+  names what differs (the embedded jar, the recorded sha256, the recorded
+  source tree, the recorded version name);
+  `TestServerScriptVersionIsTheRecordedOne` fails unless exactly one of
+  the script's lines starts with `VERSION_NAME=`, with the provenance's
+  version name after it, and needs no Android SDK (it reads no other form:
+  a second assignment written otherwise, indented or after `export`, goes
+  unseen, though `--check` catches the jar it builds, and a comment or a
+  space after the value fails the test);
+  `docs/DEVELOPMENT.md` says the provenance records the version name, and
+  what `--check` and `go test` compare.
+- On a device (the owner's test phone, a nubia NX769J with Android 16,
+  over wireless adb, through a guard that refuses any call not aimed at
+  it; a binary built from the worktree with parts 46 and 49, sha256
+  18a0a9dc..., whose code is what lands: later rounds changed only a test
+  comment and handoff text): six sessions with this server, each past the
+  version check and ending cleanly. Two runs of
+  `--no-tui --audio-source=playback` each gave 576x1280 frames (their
+  statistics lines read 13, 45, 19, 12 and 11 fps, then 12, 25, 12, 15
+  and 13) and 1871 KB of PCM in 12 s, all digital silence (`peak=0` in
+  every line), as nothing played on the phone; one scterm stream on the
+  sound server while each ran and none after. Meanwhile `dumpsys audio`
+  listed the server's capture policy, registered by the shell user, with
+  three rules: `match usage` USAGE_UNKNOWN, USAGE_MEDIA and USAGE_GAME
+  (the official source adds MEDIA alone). In the terminal display with
+  the default source, Alt+N opened the notification shade and Alt+C
+  closed it. With `--audio-source=playback`, Alt+N opened no shade, with
+  the official server too (the same binary with the official jar), while
+  `cmd statusbar expand-notifications` opened it at once (read live, not
+  saved): older than this part, left alone. The phone's log stopped
+  recording on 10-12, and scterm shows the server's own output only when
+  the server stops before connecting, so classes missing or failing to
+  verify could be looked for in neither; the code the patch changes ran,
+  as its rules registered. No scrcpy file, process or reverse tunnel was
+  left on the phone; a read-only probe afterwards saved that, the log's
+  newest line (from 10-12) and the status bar's disable flags (all 0) in
+  `/tmp/opencode/devtest/results6/probes-readonly.txt`. Not run: Android
+  5 to 11 (no such device), and media or game sound playing during the
+  capture, so the run shows the rules registered and a silent stream
+  flowing, not media or game sound captured.
+- Verification, snapshot round 3 (`/tmp/opencode/review-49c`, on part 46's
+  second round; go1.27.1, iso.env, every Go command and build in the bwrap
+  sandbox): gofmt, vet and build clean; `go test ./...` 507 passed, 3
+  skipped, 0 failed; the 15 related tests under `-race -count=3`; the 5
+  guard tests 20 times and 5 times under `-race`. `--check` on the
+  snapshot's tree finds the embedded jar to be what the source builds to,
+  offline, and leaves the tree and its git objects as they were. On
+  copies: the base's jar, its Java file, or both without the provenance,
+  each of the 8 Go mutations, and the script's version name changed to 4.2
+  or set twice, fail a guard test (the last two only the new one); each of
+  the script's 8 mutations makes `--check` fail; two builds without
+  `--date` differ; with the provenance and `serverVersion` both 4.2,
+  `TestServerVersionIsTheBuiltOne` passes and `--check` fails, naming
+  only the recorded version name (round 1's script passes it); a
+  `classes2.dex`, a `classes.dex` in a subdirectory or a `classes2.dex`
+  symlink after d8 stops the build (round 2's script lets the last two
+  through). Docs: 4 files, 50 relative links, no problem; the docs tests
+  pass. In the decoy sandbox the tests made no connection, and the
+  positive control two. `git diff --check` and the hashes agree. The
+  checks ran before this bullet was written; packing again with it
+  changed only the handoff.
+- Review round 3 (NEEDS CHANGES), on this entry only. MEDIUM: the "On a
+  device" bullet called the capture "1871 KB of sound", where every
+  statistics line had `peak=0`, digital silence, and its "Not run" left
+  out media: the run showed the rules registered and a silent stream, not
+  the media and game sound captured that round 1 asked for. LOW: the
+  round-3 snapshot bullet said the guard tests pass with the provenance
+  and `serverVersion` both 4.2, but the check ran only
+  `TestServerVersionIsTheBuiltOne`, and round 3's new test fails there (so
+  `go test` now catches round 1's gap too); the same sentence in round 2's
+  snapshot bullet is narrowed to that test as well. NITs: the new test's
+  account (it reads only lines that start with `VERSION_NAME=`); "11 to 13
+  fps", the first and last of each run's statistics lines; "private
+  constructors", where those that differ are synthetic package-private
+  ones (all corrected above). The review rebuilt the device binary byte for
+  byte, ran the d8 guard against 21 output layouts (each extra entry stops
+  the build; round 2's guard let 7 through) and 15 real `--check` runs
+  (each names what differs), and recounted the classes with dexdump. Its
+  suggestions, taken: say the server's own output was not visible either;
+  save the one-off probes (the later read-only probe above); point round
+  1's "Not run" bullet to the device bullet; word the test's account by
+  what it reads. Not taken: a Go test reading the version name from the
+  jar's dex, as `--check`, which CI's android job runs, already fails on a
+  jar built with another one.
+- Round 4 changes only this entry, and moves the part onto part 46's third
+  round, which changes none of its files but the handoff; the part's
+  other files are round 3's bytes.
+- Verification, snapshot round 4 (`/tmp/opencode/review-49d`, on part 46's
+  third round; go1.27.1, iso.env, every Go command and build in the bwrap
+  sandbox): the same checks as round 3's, with the same results, and two
+  more on copies. gofmt, vet and build clean; `go test ./...` 507 passed, 3
+  skipped, 0 failed; the 15 related tests under `-race -count=3`; the 5
+  guard tests 20 times and 5 times under `-race`; `--check` OK on the
+  snapshot's tree, which it leaves as it was; the fail-before and mutation
+  runs, the two undated builds and the d8 guard cases as in round 3. New,
+  with all five guard tests: with the provenance and `serverVersion` both
+  4.2, only `TestServerScriptVersionIsTheRecordedOne` fails, and `--check`
+  names only the recorded version name; with the script set to 4.2 too
+  and the jar not rebuilt, all five pass, and `--check` fails, naming the
+  embedded jar and the recorded sha256 (the snapshot's
+  `checks/extra-49-v.txt`, by `/tmp/opencode/check-49-v.sh`). Docs: 4
+  files, 50 relative links, no problem; the docs tests pass. In the decoy
+  sandbox the tests made no connection, and the positive control two.
+  `git diff --check` and the hashes agree. The checks ran before this
+  bullet was written; packing again with it changed only the handoff.
+
 ## Update (2026-10-21: QoL overhaul, part 46: the sound status tells the truth after audio errors)
 
 - The session's sound has one account, `streamState.soundEnd`
