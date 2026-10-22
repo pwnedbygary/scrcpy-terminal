@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -99,7 +100,7 @@ exit 0
 // TestMainSilencesLeftoversOnlyWhenItPlaysHere: main silences the leftover
 // streams of other scterms only when the session plays its sound on this
 // computer: not with --no-audio, nor with --web without --audio-dup, where
-// the browser is the only output. With --no-audio nothing connects to the
+// the browser is the only output. Neither of those connects to the
 // sound server at all. Each case runs main in a child process with a scratch
 // home, a fake adb whose device this test serves through adb forward (as in
 // TestForwardModeAsksTheServerToListen), and a sound server that is a
@@ -133,7 +134,7 @@ func TestMainSilencesLeftoversOnlyWhenItPlaysHere(t *testing.T) {
 	}{
 		{"no-tui", []string{"--no-tui"}, true, true},
 		{"no-tui no-audio", []string{"--no-tui", "--no-audio"}, false, false},
-		{"web", []string{"--web", "--web-port", "0"}, false, true},
+		{"web", []string{"--web", "--web-port", "0"}, false, false},
 		{"web audio-dup", []string{"--web", "--web-port", "0", "--audio-dup"}, true, true},
 		{"web no-audio", []string{"--web", "--web-port", "0", "--no-audio"}, false, false},
 	} {
@@ -292,6 +293,193 @@ func TestSessionWithoutSoundStaysOffTheSoundServer(t *testing.T) {
 	a.shutdown()
 	if accepted.Load() == 0 {
 		t.Error("a session with sound did not connect either: the listeners show nothing")
+	}
+}
+
+// TestBrowserOnlySessionStaysOffTheSoundServer: a session whose only sound
+// output is the browser, with --web or --window and without --audio-dup, does
+// no sound work on this computer. newApp gives it a sink that is never opened
+// and has not failed: nothing connects to the sound server, and pactl never
+// runs, neither to pick a sink nor to follow the desktop's, which a follower
+// would ask every 5 ms here. The browser still gets each sound packet as the
+// device sent it, as the PCM tap does not go through the sink, and is told
+// that the sound is on and that this computer does not play it. The gain op
+// is taken and its volume reported back, and it does not scale the browser's
+// sound. Before, newApp opened a sink that stayed silent: it asked pactl for
+// a sink and connected to the sound server, or waited about 0.45 s for one,
+// and once the sink opened, its follower asked pactl every second. A --peer
+// session whose target sends sound is no different. Each step's counts are
+// its own, and a session that plays here, with --audio-dup, does connect and
+// run pactl, so the listeners and the pactl would have seen the others.
+func TestBrowserOnlySessionStaysOffTheSoundServer(t *testing.T) {
+	// runWeb takes SIGINT/SIGTERM/SIGHUP for the app and never gives them back.
+	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
+	dir, sock := isolatePulse(t), socketDir(t)
+	old := audioPause
+	audioPause = func(time.Duration) {}
+	t.Cleanup(func() { audioPause = old })
+	fastAudioFollower(t)
+	server := filepath.Join(sock, "server", "native")
+	t.Setenv("PULSE_SERVER", "unix:"+server)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(sock, "xdg"))
+	accepted := listenPulse(t, nil, server, filepath.Join(sock, "xdg", "pulse", "native"))
+	pactlRuns := countingPactl(t, dir)
+	// stayedOff checks that nothing connected and that pactl did not run
+	// since the step before.
+	conns, runs := int32(0), 0
+	stayedOff := func(when string) {
+		t.Helper()
+		if n := accepted.Load() - conns; n != 0 {
+			t.Errorf("%s: %d connections to the sound server", when, n)
+		}
+		if n := pactlRuns() - runs; n != 0 {
+			t.Errorf("%s: pactl ran %d times", when, n)
+		}
+		conns, runs = accepted.Load(), pactlRuns()
+	}
+
+	// --window is --web with a window of its own, which is not opened here.
+	win := newApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: videoSocket(t)},
+		config{audio: true, web: true, window: true, webAddr: "127.0.0.1"})
+	if _, ok := win.audioFollower(); ok {
+		t.Error("--window: the follower would start")
+	}
+	win.shutdown()
+	stayedOff("--window")
+
+	// A peer target that grants sound gives the session its audio socket.
+	peer := newApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: videoSocket(t)},
+		config{audio: true, web: true, usePeer: true, webAddr: "127.0.0.1"})
+	if _, ok := peer.audioFollower(); ok {
+		t.Error("--peer --web: the follower would start")
+	}
+	peer.shutdown()
+	stayedOff("--peer --web")
+
+	audio, device := net.Pipe()
+	t.Cleanup(func() { device.Close() })
+	a := newApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: audio},
+		config{audio: true, web: true, webAddr: "127.0.0.1"})
+	t.Cleanup(a.web.stop)
+	stayedOff("--web, before the run")
+	if err := a.audio.failure(); err != nil {
+		t.Errorf("--web: the sink failed (%v); nothing did", err)
+	}
+	// The device's stream is raw PCM, whose packets are the samples. A
+	// goroutine writes them in order as the demuxer reads them.
+	packets := make(chan []byte, 4)
+	go func() {
+		for p := range packets {
+			if _, err := device.Write(p); err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { close(packets) })
+	packets <- []byte{0, 'r', 'a', 'w'} // the codec id
+	// sendPCM sends a packet of 5 ms of sound and returns its samples.
+	sendPCM := func(seed byte) []byte {
+		pcm := make([]byte, 960) // s16 stereo at 48 kHz
+		for i := range pcm {
+			pcm[i] = byte(i*37) + seed
+		}
+		header := binary.BigEndian.AppendUint64(nil, 20000) // its timestamp, in microseconds
+		packets <- append(binary.BigEndian.AppendUint32(header, uint32(len(pcm))), pcm...)
+		return pcm
+	}
+
+	said := stderrOf(t, func() {
+		ran := make(chan error, 1)
+		go func() { ran <- a.run() }()
+		select {
+		case <-a.web.ready:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the web server never started listening")
+		}
+		cl := dialWS(t, serverHost(a.web))
+		cl.send(webEvent{Op: "hello", W: 480, H: 1080, Caps: "audio"})
+		if hello := cl.nextJSON("hello", 3*time.Second); hello["audio"] != true {
+			t.Errorf("hello: audio %v, want true", hello["audio"])
+		}
+		sent := sendPCM(0)
+		if got := cl.nextBinary(webMsgAudio, 5*time.Second)[1:]; !bytes.Equal(got, sent) {
+			t.Errorf("the browser got %d bytes of sound that are not the %d the device sent", len(got), len(sent))
+		}
+		st := cl.nextJSON("status", 3*time.Second)
+		if st["audio"] != "on" || st["hostAudio"] != false || st["gain"] != 100.0 || st["muted"] != false {
+			t.Errorf("status: audio %v, hostAudio %v, gain %v, muted %v; want on, false, 100, false",
+				st["audio"], st["hostAudio"], st["gain"], st["muted"])
+		}
+		// statusAt reads the status messages until one gives the volume pct.
+		statusAt := func(pct float64) map[string]any {
+			t.Helper()
+			for deadline := time.Now().Add(5 * time.Second); ; {
+				if st := cl.nextJSON("status", time.Until(deadline)); st["gain"] == pct {
+					return st
+				}
+			}
+		}
+		cl.send(map[string]any{"op": "gain", "gain": 40})
+		if st := statusAt(40); st["muted"] != false || st["hostAudio"] != false {
+			t.Errorf("at 40%%: muted %v, hostAudio %v; want false, false", st["muted"], st["hostAudio"])
+		}
+		sent = sendPCM(0x5a)
+		if got := cl.nextBinary(webMsgAudio, 5*time.Second)[1:]; !bytes.Equal(got, sent) {
+			t.Error("at 40%, the browser's sound is not the device's: the volume scaled it")
+		}
+		cl.send(map[string]any{"op": "gain", "mute": true})
+		if st := statusAt(0); st["muted"] != true {
+			t.Errorf("muted: the status says muted %v", st["muted"])
+		}
+		time.Sleep(20 * audioFollowEvery) // ticks for a follower, had one started
+		a.events <- inputEvent{kind: evQuit}
+		select {
+		case err := <-ran:
+			if err != nil {
+				t.Errorf("the run ended with %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the main loop did not quit")
+		}
+	})
+	a.shutdown()
+	stayedOff("--web, after the run")
+	for _, wrong := range []string{"audio sink", "no sound on this computer", "audio -> "} {
+		if strings.Contains(said, wrong) {
+			t.Errorf("--web: says %q:\n%s", wrong, said)
+		}
+	}
+
+	dup := newApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: videoSocket(t)},
+		config{audio: true, web: true, audioDup: true, webAddr: "127.0.0.1"})
+	dup.shutdown()
+	dup.audio.close()
+	if n, r := accepted.Load()-conns, pactlRuns()-runs; n == 0 || r == 0 {
+		t.Errorf("--web --audio-dup: %d connections and %d pactl runs, where a session that plays here "+
+			"makes some of both: the listeners or the pactl show nothing", n, r)
+	}
+}
+
+// TestBrowserOnlySinkStillDecodesForTheBrowser: with the sink of a
+// browser-only session, which is never opened, the demuxer still decodes the
+// device's sound and hands it to the PCM taps, which feed the browsers: an
+// Opus frame of 20 ms comes out as 960 stereo samples of 16 bits.
+func TestBrowserOnlySinkStillDecodesForTheBrowser(t *testing.T) {
+	head := []byte("OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00")
+	frame := []byte{0xf8, 0xff, 0xfe}                  // 20 ms of silence
+	setup := binary.BigEndian.AppendUint64(nil, 1<<62) // the config flag
+	media := binary.BigEndian.AppendUint64(nil, 20000) // its timestamp, in microseconds
+	audio := deviceStream(t, []byte("opus"),
+		binary.BigEndian.AppendUint32(setup, uint32(len(head))), head,
+		binary.BigEndian.AppendUint32(media, uint32(len(frame))), frame)
+	s := newStreamState(&session{deviceName: "Pixel 8", audio: audio}, config{web: true, audio: true}, nil)
+	tapped := 0
+	s.addPCMTap(func(pcm []byte) { tapped += len(pcm) })
+	if err := s.runAudio(browserOnlySink()); !errors.As(err, new(lostError)) {
+		t.Errorf("runAudio: %v, want the stream to end as the device hung up", err)
+	}
+	if tapped != 960*4 {
+		t.Errorf("the taps got %d bytes of PCM, want %d", tapped, 960*4)
 	}
 }
 

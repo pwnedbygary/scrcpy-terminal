@@ -124,8 +124,11 @@ func newApp(sess *session, cfg config) *app {
 		grabbed:     true,
 		barFlashIdx: -1, // no button flashed until one is clicked
 	}
-	if sessionHasSound(cfg, sess) {
+	switch {
+	case playsHere(cfg, sess):
 		a.audio = newAudioSink()
+	case sessionHasSound(cfg, sess):
+		a.audio = browserOnlySink()
 	}
 	_, a.inZellij = os.LookupEnv("ZELLIJ")
 	if a.inZellij {
@@ -428,10 +431,11 @@ func (a *app) restoreTerminalOnPanic() {
 	}
 }
 
-// hostAudioSilent reports whether the host audio sink must stay silent.
+// hostAudioSilent reports whether this computer must play none of the sound.
 //
 // In web/window mode the browser plays the device audio (fed by the PCM tap),
-// so the stream is the sole source of sound and the host sink is muted.
+// so the stream is the sole source of sound, and the session opens no host
+// sink (browserOnlySink).
 // --audio-dup asks for the sound in both places: the host device and the
 // window each play it, which is a deliberate duplicate rather than the
 // accidental doubling that used to happen unconditionally.
@@ -452,8 +456,9 @@ func sessionHasSound(cfg config, sess *session) bool {
 
 // playsHere reports whether the session plays its sound on this computer: it
 // has a sound stream, and the browser is not its only output. Only such a
-// session silences the leftover streams of other scterms (main). Whether the
-// device keeps the stream on, and whether the sink opens, is not known yet.
+// session opens a sink here (newApp) and silences the leftover streams of
+// other scterms (main). Whether the device keeps the stream on, and whether
+// the sink opens, is not known yet.
 func playsHere(cfg config, sess *session) bool {
 	return sessionHasSound(cfg, sess) && !hostAudioSilent(cfg)
 }
@@ -491,24 +496,25 @@ func (a *app) runWeb() error {
 	// the demux goroutine always sees it.
 	a.stream.webMode = true
 	// Audio routing: in web/window mode the browser plays the device audio, so
-	// the stream is the sole source of sound and the host sink stays silent.
-	// --audio-dup asks for the sound in both places (host device and window),
-	// which is the only way to get it played twice.
+	// the stream is the sole source of sound: the session has no host sink
+	// (browserOnlySink), and any sink it is given stays silent. --audio-dup
+	// asks for the sound in both places (host device and window), which is the
+	// only way to get it played twice.
 	if a.audio != nil {
 		a.audio.silent.Store(hostAudioSilent(a.cfg))
 		switch {
 		case a.soundless():
 			// No sound, so nowhere for it to play.
 		case a.audio.failure() != nil:
-			// The PCM tap does not go through the sink: the browser still plays.
+			// --audio-dup, and the sink did not open. The PCM tap does not go
+			// through the sink: the browser still plays.
 			fmt.Fprintf(stderrWriter(),
 				"scterm: audio: browser only; no sound on this computer: %v\n", a.audio.errString())
 		case a.audio.silent.Load():
-			// "muted" here is the POLICY, not a reading of the host mixer: the
-			// browser is the audio output, so the host sink is deliberately
-			// left silent to avoid playing every sound twice, slightly offset.
+			// The browser is the audio output: playing here as well would
+			// play every sound twice, slightly offset.
 			fmt.Fprintf(stderrWriter(),
-				"scterm: audio: browser only (the host sink stays silent; pass --audio-dup to play on both)\n")
+				"scterm: audio: browser only (pass --audio-dup to play it on this computer too)\n")
 		case a.cfg.audioDup:
 			fmt.Fprintf(stderrWriter(),
 				"scterm: audio: duplicated (host sink and browser both play)\n")

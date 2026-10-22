@@ -9,13 +9,14 @@ import (
 var audioFollowEvery = time.Second
 
 // audioFollower says whether scterm's stream should follow the desktop's
-// sink: only when the sink was opened, SCT_AUDIO_DEVICE does not pin it, and
+// sink: only when the sink plays on this computer (it opened, and the browser
+// is not the only output), SCT_AUDIO_DEVICE does not pin it, and
 // pactl is on PATH. It returns pactl, with the environment as it is now. The
 // runs call it before they start the follower, which then reads neither
 // PATH nor the environment, which a test that started it puts back when it
 // ends.
 func (a *app) audioFollower() (pactlTool, bool) {
-	if a.audio == nil || a.audio.failure() != nil {
+	if !a.audio.plays() {
 		return pactlTool{}, false
 	}
 	if envOr("SCT_AUDIO_DEVICE", "") != "" {

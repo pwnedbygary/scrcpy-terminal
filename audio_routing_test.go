@@ -3,7 +3,7 @@ package main
 // Audio routing: which output plays the device sound.
 //
 // In web/window mode the browser plays the audio (fed by the PCM tap), so by
-// default the host sink is muted and the stream is the sole source of sound.
+// default there is no host sink, and the stream is the sole source of sound.
 // --audio-dup is what asks for the sound in both places. Before this, the host
 // sink and the browser both played unconditionally, so every sound was doubled
 // with a small offset between the two outputs.
@@ -77,30 +77,80 @@ func TestOnlyASessionThatPlaysHereSilencesLeftovers(t *testing.T) {
 	}
 }
 
-// TestWebWithoutPulseAudioSaysTheBrowserPlays: without a PulseAudio sink the
-// browser still plays the sound, which reaches it through the PCM tap and not
-// the sink. So --web and --window say that only this computer is silent, and
-// why: not "audio disabled", not "video only", and not that the host sink
-// plays as well.
+// TestWebWithoutPulseAudioSaysTheBrowserPlays: with --audio-dup and without a
+// PulseAudio sink the browser still plays the sound, which reaches it through
+// the PCM tap and not the sink. So --web and --window say that only this
+// computer is silent, and why: not "audio disabled", not "video only", and
+// not that the host sink plays as well. Without --audio-dup there is no sink
+// to fail (TestWebSaysWhereTheSoundPlays).
 func TestWebWithoutPulseAudioSaysTheBrowserPlays(t *testing.T) {
 	// runWeb takes SIGINT/SIGTERM/SIGHUP for the app and never gives them back.
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
 	t.Setenv("PATH", t.TempDir()) // no adb or pactl to reach anything with
-	for _, dup := range []bool{false, true} {
-		cfg := config{web: true, audio: true, audioDup: dup, webAddr: "127.0.0.1"}
-		out := webStartLines(t, cfg, &audioSink{gain: 256, pct: 100, err: errNoAudio()})
-		for _, wrong := range []string{"audio disabled", "video only", "both play", "pass --audio-dup"} {
-			if strings.Contains(out, wrong) {
-				t.Errorf("--audio-dup=%v: says %q:\n%s", dup, wrong, out)
+	cfg := config{web: true, audio: true, audioDup: true, webAddr: "127.0.0.1"}
+	out := webStartLines(t, cfg, &audioSink{gain: 256, pct: 100, err: errNoAudio()})
+	for _, wrong := range []string{"audio disabled", "video only", "both play", "pass --audio-dup"} {
+		if strings.Contains(out, wrong) {
+			t.Errorf("says %q:\n%s", wrong, out)
+		}
+	}
+	said := false
+	for _, line := range strings.Split(out, "\n") {
+		said = said || strings.Contains(line, "browser") && strings.Contains(line, "pulseaudio not available")
+	}
+	if !said {
+		t.Errorf("no line says the browser plays and why this computer does not:\n%s", out)
+	}
+}
+
+// TestWebSaysWhereTheSoundPlays: --web and --window say once, as they start,
+// where the session's sound plays. Without --audio-dup the browser is the only
+// output: the line says so and points at --audio-dup, and says nothing of a
+// host sink, as the session opens none. Before, it opened one and said that
+// it stayed silent, or, with no sound server here, that this computer played
+// nothing, and why. With --audio-dup, both play, or, when the sink did not
+// open, the browser only, and why.
+func TestWebSaysWhereTheSoundPlays(t *testing.T) {
+	// runWeb takes SIGINT/SIGTERM/SIGHUP for the app and never gives them back.
+	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
+	isolatePulse(t) // no sound server, and no pactl
+	old := audioPause
+	audioPause = func(time.Duration) {}
+	t.Cleanup(func() { audioPause = old })
+	sound := func() *session {
+		return &session{deviceName: "Pixel 8", video: videoSocket(t), audio: videoSocket(t)}
+	}
+	// soundLines is what a run said of the sound.
+	soundLines := func(out string) []string {
+		var lines []string
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "scterm: audio") {
+				lines = append(lines, line)
 			}
 		}
-		said := false
-		for _, line := range strings.Split(out, "\n") {
-			said = said || strings.Contains(line, "browser") && strings.Contains(line, "pulseaudio not available")
-		}
-		if !said {
-			t.Errorf("--audio-dup=%v: no line says the browser plays and why this computer does not:\n%s", dup, out)
-		}
+		return lines
+	}
+
+	browser := newApp(sound(), config{web: true, audio: true, webAddr: "127.0.0.1"})
+	got := soundLines(stderrUntil(t, browser, browser.runWeb, "web display on"))
+	browser.shutdown()
+	if want := []string{"scterm: audio: browser only (pass --audio-dup to play it on this computer too)"}; !slices.Equal(got, want) {
+		t.Errorf("the browser only: said %q, want %q", got, want)
+	}
+	dup := config{web: true, audio: true, audioDup: true, webAddr: "127.0.0.1"}
+	failed := newApp(sound(), dup) // with no sound server, its sink does not open
+	got = soundLines(stderrUntil(t, failed, failed.runWeb, "web display on"))
+	failed.shutdown()
+	reason := failed.audio.errString()
+	if !strings.HasPrefix(reason, "audio sink: ") {
+		t.Errorf("--audio-dup: the sink's error is %q, not the open's", reason)
+	}
+	if want := []string{"scterm: audio: browser only; no sound on this computer: " + reason}; !slices.Equal(got, want) {
+		t.Errorf("--audio-dup, the sink did not open: said %q, want %q", got, want)
+	}
+	got = soundLines(webLinesUntil(t, dup, sound(), &audioSink{gain: 256, pct: 100}))
+	if want := []string{"scterm: audio: duplicated (host sink and browser both play)"}; !slices.Equal(got, want) {
+		t.Errorf("--audio-dup: said %q, want %q", got, want)
 	}
 }
 

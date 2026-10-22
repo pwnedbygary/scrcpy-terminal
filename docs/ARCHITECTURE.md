@@ -111,7 +111,10 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
 - The terminal display plays it through a PulseAudio stream named `scterm`, with a 20 ms
   buffer target and a software gain for Alt+M, Alt+- and Alt+= (`audio.go`).
 - A session without sound, with `--no-audio` or from a peer target that does not grant sound,
-  opens no PulseAudio stream and does not connect to the server (`newApp` in `app.go`).
+  opens no PulseAudio stream and does not connect to the server (`newApp` in `app.go`). Nor
+  does a session whose only sound output is the browser (`--web` or `--window` without
+  `--audio-dup`): it asks `pactl` for no sink and starts no follower (`browserOnlySink` in
+  `audio.go`).
 - scterm plays on the sink set by `SCT_AUDIO_DEVICE`. Without it, scterm opens its stream on
   the desktop's default sink when that is a sound card, and otherwise on the sinks other
   programs play on, then the sound cards `pactl` reports running, then every sound card it
@@ -135,7 +138,7 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   comes at start, from the session's sockets, before the device sends its codec id: a device
   that then turns the sound off (codec id 0, as Android 10 does, and the playback source
   before Android 13) has stopped them by then, and has its sink open.
-- In the browser display, the browser plays the sound, and the PulseAudio stream stays silent
+- In the browser display, the browser plays the sound, and scterm opens no PulseAudio stream
   unless `--audio-dup` is given (`app.go`). The `audio` field of the hello and status messages
   says whether the session's sound is on: on while the session has a sound stream that the
   device has not turned off, whether or not this computer's stream opened. `hostAudio` says

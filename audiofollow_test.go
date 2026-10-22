@@ -268,8 +268,9 @@ func TestAudioFollowerKeepsThePactlItFound(t *testing.T) {
 }
 
 // TestAudioFollowerNeedsASinkAndPactl: audioFollower, which the runs ask
-// before they start the follower, says to start it only when the sink was
-// opened, SCT_AUDIO_DEVICE does not pin it, and pactl is on PATH, and hands
+// before they start the follower, says to start it only when the sink plays
+// on this computer (it opened, and the browser is not the only output),
+// SCT_AUDIO_DEVICE does not pin it, and pactl is on PATH, and hands
 // over that pactl. TestWebRunStartsTheFollowerOnlyWhenItShould checks that
 // runWeb asks it.
 func TestAudioFollowerNeedsASinkAndPactl(t *testing.T) {
@@ -285,6 +286,7 @@ func TestAudioFollowerNeedsASinkAndPactl(t *testing.T) {
 	}{
 		{"no sink", nil, "", true, false},
 		{"a sink that did not open", &audioSink{err: errPulseUnavailable{}}, "", true, false},
+		{"a browser-only session's sink", browserOnlySink(), "", true, false},
 		{"SCT_AUDIO_DEVICE", working, "speakers", true, false},
 		{"no pactl", working, "", false, false},
 		{"a sink and pactl", working, "", true, true},
@@ -307,35 +309,41 @@ func TestAudioFollowerNeedsASinkAndPactl(t *testing.T) {
 }
 
 // TestWebRunStartsTheFollowerOnlyWhenItShould: runWeb starts the follower
-// only when audioFollower says to. With no sink, a sink that did not open, or
-// SCT_AUDIO_DEVICE set, pactl never runs while the loop runs for 20 of the
-// follower's ticks, though it is on PATH. A run that looked pactl up itself
-// would follow the desktop's sink though SCT_AUDIO_DEVICE names one, and ask
-// pactl every second for a sink that never opened. With a sink that opened
-// and no SCT_AUDIO_DEVICE, pactl must run within those ticks: a runWeb that
-// gave the follower a longer interval than audioFollowEvery, such as a second,
-// would let the other cases pass whatever follower it started.
+// only when audioFollower says to. With --audio-dup and no sink, a sink that
+// did not open, or SCT_AUDIO_DEVICE set, pactl never runs while the loop runs
+// for 20 of the follower's ticks, though it is on PATH; nor without
+// --audio-dup, where the browser is the only output: newApp opens no sink
+// then (browserOnlySink), and runWeb keeps any sink it is given silent. A run
+// that looked pactl up itself would follow the desktop's sink though
+// SCT_AUDIO_DEVICE names one, and ask pactl every second for a sink that
+// never opened. With --audio-dup, a sink that opened and no SCT_AUDIO_DEVICE,
+// pactl must run within those ticks: a runWeb that gave the follower a longer
+// interval than audioFollowEvery, such as a second, would let the other cases
+// pass whatever follower it started.
 func TestWebRunStartsTheFollowerOnlyWhenItShould(t *testing.T) {
 	// runWeb takes SIGINT/SIGTERM/SIGHUP for the app and never gives them back.
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
 	fastAudioFollower(t)
 	for _, tc := range []struct {
 		name    string
+		dup     bool
 		sink    *audioSink
 		pin     string
 		follows bool
 	}{
-		{"no sink", nil, "", false},
-		{"a sink that did not open", &audioSink{err: errPulseUnavailable{}}, "", false},
-		{"SCT_AUDIO_DEVICE", &audioSink{gain: 256, pct: 100}, "speakers", false},
-		{"a sink that opened", &audioSink{gain: 256, pct: 100}, "", true},
+		{"no sink", true, nil, "", false},
+		{"a sink that did not open", true, &audioSink{err: errPulseUnavailable{}}, "", false},
+		{"SCT_AUDIO_DEVICE", true, &audioSink{gain: 256, pct: 100}, "speakers", false},
+		{"a sink that opened", true, &audioSink{gain: 256, pct: 100}, "", true},
+		{"the browser only", false, browserOnlySink(), "", false},
+		{"the browser only, with a sink that opened", false, &audioSink{gain: 256, pct: 100}, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			count := countingPactl(t, isolatePulse(t))
 			t.Setenv("SCT_AUDIO_DEVICE", tc.pin)
 			video, device := net.Pipe()
 			defer device.Close()
-			cfg := config{web: true, audio: true, webAddr: "127.0.0.1"}
+			cfg := config{web: true, audio: true, audioDup: tc.dup, webAddr: "127.0.0.1"}
 			sess := &session{deviceName: "Pixel 8", video: video}
 			a := &app{sess: sess, cfg: cfg, audio: tc.sink, events: make(chan inputEvent, 64)}
 			a.stream = &streamState{cfg: cfg, sess: sess}
@@ -365,17 +373,18 @@ func TestWebRunStartsTheFollowerOnlyWhenItShould(t *testing.T) {
 	}
 }
 
-// TestWebRunStopsItsAudioFollower: the follower runWeb starts moves scterm's
-// stream to the desktop's sink while the run lasts, and ends with the run. It
-// used to run until the process exited, so a test that ran runWeb with a
-// working sink left it asking pactl once a second, with the session's
-// environment back once the test had ended, until the test binary exited.
+// TestWebRunStopsItsAudioFollower: the follower runWeb starts for a session
+// that plays here too (--audio-dup) moves scterm's stream to the desktop's
+// sink while the run lasts, and ends with the run. It used to run until the
+// process exited, so a test that ran runWeb with a working sink left it
+// asking pactl once a second, with the session's environment back once the
+// test had ended, until the test binary exited.
 func TestWebRunStopsItsAudioFollower(t *testing.T) {
 	// runWeb takes SIGINT/SIGTERM/SIGHUP for the app and never gives them back.
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
 	fastAudioFollower(t)
 	count, sink := movingPactl(t, isolatePulse(t))
-	cfg := config{web: true, audio: true, webAddr: "127.0.0.1"}
+	cfg := config{web: true, audio: true, audioDup: true, webAddr: "127.0.0.1"}
 	webLinesHere(t, cfg, &session{deviceName: "Pixel 8"}, &audioSink{gain: 256, pct: 100}, "audio -> "+sink)
 	time.Sleep(100 * time.Millisecond) // a pactl call under way when the run ended
 	n := count()

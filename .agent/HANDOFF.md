@@ -7,6 +7,120 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-21: QoL overhaul, part 44: a browser-only session leaves this computer's sound alone)
+
+- Behaviour: a session whose only sound output is the browser (`--web`
+  or `--window` without `--audio-dup`) does no sound work on this
+  computer. `newApp` (`app.go`) opens a sink only when the session plays
+  here (`playsHere`). A browser-only session gets `browserOnlySink`
+  (`audio.go`), which is never opened: no `pactl` run to pick a sink, no
+  libpulse connection (no stream in the desktop's mixer, no wait of up
+  to about 0.45 s without a server), and no follower.
+- `browserOnlySink` has no error, so `failure()` stays nil and a failed
+  sink stays easy to tell apart (part 46). It is silent, so `plays()` is
+  false. `audioFollower` (`audiofollow.go`) now asks `plays()` (opened,
+  not failed, not silent) instead of `failure() == nil`.
+- The browser still gets every packet: the PCM tap does not go through
+  the sink. Hello and status keep their values (`audio` on, `hostAudio`
+  false). The `gain` op is taken and reported (`gain`, `muted`), as with
+  the silent sink before, and scales nothing the browser hears.
+- Start-up line: `scterm: audio: browser only (pass --audio-dup to play
+  it on this computer too)`. The failed-sink line (`browser only; no
+  sound on this computer: …`) can no longer come without `--audio-dup`;
+  it stays, unchanged, for `--audio-dup`, whose sink can still fail.
+- Docs: README (the browser display's sound, the "No sound" bullet on
+  other scterms' sound, `--audio-dup`) and docs/ARCHITECTURE.md's sound
+  bullets. flags.go's `--audio-dup` help names no host sink: unchanged.
+- New tests: `TestBrowserOnlySessionStaysOffTheSoundServer` (newApp and
+  runWeb with a raw-PCM device, listeners as the sound server, a pactl
+  that counts its runs, a 5 ms follower, a websocket viewer, the gain
+  op), `TestBrowserOnlySinkStillDecodesForTheBrowser` (an Opus frame
+  through libavcodec to the PCM taps) and `TestWebSaysWhereTheSoundPlays`
+  (the three start-up lines).
+- Tests changed where the old behaviour was the bug: the `web` case of
+  `TestMainSilencesLeftoversOnlyWhenItPlaysHere` wants no connection;
+  the follower cases of `TestWebRunStartsTheFollowerOnlyWhenItShould`
+  and `TestWebRunStopsItsAudioFollower` run with `--audio-dup`, and two
+  new browser-only cases want no follower; a browser-only case was
+  added to `TestAudioFollowerNeedsASinkAndPactl`.
+- A test narrowed, not for a bug:
+  `TestWebWithoutPulseAudioSaysTheBrowserPlays` keeps only its
+  `--audio-dup` case. Its other case, a browser-only session whose sink
+  failed, would still pass, but `newApp` can no longer build it.
+- Checks by the builder (base `afe9ebe`, go1.27.1, iso.env, bwrap):
+  gofmt, vet, build and `git diff --check` clean; `go test ./...` 483
+  pass, 3 skip, 0 fail (base 480, 3, 0). The base's tests on the new
+  code: 477 pass, 3 skip, 3 fail:
+  `TestMainSilencesLeftoversOnlyWhenItPlaysHere/web`,
+  `TestWebRunStartsTheFollowerOnlyWhenItShould/a_sink_that_opened` and
+  `TestWebRunStopsItsAudioFollower`. `-race -count=3` on 34 sound tests
+  102/102, no race; the new and changed tests `-count=20` 160/160; the
+  new ones `-race -count=5` 15/15.
+- Fail-before and mutants: on the base's `app.go`, `audio.go` and
+  `audiofollow.go` (with a shim for `browserOnlySink`), 5 of the 8 new
+  or changed tests fail; the decode test and the two `--audio-dup` tests
+  pass, as they should. 9 of 9 mutants are killed. Docs tests: 10 pass.
+  mdcheck: 2 files, 35 links, 0 problems.
+- Not run by the builder: a real sound server (PulseAudio or PipeWire),
+  a real device, a browser, or a `--window` window (`--window` is
+  checked through `newApp` only); `-race` on the whole module; the
+  desktop-like decoy-socket sandbox (the snapshot checks below ran it).
+  `web/check.mjs` still says "browser only (host sink stays silent)";
+  web/ is outside this part.
+- Intake: `README.md` was merged three ways with part 48's changes; the
+  merge adds exactly this part's changed lines. The other seven files
+  were taken as built, byte for byte; parts 48, 47 and 45, taken in
+  first and landing first, change none of them.
+- Verification, snapshot round 1 (`/tmp/opencode/review-44`, on part 45
+  as it landed; go1.27.1, iso.env, every Go run in bwrap): gofmt, vet,
+  build and `git diff --check` clean; `go test -v ./...` 499 pass, 3
+  skip, 0 fail; `-race -count=3` on 34 sound tests; the 8 new and
+  changed tests `-count=20` and `-race -count=5`; on the base's files
+  with the builder's shim, 5 of the 8 fail and 3 pass, as above; each
+  of the builder's 9 mutants fails 1 to 3 tests; docs checker 2 files,
+  36 relative links, 0 problems; in the desktop-like decoy sandbox the
+  tests make no connection, and the positive control (`pactl info` and
+  a connect to adb's port) two.
+- Review round 1 (PASS), with one LOW and three NITs. LOW: no test had
+  a `--peer` session with sound in the browser display, so a `newApp`
+  that opened a sink for one (the review's mutant R12) passed every
+  test. NITs, on this entry: it listed the decoy sandbox as not run,
+  though the intake's checks ran it; "the three named above" pointed
+  at a bullet that names five tests; and it put the narrowed test
+  among those changed for a bug. The narrowed case was also the only
+  check of the order of `runWeb`'s failed-sink and browser-only cases:
+  their swap (mutant R11) changes nothing for any sink `newApp` builds,
+  and stays untested. Suggestions taken: counts of its own for each
+  step of the browser-only test, a positive control there, and a check
+  that the failed-sink line gives the open's error. Left for later:
+  with `--audio-dup`, the sink scales the shared PCM buffer in place
+  before the browser's tap, so a `gain` op changes what the browser
+  hears as well (older than this part; no shipped client sends one);
+  `web/check.mjs`'s wording, above.
+- Round 2 changes two tests and this entry; the code is round 1's. In
+  `TestBrowserOnlySessionStaysOffTheSoundServer`, a `--peer --web`
+  session whose target sends sound must stay off the sound server too;
+  each step counts only its own connections and pactl runs; and last,
+  a `--web --audio-dup` session must connect and run pactl, so the
+  listeners and the counting pactl would have seen the others. In
+  `TestWebSaysWhereTheSoundPlays`, the failed-sink line's reason must
+  be the open's error (`audio sink: …`), not an empty one.
+- Verification, snapshot round 2 (`/tmp/opencode/review-44b`, on round
+  1's base; go1.27.1, iso.env, every Go run in bwrap): gofmt, vet,
+  build and `git diff --check` clean; `go test -v ./...` 499 pass, 3
+  skip, 0 fail; `-race -count=3` on 34 sound tests; the 8 new and
+  changed tests `-count=20` and `-race -count=5`; on the base's files
+  with the builder's shim, 5 of the 8 fail and 3 pass; each of the
+  builder's 9 mutants fails 1 to 3 tests. Of round 1's review's 13
+  mutants, 12 fail 1 to 4 tests: R12 fails the browser-only test at
+  `--peer --web` (6 connections, 3 pactl runs), and R1 now fails it at
+  `--window` only. R11 passes, as above, and R12 with round 1's
+  `audio_here_test.go` passes, the gap. Docs checker: 2 files, 36
+  relative links, 0 problems. In the decoy sandbox the tests make no
+  connection, and the positive control two. These checks ran before
+  this bullet was written; the snapshot was then packed again with it,
+  which changed only the handoff.
+
 ## Update (2026-10-21: QoL overhaul, part 45: pactl is read the same in every language)
 
 - pactl translates what scterm reads (gettext domain "pulseaudio"): the

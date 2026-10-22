@@ -135,7 +135,7 @@ to do. The terminal stays a normal terminal and shows log lines; Ctrl+C there en
 Several browsers can watch at once. Closing a tab does not end the session, but Quit on the
 page does.
 
-Sound plays in the browser, and the speakers of the computer that runs scterm stay silent
+Sound plays in the browser only, and scterm does not connect to this computer's sound server
 (`--audio-dup` plays it in both places, and on the device too; on Android 11 and 12 it then
 plays on the device only, and scterm says why). When the browser holds sound back until you use
 the page, a chip on the page says *Tap for sound*: any tap, click or key starts it. Opened over
@@ -480,13 +480,11 @@ connection it was waiting for.
 - Only one scterm plays sound at a time. When a session that plays sound on this computer
   starts, scterm stops the sound of any other scterm here, running or left behind by a crash,
   and says how many sound streams it silenced. A session that plays no sound here leaves them
-  alone: with `--no-audio`, with `--web` or `--window` but without `--audio-dup` (the browser
-  plays the sound), or in peer mode when the device does not let this computer hear. A session
-  without a sound stream (`--no-audio`, or a paired device that does not let this computer
-  hear) does not connect to the sound server at all. scterm decides both when it starts,
-  before the device says whether it sends sound: a device that turns its sound off (see
-  above) still stops the other scterms' sound, and opens a sound stream here that stays
-  silent.
+  alone, and does not connect to the sound server at all: with `--no-audio`, with `--web` or
+  `--window` but without `--audio-dup` (the browser plays the sound), or in peer mode when the
+  device does not let this computer hear. scterm decides both when it starts, before the device
+  says whether it sends sound: a device that turns its sound off (see above) still stops the
+  other scterms' sound, and opens a sound stream here that stays silent.
 - The default `--audio-source output` mutes the device while scterm runs. To hear the sound on
   the device too, use `--audio-source playback --audio-dup` (Android 13 and later).
 - In the browser, the sound chip says what is wrong: *Tap for sound*, *Sound off · Alt+M* (the
@@ -595,7 +593,8 @@ sources also work: `mic-unprocessed`, `mic-camcorder`, `mic-voice-recognition`,
 `--audio-dup` with another source or with `--no-audio`, except in peer mode, where the device
 gets neither flag. On Android 11 and 12 the sound then plays on the device only, and scterm says
 why. Without `--audio-dup`, `playback` silences the recorded apps on the device. With `--web` or
-`--window`, `--audio-dup` also plays the sound on this computer, as well as in the browser.
+`--window`, `--audio-dup` also plays the sound on this computer, as well as in the browser;
+without it, scterm does not connect to this computer's sound server.
 
 #### Display
 

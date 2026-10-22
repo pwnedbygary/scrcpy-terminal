@@ -199,6 +199,17 @@ func noAudioSink() *audioSink {
 	return &audioSink{gain: 256, pct: 100, err: errNoSound}
 }
 
+// browserOnlySink is the sink of a session whose only sound output is the
+// browser (hostAudioSilent). Like noAudioSink, it is never opened: the session
+// asks pactl for no sink, does not connect to the sound server and starts no
+// follower. Nothing failed, so it has no error, which tells it apart from a
+// sink that did not open; it is silent instead, so it plays nothing (plays).
+func browserOnlySink() *audioSink {
+	a := &audioSink{gain: 256, pct: 100}
+	a.silent.Store(true)
+	return a
+}
+
 // plays reports whether the sink plays the sound on this computer: it
 // opened, has not failed since, and is not kept silent for the browser.
 func (a *audioSink) plays() bool {
@@ -206,8 +217,9 @@ func (a *audioSink) plays() bool {
 }
 
 // failure is why the sink does not play: why it never opened, or the write
-// that failed since; nil while it works. The run loop, the status row and the
-// browser ask from other goroutines than the one that writes.
+// that failed since; nil while it works, and for the sink of a browser-only
+// session, which is silent instead (browserOnlySink). The run loop, the status
+// row and the browser ask from other goroutines than the one that writes.
 func (a *audioSink) failure() error {
 	switch {
 	case a.err != nil:
