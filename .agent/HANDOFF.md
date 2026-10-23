@@ -7,6 +7,68 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-22: QoL overhaul, part 58: a lock for the canvas pool)
+
+- What changed: the terminal display's two-canvas pool (`takePooled`,
+  `returnPooled`, `resetPool` in stream.go) takes a mutex, `poolMu`. The
+  video goroutine takes canvases and gives back those the sink evicts,
+  while the terminal's and --no-tui's run loops give back the ones they
+  took: a data race (issue #11). Nothing changes on screen.
+- Decisions: a mutex, not a channel: pool_test.go reads the `[2][]byte`
+  slots, and a zero `streamState{}` needs no set-up. A miss allocates
+  after the unlock, as web.go's `poolGet` does. app.go is unchanged.
+- Tests (pool_shared_test.go): `TestCanvasPoolSharedWithTheRunLoop` makes
+  runVideo's pool calls through the real sink and its eviction, against
+  the real `loop` and `runHeadless`: 1000 frames back to back, then 1000
+  that wait for the run loop; at most 200 canvases for 2000 frames
+  (measured 22 to 37). The steady-state test counts 0 allocations.
+- Round 1 (base bee1feb, sbx, go1.27.1): static checks clean; `./...`
+  707 pass (516 top-level), 3 skip, 0 fail, with and without -race, no
+  race (base 703, 514, 3, 0). On BASE's stream.go, -race: 20 of 20
+  processes fail. The builder's 10 mutants are caught: no lock in each
+  function, or a slot cleared after the unlock (-race, 20 of 20 each);
+  no reuse; no keep; a lock kept on a hit (the 10 s guard fails); a
+  give-back removed (5 of 5). Cost: 6.8 ns on base, 11.1 ns locked.
+- Found, left alone: `resetPool` empties only the pool, so a canvas in
+  flight comes back after it with the old picture (probe). Web mode
+  gives no canvas back to the stream's pool, so runVideo makes one per
+  frame (code reading). `mapCell`, `frames()` and `currentFPS` read
+  video-goroutine state unlocked. `TestDroppedFrameBufferIsRecycled`
+  checks only lengths.
+- Review round 1 (PASS), with one LOW and one NIT. LOW-1: the terminal
+  UI did not draw and no canvas was written, so nothing saw a canvas
+  used by both sides at once: r5 (the terminal loop gives back before
+  drawing) and r6 (the eviction gives back the new frame's canvas, still
+  in the mailbox) passed the suite. NIT-1: stream.go's comment said "the
+  run loop that drew one", untrue of --no-tui and of the eviction.
+- Round 2 changes: the producer writes each canvas it takes, as the
+  scaler does; the terminal case runs a real terminal UI drawing into
+  /dev/null (os.Stdout swapped back once the run loop has returned) and
+  must draw at least 1000 frames; --no-tui has no terminal UI, as in
+  production. stream.go's comment says who gives canvases back.
+- Verification, round 2 (builder's tree, base bee1feb): static checks
+  clean; `./...` 707 (516), 3, 0, with and without -race, no race.
+  -race, 20 processes each: the base, r5 and r6 fail 20 of 20, each with
+  draw's copy (tui.go:127) against the producer's write; without -race
+  they pass. The builder's 10 mutants are caught as before. The two new
+  tests at -cpu 1, 2, 4 and 16: 100 of 100 runs each, -race 50 of 50;
+  2000 times in each of 16 -race processes beside 8 busy loops (load
+  average up to 37.4 on 16 CPUs): all pass, 0 races. Root package, -race
+  -shuffle=on, seeds 1792728493896013746, 1792728566103463258,
+  1792728638252884828, 1792728710575431255, 1792728782836748616: 486
+  pass, 1 skip, 0 fail, 0 races each; the pool test ran after 32, 15, 1,
+  13 and 4 of the 52 other tests that swap os.Stdout. -race reports a
+  restore of os.Stdout before the run loop returns, 10 of 10. Nothing
+  drawn reaches the log.
+- Not run by the builder: a device, adb, a real terminal, a browser, CI,
+  the real decoder path under -race.
+- Intake: round 1 was taken in on bee1feb, the branch tip then, both
+  files byte for byte, and reviewed on /tmp/opencode/review-58. Round
+  2's files are taken in as built, on 184d40e, the tip once parts 57 and
+  59 had landed (neither changes them), and reviewed on
+  /tmp/opencode/review-58b; the checks of that tree are in this part's
+  commit message.
+
 ## Update (2026-10-22: QoL overhaul, part 59: the libraries' licence texts)
 
 - Issue #16. The binary links Go's runtime and standard library,

@@ -59,6 +59,10 @@ type streamState struct {
 
 	// canvas pool: hand the renderer its own buffer so the decoder can
 	// immediately reuse its scratch canvas without an alloc+copy per frame.
+	// The video goroutine takes canvases and gives back the ones evicted
+	// from the display mailbox, while the run loop, the terminal UI's or
+	// --no-tui's, gives back each one it took, so poolMu guards the slots.
+	poolMu     sync.Mutex
 	canvasPool [2][]byte
 
 	// audio stat
@@ -283,8 +287,10 @@ func (s *streamState) markGeometryDirty() { s.geometryDirty.Store(true) }
 // zeroed at make(), which keeps letterbox pixels black and avoids stale canvas
 // sizes lingering in the pool.
 func (s *streamState) resetPool() {
+	s.poolMu.Lock()
 	s.canvasPool[0] = nil
 	s.canvasPool[1] = nil
+	s.poolMu.Unlock()
 }
 
 // mapCell maps a terminal cell (1-based) to a video-frame position, using the
@@ -726,12 +732,15 @@ func (s *streamState) deliverFrame(f *videoFrame) {
 // takePooled returns a buffer of at least n bytes, reusing pooled canvases
 // when available (frames freed by the renderer via returnPooled).
 func (s *streamState) takePooled(n int) []byte {
+	s.poolMu.Lock()
 	for i, b := range s.canvasPool {
 		if b != nil && cap(b) >= n {
 			s.canvasPool[i] = nil
+			s.poolMu.Unlock()
 			return b[:n]
 		}
 	}
+	s.poolMu.Unlock()
 	return make([]byte, n)
 }
 
@@ -740,6 +749,8 @@ func (s *streamState) returnPooled(b []byte) {
 	if b == nil {
 		return
 	}
+	s.poolMu.Lock()
+	defer s.poolMu.Unlock()
 	for i := range s.canvasPool {
 		if s.canvasPool[i] == nil {
 			s.canvasPool[i] = b
