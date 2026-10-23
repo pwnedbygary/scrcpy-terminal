@@ -67,6 +67,8 @@ type wsConn struct {
 	// closeBy is the write deadline (unix nanoseconds) of every write once a
 	// close has begun; 0 until then.
 	closeBy atomic.Int64
+	// wrote counts the bytes of the frames written whole, headers included.
+	wrote atomic.Int64
 
 	// closeOnce makes Close idempotent and thread-safe: the reader and the
 	// writer goroutines both call it, and the close frame must not race the
@@ -177,24 +179,21 @@ func (c *wsConn) CloseWith(last string) error {
 func (c *wsConn) writeFrame(opcode byte, payload []byte) error {
 	n := len(payload)
 	c.hdr[0] = 0x80 | opcode // FIN
+	hdr := c.hdr[:2]
 	switch {
 	case n < 126:
 		c.hdr[1] = byte(n)
-		if err := c.writeAll(c.hdr[:2]); err != nil {
-			return err
-		}
 	case n <= 0xffff:
 		c.hdr[1] = 126
 		binary.BigEndian.PutUint16(c.hdr[2:4], uint16(n))
-		if err := c.writeAll(c.hdr[:4]); err != nil {
-			return err
-		}
+		hdr = c.hdr[:4]
 	default:
 		c.hdr[1] = 127
 		binary.BigEndian.PutUint64(c.hdr[2:10], uint64(n))
-		if err := c.writeAll(c.hdr[:10]); err != nil {
-			return err
-		}
+		hdr = c.hdr[:10]
+	}
+	if err := c.writeAll(hdr); err != nil {
+		return err
 	}
 	if n > 0 {
 		if err := c.writeAll(payload); err != nil {
@@ -204,6 +203,7 @@ func (c *wsConn) writeFrame(opcode byte, payload []byte) error {
 	if err := c.bw.Flush(); err != nil {
 		return err
 	}
+	c.wrote.Add(int64(len(hdr) + n))
 	return nil
 }
 

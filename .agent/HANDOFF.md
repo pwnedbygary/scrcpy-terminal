@@ -7,6 +7,83 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-22: QoL overhaul, part 54: status kbps, rawBytes, dropped)
+
+- Issue #7. The browser's half-second status now fills in three fields
+  that were always 0, each for that viewer. `dropped`: frames it missed
+  since it connected, because a newer frame replaced one in its mailbox
+  or its sender could not send one (too short for its canvas, no
+  encoder, a failed encode). `rawBytes`: bytes of raw frames sent to it
+  since it connected, 16-byte headers included. `kbps`: what scterm
+  wrote to its socket since the last half-second status, in kilobits
+  (1000 bits) per second, WebSocket headers included but not the
+  half-second statuses themselves, so 0 while nothing else goes out.
+- `wsConn.wrote` (websocket.go) counts each frame written whole;
+  sendLoop turns it into a rate at each tick (`kbpsOver`) and keeps it
+  in `webClient.kbpsBits`; a status answering a ping repeats it. The
+  counters are atomics: per frame, an add or two, no lock.
+- Decisions: rawBytes runs since the viewer connected, like sent and
+  dropped; the window is the status interval; sound bursts dropped for
+  a slow viewer are not frames and not in `dropped`; the HUD is left
+  alone (it shows the page's own kbps and lost).
+- web/check.mjs prints the server's last status (sent, dropped, kbps,
+  raw KB). docs/ARCHITECTURE.md describes the four figures.
+- Tests: web_status_test.go (new), 9 tests: drops from the mailbox and
+  from the sender (5 cases, raw too, an encode error in encErrors too);
+  sent + dropped = 600 under load; rawBytes; kbps with video, with sound
+  alone, 0 with nothing; a ping during a tick (for -race); a ping's
+  answer repeats the stored rate and the window runs on; kbpsOver's
+  unit, fractions kept; the socket's count (2/4/10-byte headers, none
+  for a failed write). All 9 fail on base.
+- Verification (builder, base bee1feb, sandbox, go1.27.1): gofmt, build,
+  vet clean; go test ./... 712 passes counting subtests, 3 skips (base
+  703, 3); -race the same, no race; web tests -race x3, 384 pass; new
+  tests x10 and -race x5 pass; 16 mutants, 15 caught (M04, a failed
+  encode not counted, had no test); check.mjs against the test server,
+  JPEG and raw: passes.
+- Left alone: player.js and its node tests, the page's stats op, sound
+  handling (pushPCM, drainAudio), encErrors, docs/DEVELOPMENT.md.
+- Not run by the builder: a real browser or device session; a benchmark
+  of the per-frame cost; a merge with the parallel sound change.
+- Intake: taken in on 20dad0f, the tip once parts 57, 59 and 58 had
+  landed, which change none of its files: the builder's 5 files as built.
+  Reviewed on /tmp/opencode/review-54.
+- Review round 1 (NEEDS CHANGES): LOW, no test held the drop of a frame
+  whose encode fails, though a test reaches it; NIT, loose words on
+  that drop and on kbps's window and unit; three suggestions, all taken.
+- Round 2: TestWebStatusCountsFramesItCannotSend gains "its encode
+  fails" (a planted encoder whose 1-byte buffer no JPEG fits) and a raw
+  viewer's too-short frame; TestKbpsOver a 0.8 kbps case; the new
+  TestWebStatusAnswersAPingDuringATick holds the socket while the viewer
+  pings, so a tick stores the rate between the reader's read and write.
+  Docs, KBps comment: "could not send", the unit, the window, the ping.
+- Verification, round 2 (builder, base bee1feb): gofmt, vet, build,
+  node --check, diff --check clean; go test ./... 715 passes counting
+  subtests, 3 skips, -race the same, no race; related tests -race x3,
+  393 pass; changed tests x20, -cpu=1 x20, -race x5 pass, all fail on
+  base; 16 mutants, 16 caught; the review's R06, R11, R16 (-race) too.
+- Intake, round 2: on 8b5fa95, the tip once part 61 had also landed;
+  none of the landed parts changes this part's files, so the builder's
+  5 files are taken as built. Reviewed on /tmp/opencode/review-54b.
+- Review round 2 (PASS), with one LOW and one NIT: no test held what a
+  ping's answer says; the round-1 intake bullet promised checks the
+  commit message will not carry.
+- Round 3: TestWebStatusPingRepeatsTheRate, the review's test with its
+  first wait bounded; a handle-less encoder's frame pinned as a drop and
+  an encode error; sendLoop's comment in the docs' words.
+- Verification, round 3 (builder, base bee1feb): gofmt, vet, build,
+  diff --check clean; go test ./... 717 passes counting subtests, 3
+  skips, -race too; related -race x3 399; 9 tests x20, -race x5; the new
+  one x50, -cpu=1 x20, -race x10, 80 under load; all fail on base; 25 of
+  25 mutants caught; on fc7d19e's web.go, no conflict, 9 tests pass.
+- Intake, round 3: on part 55's fourth round (/tmp/opencode/review-55d,
+  on 531fd36, the tip once parts 53, 51 and 52 had also landed): web.go
+  and docs/ARCHITECTURE.md, which part 53 also changes, merged three ways
+  (each merge adds exactly this part's lines); the other 3 files as built.
+  The intake bullets of rounds 1 and 2 no longer point at the commit
+  message (the review's NIT). Reviewed on /tmp/opencode/review-54c; that
+  tree's checks are in this part's commit message.
+
 ## Update (2026-10-22: QoL overhaul, part 55: dropping a cancelled paste's rest)
 
 - Issue #10. After Ctrl+C cancels a paste, input is dropped up to the

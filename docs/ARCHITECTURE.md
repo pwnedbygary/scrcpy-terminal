@@ -166,6 +166,15 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
 - Each browser has its own mailbox with one slot, and its own goroutine that encodes the newest
   frame as a JPEG (FFmpeg's mjpeg encoder, at the `--web-quality` level) and sends it. A slow
   browser loses frames instead of slowing the decoder or the other browsers.
+- The status messages, every half second, carry each browser's own figures since it connected:
+  `sent`, the frames sent to it; `dropped`, the frames it missed, because a newer frame replaced
+  them in its mailbox or its goroutine could not send them; and `rawBytes`, the bytes of the
+  raw frames sent to it, their 16-byte headers included. Frames are numbered as they are sent,
+  so the page cannot count the ones it missed. `kbps` is the rate of what scterm wrote to its
+  connection from one half-second status to the next, in kilobits per second: video, sound and
+  any other message, but not those two statuses, so it is 0 while nothing else is sent. A
+  status that answers a ping neither ends that window nor brings a new figure: it repeats the
+  last one (`sendLoop` in `web.go`).
 - The JPEG is encoded straight into a pooled buffer, after the 16-byte frame header, so each
   frame is one write. There is one encoder for each canvas size, behind a mutex, because a
   libavcodec context is not thread-safe. Each browser costs one encode per frame.

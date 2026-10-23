@@ -230,6 +230,8 @@ type webClient struct {
 
 	sentVideo, dropVideo atomic.Int64
 	encErrors            atomic.Int64
+	rawBytes             atomic.Int64
+	kbpsBits             atomic.Uint64 // float64 bits, set by sendLoop
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +756,7 @@ func (c *webClient) offer(f *videoFrame) {
 	c.frame = f
 	c.frameMu.Unlock()
 	if old != nil {
+		c.dropVideo.Add(1)
 		// Dropped from the mailbox unsent: that was the mailbox's hold.
 		c.srv.releaseFrame(old)
 	}
@@ -1252,6 +1255,11 @@ func (c *webClient) sendLoop() {
 	ticker := time.NewTicker(c.statusEvery)
 	defer ticker.Stop()
 
+	// A status's kbps covers what was written from one half-second status
+	// to the next, neither counted: the status alone would keep it above 0
+	// while nothing else goes out. A status that answers a ping neither
+	// ends that window nor brings a new figure: it repeats the last one.
+	wrote, since := c.ws.wrote.Load(), time.Now()
 	for {
 		select {
 		case <-c.closeCh:
@@ -1263,10 +1271,21 @@ func (c *webClient) sendLoop() {
 			}
 			c.sendFrame(f)
 		case <-ticker.C:
+			kbps := kbpsOver(c.ws.wrote.Load()-wrote, time.Since(since))
+			c.kbpsBits.Store(math.Float64bits(kbps))
 			c.sendStatus()
+			wrote, since = c.ws.wrote.Load(), time.Now()
 			c.drainAudio()
 		}
 	}
+}
+
+// kbpsOver is the rate of n bytes in d, in kilobits per second.
+func kbpsOver(n int64, d time.Duration) float64 {
+	if d <= 0 {
+		return 0
+	}
+	return float64(n) * 8 / 1000 / d.Seconds()
 }
 
 // sendFrame encodes (when needed) and writes one video frame.
@@ -1289,6 +1308,7 @@ func (c *webClient) sendFrame(f *videoFrame) {
 	// canvas the buffer cannot fill.
 	if need := cv.cw * cv.ch * 4; need <= 0 || len(f.rgb) < need {
 		c.encErrors.Add(1)
+		c.dropVideo.Add(1)
 		s.logLimited("scterm: web: frame buffer %d bytes cannot fill canvas %dx%d (%d bytes)\n",
 			len(f.rgb), cv.cw, cv.ch, need)
 		s.releaseFrame(f)
@@ -1306,6 +1326,7 @@ func (c *webClient) sendFrame(f *videoFrame) {
 		format = webFormatJPEG
 		size := s.encoderMaxSize(cv)
 		if size <= 0 {
+			c.dropVideo.Add(1)
 			s.releaseFrame(f)
 			return
 		}
@@ -1314,6 +1335,7 @@ func (c *webClient) sendFrame(f *videoFrame) {
 		n, err := s.encodeWith(cv, f.rgb, buf, webHeaderLen)
 		s.releaseFrame(f)
 		if err != nil || n <= 0 {
+			c.dropVideo.Add(1)
 			if err != errJencTooSmall {
 				c.encErrors.Add(1)
 				s.logLimited("scterm: web: jpeg encode: %v\n", err)
@@ -1342,6 +1364,9 @@ func (c *webClient) sendFrame(f *videoFrame) {
 	if err := c.ws.WriteBinary(buf); err != nil {
 		s.poolPut(buf)
 		return
+	}
+	if raw {
+		c.rawBytes.Add(int64(len(buf)))
 	}
 	s.poolPut(buf)
 
@@ -1535,12 +1560,12 @@ type webStatus struct {
 	DevVolOK  bool    `json:"devVolOk"`
 	Clients   int64   `json:"clients"`
 	Sent      int64   `json:"sent"`
-	Dropped   int64   `json:"dropped"`
+	Dropped   int64   `json:"dropped"` // frames this viewer missed since it connected
 	Control   bool    `json:"control"`
 	Keys      int     `json:"keys"` // Android keycodes the UI can send
-	KBps      float64 `json:"kbps"`
+	KBps      float64 `json:"kbps"` // kbit/s from one half-second status to the next; a ping's answer repeats it
 	JPEGms    float64 `json:"jpegMs"`
-	RawBytes  int64   `json:"rawBytes"`
+	RawBytes  int64   `json:"rawBytes"` // since it connected, video headers included
 	// AudioPeak is the largest |sample| seen since start (0 = the device is
 	// sending digital silence). The TUI status line has always shown this; web
 	// mode needs it to answer "is the device actually making a sound?" without
@@ -1610,9 +1635,12 @@ func (c *webClient) sendStatus() {
 		DevVolOK:  devOK,
 		Clients:   n,
 		Sent:      c.sentVideo.Load(),
+		Dropped:   c.dropVideo.Load(),
 		Control:   c.srv.ctrl != nil,
 		Keys:      1,
+		KBps:      math.Float64frombits(c.kbpsBits.Load()),
 		JPEGms:    c.srv.encodeMs(),
+		RawBytes:  c.rawBytes.Load(),
 		AudioPeak: c.srv.stream.peakAudio(),
 		HostAudio: hostAudio,
 	}
