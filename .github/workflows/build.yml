@@ -167,3 +167,5 @@ jobs:
             scterm-android-*.apk
             LICENSE
             third_party/LICENSE.scrcpy
+            third_party/LICENSE.golang
+            third_party/LICENSE.shizuku

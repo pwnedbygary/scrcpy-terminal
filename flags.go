@@ -165,7 +165,7 @@ var helpSections = []struct {
 		{"doctor", "check what scterm needs on this computer"},
 		{"update [--check] [-y]", "update to the latest release, or pull and rebuild"},
 		{"version", "print the version"},
-		{"licenses", "print the licenses of scterm and the scrcpy server"},
+		{"licenses", "print the licenses of scterm and what it includes"},
 		{"help", "print this help"},
 		{"COMMAND -h", "print a command's own help"},
 	}},

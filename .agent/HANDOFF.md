@@ -7,6 +7,85 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-22: QoL overhaul, part 59: the libraries' licence texts)
+
+- Issue #16. The binary links Go's runtime and standard library,
+  `golang.org/x/net` and `golang.org/x/sys` (BSD 3-Clause: its text must
+  come with binary copies); the APK includes the Shizuku API library (MIT:
+  its notice must come with every copy). Neither carried them.
+- `scterm licenses` prints a third text, `third_party/LICENSE.golang`
+  (new): a lead naming what it covers, the modules one per line, then the
+  BSD text. Go's own LICENSE (Arch keeps it in /usr/share/licenses/go;
+  this computer's GOROOT has none), x/net v0.59.0's and x/sys v0.48.0's
+  are byte-identical (sha256 911f8f57...). Not `LICENSE.go`: go would
+  compile it.
+- The APK carries `assets/LICENSE.shizuku`, a copy of
+  `third_party/LICENSE.shizuku` (new), Shizuku-API's `LICENSE` byte for
+  byte (no final newline). Releases attach both new files.
+- Found: AndroidX, Kotlin, kotlinx, JSpecify, JetBrains annotations and
+  ListenableFuture are Apache 2.0, already covered; no checked artifact
+  has a NOTICE file.
+- Left alone: AGP's default packaging drops a dependency's
+  META-INF/NOTICE and top-level NOTICE files without a word (seen in
+  AGP 9.3.2; 9.4.1, which the project pins, is not on this machine). A
+  future dependency's NOTICE would have to be added as an asset by hand,
+  and no test would notice it missing.
+- Kept `/META-INF/{AL2.0,LGPL2.1}` excluded: in ~/.gradle only JNA's jars
+  carry them (its dual licence), and the APK has no JNA.
+- Docs: README's License section, android/README.md, RELEASING.md, and
+  third_party/README.md's new Go and Shizuku sections.
+- Tests: the command test (renamed ...PrintsTheTexts) checks the order
+  and the Go file whole. New TestGoLicenseIsTheModulesOwn runs
+  `go list -deps` (GOPROXY=off): the list must equal the linked modules,
+  and the text must equal each module's copy (the module cache's, or
+  vendor/'s in vendor mode) and GOROOT's; a copy missing here is skipped,
+  saying why. Asset, release and README tests cover the new files.
+- Verification (sandbox): go test ./... 515 passed, 3 skipped, 0 failed
+  (base 514, 3, 0); the GOROOT subtest skips (Arch keeps that file in
+  /usr/share/licenses/go) and passes against a GOROOT copy with it.
+  Fail-before: 5 of 5 tests fail on base. 23 mutations, 23 caught.
+  `-race` and `-count=20` pass. The binary prints 14220 bytes (was
+  12580), at most 79 columns. aapt2 -A packs the 3 assets unchanged.
+  Docs checker: 0 problems. gofmt, vet, release build clean.
+- Not run by the builder: CI, Gradle and its APKs, the GOROOT check on a
+  real GOROOT licence, NOTICE checks on the app's exact dependency
+  versions (not on this machine).
+- Intake: taken in on bee1feb, the branch tip: nine of the builder's 10
+  files as built; README.md as built but for one line outside the License
+  section the builder was given, and one line of flags.go, outside its
+  files. The builder had left both lines true but incomplete: the help's
+  Commands line and the README's table of commands now say the command
+  prints the licenses of scterm and what it includes (the help's line
+  fits on one line, as TestHelpIsGrouped requires). Reviewed on its own
+  snapshot, /tmp/opencode/review-59.
+- Review round 1 (/tmp/opencode/review-59): PASS, with one LOW and one
+  NIT. LOW-1: in vendor mode go list gives a module no directory, and the
+  module subtests skipped with "the module cache has no copy", though
+  vendor/ held both LICENSE files. NIT-1: the entry's GOROOT wording, the
+  AGP NOTICE risk and "10 files as built" (corrected above). Suggestions
+  taken: pin Shizuku's text, docs that name no module, `licenses -h`.
+- Round 2: a module with no directory from go list has its LICENSE read
+  from vendor/<path>/LICENSE (moduleLicense, unit-tested in a temporary
+  directory); with none there, the subtest skips and says both facts.
+  TestAppCarriesTheLicenses also checks LICENSE.shizuku's SHA-256
+  (64870037...), so an edit made to both copies alike fails; its helper
+  has its own test. Both READMEs point at the list in LICENSE.golang
+  instead of naming modules; third_party/README.md says to update the
+  digest with the file. `licenses -h` reads as one list.
+- Verification, round 2 (sandbox): go test -count=1 -v ./... 517 passed,
+  3 skipped, 0 failed (round 1: 515, 3, 0). In a copy vendored offline,
+  both module subtests read vendor/ and pass, an edited vendored LICENSE
+  fails its subtest, and a removed one skips with the new reason; round
+  1's test skips both, as the review found. 12 mutants, 12 caught; R9
+  (both Shizuku copies edited alike) now fails. -count=20 and -race
+  -count=5 pass. gofmt, vet and builds are clean; docs checker: 0
+  problems.
+- Intake, round 2: on cb02c66, the branch tip once part 57 had landed:
+  the builder's round-2 files as built, with .github/workflows/build.yml
+  and docs/RELEASING.md, which part 57 also changed, merged three ways
+  (each merge adds exactly this part's lines). Reviewed on
+  /tmp/opencode/review-59b.
+
 ## Update (2026-10-22: QoL overhaul, part 57: CI runs -race and the shell tests)
 
 - CI's Go job installs zsh and fish and runs `go test -race ./...` (no plain

@@ -149,5 +149,9 @@ Release builds and the signing key are described in
 
 The app is released under the MIT License ([LICENSE](../LICENSE)). The scrcpy
 server compiled into it keeps its own license, the Apache License 2.0
-([third_party/LICENSE.scrcpy](../third_party/LICENSE.scrcpy)). The APK carries
-both texts, as `assets/LICENSE` and `assets/LICENSE.scrcpy`.
+([third_party/LICENSE.scrcpy](../third_party/LICENSE.scrcpy)), and so do the
+AndroidX and Kotlin libraries the app uses. The Shizuku API library, behind
+*Start with Shizuku*, is under the MIT License
+([third_party/LICENSE.shizuku](../third_party/LICENSE.shizuku)). The APK carries
+the three texts, as `assets/LICENSE`, `assets/LICENSE.scrcpy` and
+`assets/LICENSE.shizuku`.

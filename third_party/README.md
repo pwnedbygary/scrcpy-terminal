@@ -25,3 +25,24 @@ made:
   commit `afcd41b` (2026-09-24): scrcpy's playback capture (`--audio-source playback`) records
   media only (`USAGE_MEDIA`); scterm's also records game and untagged audio (`USAGE_GAME` and
   `USAGE_UNKNOWN`), so that games stream their sound.
+
+## Go
+
+The Linux binary includes Go's runtime and standard library, with the copies of `golang.org/x`
+packages that the standard library carries, and the Go modules listed in
+[LICENSE.golang](LICENSE.golang), all by the Go Authors and licensed under the BSD 3-Clause
+License. That file, which `scterm licenses` prints, holds the list and the license.
+`TestGoLicenseIsTheModulesOwn` checks the list against the modules that the binary links, and
+the text against each module's copy in the module cache (under `vendor/`, in vendor mode) and
+Go's in `GOROOT`.
+
+## Shizuku
+
+The APK includes the [Shizuku API](https://github.com/RikkaApps/Shizuku-API) library by RikkaW
+(`dev.rikka.shizuku:api` and `:provider`, and the `:aidl` and `:shared` they depend on), which
+is licensed under the MIT License: [LICENSE.shizuku](LICENSE.shizuku) is that repository's
+`LICENSE`. The APK carries a copy of it in `android/app/src/main/assets`: when the file changes,
+copy it there too and update its SHA-256 in `licenses_test.go` (`TestAppCarriesTheLicenses`
+checks that the two are the same, and that the text has that SHA-256). The app's
+other libraries, AndroidX, Kotlin's and the few that these use, are licensed under the Apache
+License 2.0, whose text the APK carries as `assets/LICENSE.scrcpy`.

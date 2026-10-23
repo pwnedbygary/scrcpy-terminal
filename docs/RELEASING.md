@@ -19,8 +19,9 @@ and when you start it by hand. It has three jobs:
 - **release**, for a tag or a manual run: builds the release binary with the version stamped
   into it and fetches the signed APK. For a tag only, it publishes a GitHub release named
   `scterm vX.Y.Z`, with the tagged commit's message as its notes. It attaches `scterm`,
-  `scterm-android-X.Y.Z.apk`, and the license texts `LICENSE` (scterm's) and `LICENSE.scrcpy`
-  (the scrcpy server's).
+  `scterm-android-X.Y.Z.apk`, and the license texts `LICENSE` (scterm's), `LICENSE.scrcpy`
+  (the scrcpy server's), `LICENSE.golang` (that of the Go code in the binary) and
+  `LICENSE.shizuku` (that of the Shizuku library in the APK).
 
 ## Make a release
 

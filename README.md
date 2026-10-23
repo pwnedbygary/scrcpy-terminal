@@ -650,7 +650,7 @@ variables also help: `SCT_DEBUG_WEB=1` logs each browser's paint and decode stat
 | `scterm doctor` | Check what scterm needs on this computer, and say what to do about problems |
 | `scterm update [--check] [-y]` | Update to the latest release, or pull and rebuild |
 | `scterm version` | Print the version |
-| `scterm licenses` | Print the licenses of scterm and of the scrcpy server it bundles |
+| `scterm licenses` | Print the licenses of scterm and what it includes |
 | `scterm help` | Print the help, as `scterm -h` does |
 | `scterm COMMAND -h` | Print a command's own help |
 
@@ -749,8 +749,13 @@ libraries and plays sound through PulseAudio.
 scterm, the Android app included, is released under the MIT License: see [LICENSE](LICENSE).
 The scrcpy server, which scterm and the app both bundle, keeps its own license, the Apache
 License 2.0 (see above); other third-party files, such as the Gradle wrapper, keep theirs too.
+So do the libraries built into scterm: the binary includes Go's runtime and standard library
+and the Go modules listed in [third_party/LICENSE.golang](third_party/LICENSE.golang), under
+the BSD 3-Clause License; the app includes the Shizuku API library, under the MIT License, and
+AndroidX and Kotlin libraries, under the Apache License 2.0.
 
-Both license texts come with every copy of scterm: `scterm licenses` prints them, each release
-attaches them as `LICENSE` and `LICENSE.scrcpy` next to the binary and the APK, and the APK
-holds them as `assets/LICENSE` and `assets/LICENSE.scrcpy`. scterm's changes to the server's
-source are listed in [third_party/README.md](third_party/README.md).
+The license texts come with every copy of scterm: `scterm licenses` prints those of the binary,
+each release attaches them as `LICENSE`, `LICENSE.scrcpy`, `LICENSE.golang` and
+`LICENSE.shizuku` next to the binary and the APK, and the APK holds its own as
+`assets/LICENSE`, `assets/LICENSE.scrcpy` and `assets/LICENSE.shizuku`. What each covers, and
+scterm's changes to the server's source, are in [third_party/README.md](third_party/README.md).
