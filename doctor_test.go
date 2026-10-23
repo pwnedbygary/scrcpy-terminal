@@ -215,7 +215,8 @@ func TestDoctorWithoutADB(t *testing.T) {
 // server, it says so: a failure when it is that device or scterm has none it
 // can mirror, and a warning otherwise. Another ready device is listed as adb
 // lists it, and may be one scterm can mirror. Several ready devices need -s
-// or ANDROID_SERIAL, which picks the device scterm uses.
+// or ANDROID_SERIAL, which picks the device scterm uses; the line that says
+// so names them as scterm does when it stops.
 func TestDoctorExplainsEachDeviceState(t *testing.T) {
 	const pixel = "\tdevice usb:1-1 product:shiba model:Pixel_8 device:shiba transport_id:1\n"
 	const tab = "\tdevice usb:1-2 product:gts9 model:Tab_S9 device:gts9 transport_id:2\n"
@@ -256,6 +257,12 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 		{"two ready", devicesHeader + "GT9" + tab + "R5CT" + pixel, "", map[string]string{"GT9": "13 33", "R5CT": "14 34"},
 			"ok    device  GT9 (Tab_S9)" + unread + "ok    device  R5CT (Pixel_8)" + unread +
 				"warn  device  2 devices are connected (GT9, R5CT)\n" +
+				"              choose one with -s SERIAL, or set ANDROID_SERIAL\n"},
+		{"two ready, one serial with control characters, beside a state with one inside",
+			devicesHeader + "R5\x1b]0;owned\x07CT\u202e" + pixel + "GT9" + tab + "OLD\treco\x1bvery usb:1-3 transport_id:3\n", "", nil,
+			"ok    device  R5]0;ownedCT (Pixel_8)" + unread + "ok    device  GT9 (Tab_S9)" + unread +
+				"warn  device  OLD is in reco very mode, not ready for scterm\n              start Android on it normally\n" +
+				"warn  device  2 devices are connected (R5 ]0;owned CT, GT9)\n" +
 				"              choose one with -s SERIAL, or set ANDROID_SERIAL\n"},
 		{"ready beside unauthorized", devicesHeader + "GT9\tunauthorized usb:1-2 transport_id:3\nR5CT" + pixel, "",
 			map[string]string{"R5CT": "14 34"},
@@ -340,6 +347,13 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 		if _, err := pickDevice(tc.listing); err != nil && tc.serial == "" && len(lines) == 2 && lines[1].status == doctorFail {
 			if said := lines[1].detail + ": " + lines[1].todo; said != err.Error() {
 				t.Errorf("%s: doctor says %q, scterm says %q", tc.name, said, err)
+			}
+		}
+		// Several ready devices, none chosen, are named as in the error scterm
+		// stops with.
+		if _, err := pickDevice(tc.listing); err != nil && tc.serial == "" && strings.Contains(err.Error(), " devices are connected (") {
+			if last := lines[len(lines)-1]; !strings.HasPrefix(err.Error(), last.detail+": ") {
+				t.Errorf("%s: doctor says %q, scterm says %q", tc.name, last.detail, err)
 			}
 		}
 	}

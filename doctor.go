@@ -280,10 +280,10 @@ func doctorDevices(paired int) []doctorLine {
 			orPeer("restart adb with 'adb kill-server', then try again", paired)}}
 	}
 	devices := listedDevices(out)
-	var ready []string
+	var ready []string // shown as pickDevice shows them
 	for _, d := range devices {
 		if d.state == "device" {
-			ready = append(ready, d.serial)
+			ready = append(ready, cleanText(d.serial))
 		}
 	}
 	// The device scterm would use, as findDevice picks it: the one adb takes

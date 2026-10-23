@@ -365,13 +365,19 @@ name, in single quotes, only when any part of the name copied from inside the qu
 words, and else by its identity. The identity is used when the name has a character a shell
 reads (such as `$`, `;`, `*`, `#` or a backslash), a character that is not printable (a
 control, format, private-use or unassigned one, or a space other than the ASCII one) or that
-looks blank or like nothing (U+2800, a Hangul filler, U+034F, U+17B4, U+17B5), spaces at
-either end or two together, scterm in any case, even with quotes or marks of no width between
-its letters (a shell takes quotes out of a word, and a terminal may leave such marks out when
-it copies), or more than 32 columns as the command writes it (a combining mark counts as one);
-when it is a word scterm reads another way (`help`); or when it would select another paired
-device too, or instead (one with the same name in another case, say). When nothing selects the
-device alone, scterm prints no command, and says that it cannot give one.
+looks blank or like nothing (U+2800, a Hangul filler, U+034F, U+17B4, U+17B5), or more than 32
+columns as the command writes it (a combining mark counts as one). A terminal may leave out
+what it gives no width when it copies (marks of no width, and in some terminals Hangul vowels
+and final consonants), all of it or only some, and a shell takes quotes out of a word. So the
+identity is also used when the name holds more than one such character (`Room 1️⃣`: its keycap
+holds two); when the name without them and its quotes is nothing, has spaces at either end or
+two together, holds scterm in any case, or is a word scterm reads another way (`help`); and
+when the name, as written or without its one such character, would select another paired
+device too, or instead (one with the same name in another case, say, or `Pixel` beside `Pix`,
+a mark and `el`), or none: a name with that character before its end, as an emoji's U+FE0F in
+`Mom's ❤️ phone` or an accent written as a mark, gets its identity, as what is left does not
+start its own name. When nothing selects the device alone, scterm prints no command, and says
+that it cannot give one.
 
 ### Connecting
 

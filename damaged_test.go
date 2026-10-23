@@ -454,28 +454,37 @@ func TestPeersListDamagedPairings(t *testing.T) {
 
 // TestDamagedIsNoName: scterm forget takes --damaged for the command, never for
 // a name: a device named --damaged is named by its identity in the commands
-// scterm prints, and so is one whose name a paste can come to --damaged (it
-// ends in a variation selector, which a terminal may leave out when it
-// copies); scterm forget --damaged leaves both alone. The word is taken as
-// written, so a device named --Damaged is named, and forgotten, by its name.
+// scterm prints, and so is one whose name, pasted, can come to --damaged as
+// forget trims it: --damaged with a variation selector or a combining mark,
+// which a terminal may leave out when it copies, at its end, inside it, or
+// beside a space at either end. scterm forget --damaged leaves them all alone.
+// The word is taken as written, so a device named --Damaged is named, and
+// forgotten, by its name.
 func TestDamagedIsNoName(t *testing.T) {
 	withInteractive(t, false)
-	for _, name := range []string{"--damaged", "--damaged\ufe0f"} {
-		fp := peer.FingerprintOf([]byte(name))
-		dev := pairing(fp.Hex(), name, "192.0.2.1")
+	for _, tc := range []struct{ name, query string }{ // query: a part of the name
+		{"--damaged", "--dam"},
+		{"--damaged\ufe0f", "--dam"},
+		{"--damaged\u0301", "--dam"},
+		{"-\u0301-damaged", "-\u0301-dam"},
+		{"--damaged \ufe0f", "--dam"},
+		{"\ufe0f --damaged", "--dam"},
+	} {
+		fp := peer.FingerprintOf([]byte(tc.name))
+		dev := pairing(fp.Hex(), tc.name, "192.0.2.1")
 		store := writePairings(t, dev)
-		if got, ok := pasteArg(store, name, fp); !ok || got != fp.Short() {
-			t.Errorf("%q: pasteArg gives %s, %v; want %s", name, got, ok, fp.Short())
+		if got, ok := pasteArg(store, tc.name, fp); !ok || got != fp.Short() {
+			t.Errorf("%+q: pasteArg gives %+q, %v; want %s", tc.name, got, ok, fp.Short())
 		}
 		said, _, err := runForget(t, "", "--damaged")
 		if err != nil || said != "No pairing has an identity that does not parse: there is nothing to forget.\n" {
-			t.Errorf("%q: forget --damaged: %v, stdout %q; want nothing to forget", name, err, said)
+			t.Errorf("%+q: forget --damaged: %v, stdout %q; want nothing to forget", tc.name, err, said)
 		}
-		want := `"--dam" only partly matches a paired device: to forget it, run scterm forget ` + fp.Short()
-		if _, _, err := runForget(t, "", "--dam"); errText(err) != want {
-			t.Errorf("%q: forget --dam: %q\nwant %q", name, errText(err), want)
+		want := fmt.Sprintf("%q only partly matches a paired device: to forget it, run scterm forget %s", tc.query, fp.Short())
+		if _, _, err := runForget(t, "", tc.query); errText(err) != want {
+			t.Errorf("%+q: forget %+q: %q\nwant %q", tc.name, tc.query, errText(err), want)
 		}
-		wantLeft(t, store, fmt.Sprintf("%q: forget --damaged and --dam", name), dev)
+		wantLeft(t, store, fmt.Sprintf("%+q: forget --damaged and %+q", tc.name, tc.query), dev)
 	}
 
 	cased := peer.FingerprintOf([]byte("--Damaged"))

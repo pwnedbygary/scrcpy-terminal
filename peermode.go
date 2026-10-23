@@ -219,11 +219,13 @@ func damagedWords(n int) (count, the, them string) {
 
 // pasteArg is how a command printed for the user to paste (scterm --peer ARG,
 // scterm forget ARG) names the pairing with identity fp: by its name, in
-// single quotes, when that is plain and finds this pairing and no other; else
-// by its short or its whole identity, whichever finds it alone, so that the
-// command never carries text the device chose. It reports false when none
-// does (two pairings have the identity, or the pairings cannot be read), and
-// then no command should be printed.
+// single quotes, when that is plain and every copy of it a terminal may make
+// finds this pairing and no other (everyCopyFinds), so that a paste of the
+// command does what the command does; else by its short or its whole
+// identity, whichever finds it alone, so that the command never carries text
+// the device chose. It reports false when none does (two pairings have the
+// identity, or the pairings cannot be read), and then no command should be
+// printed.
 // The quotes are there even when the name needs none: an interactive zsh
 // expands a global alias wherever a bare word names one.
 func pasteArg(store *peer.Store, name string, fp peer.Fingerprint) (string, bool) {
@@ -238,7 +240,7 @@ func pasteArg(store *peer.Store, name string, fp peer.Fingerprint) (string, bool
 	namesake := slices.ContainsFunc(recs, func(r peer.Record) bool {
 		return r.Fingerprint != fp.Hex() && strings.EqualFold(r.Name, name)
 	})
-	if plainName(name) && !namesake && finds(name) {
+	if plainName(name) && !namesake && everyCopyFinds(name, finds) {
 		return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'", true
 	}
 	// Another pairing's short identity can be the same.
@@ -250,6 +252,18 @@ func pasteArg(store *peer.Store, name string, fp peer.Fingerprint) (string, bool
 	return "", false
 }
 
+// everyCopyFinds reports whether finds holds for every copy a terminal may
+// make of name: the name as written and, when it holds one character a
+// terminal may leave out (copiedAs, which keeps the name's quotes, as a shell
+// does inside the command's), the name without it. It reports false for a
+// name that holds more than one, as a terminal may leave out some of them
+// and keep the others, and those copies are not tried: a name with a keycap
+// (1, U+FE0F, U+20E3) goes by its identity.
+func everyCopyFinds(name string, finds func(string) bool) bool {
+	copied := copiedAs(name)
+	return finds(name) && (copied == name || utf8.RuneCountInString(name)-utf8.RuneCountInString(copied) == 1 && finds(copied))
+}
+
 // shellChars are the characters a shell reads in a bare word: to end, chain or
 // redirect a command, to substitute, expand or glob, to start a comment or a
 // history expansion, or to escape (fish reads a backslash even inside single
@@ -258,29 +272,47 @@ const shellChars = "\\`;&|<>()$*?[]{}~#!^%="
 
 // plainName reports whether a command can name a device by its name, in single
 // quotes: whatever part of the name is copied from inside the quotes, it is
-// only words, and the name reads as cleanText shows it. A plain name is not
-// empty, is UTF-8, takes at most nameCells cells as textCells counts them and
-// the command writes it (an apostrophe takes four there), and every character
-// of it shows as what it is and is none of shellChars; it has no space at
-// either end (a query loses them) nor two together; no "scterm" in any case,
-// not even in what a paste of it can come to (pastedAs), as words such as
-// scterm forget Pixel copied from it would run as they read; and scterm forget
-// takes it as a name: it is not a word that asks a command for its help, and
-// no paste of it can come to --damaged.
+// only words; the name reads as cleanText shows it; and a paste of it is
+// taken as a name, whatever a terminal leaves out of it when it copies. A
+// plain name is UTF-8, takes at most nameCells cells as textCells counts them
+// and the command writes it (an apostrophe takes four there), and every
+// character of it shows as what it is and is none of shellChars. What is left
+// of a paste of it that lost the most (pastedAs), which keeps all of its
+// spaces, is not empty; has no space at either end (a query loses them) nor
+// two together; holds no "scterm" in any case, as words such as scterm forget
+// Pixel copied from it would run as they read; and is what scterm forget
+// takes as a name: not a word that asks a command for its help, nor
+// --damaged. A paste that loses less holds each of these too. Whether each
+// copy finds the pairing alone is everyCopyFinds's to check.
 func plainName(name string) bool {
-	return name != "" && utf8.ValidString(name) && textCells(name)+3*strings.Count(name, "'") <= nameCells &&
-		strings.TrimSpace(name) == name && !strings.Contains(name, "  ") &&
-		!strings.Contains(strings.ToLower(pastedAs(name)), "scterm") && !isHelpArg(name) && pastedAs(name) != damagedArg &&
+	pasted := pastedAs(name)
+	return pasted != "" && utf8.ValidString(name) && textCells(name)+3*strings.Count(name, "'") <= nameCells &&
+		strings.TrimSpace(pasted) == pasted && !strings.Contains(pasted, "  ") &&
+		!strings.Contains(strings.ToLower(pasted), "scterm") && !isHelpArg(pasted) && pasted != damagedArg &&
 		!strings.ContainsFunc(name, func(r rune) bool { return !shownAsIs(r) || strings.ContainsRune(shellChars, r) })
 }
 
-// pastedAs is what a paste of text can come to: a terminal may leave out the
-// characters that take no cell (variation selectors, combining marks) when it
-// copies, and a shell takes the quotes ' and " out of a word, so sc""term runs
-// scterm.
+// pastedAs is text without the most a paste of it can lose: what a terminal
+// gives no cell (copiedAs), and the quotes ' and ", which a shell takes out
+// of a word, so sc""term runs scterm.
 func pastedAs(text string) string {
 	return strings.Map(func(r rune) rune {
-		if r == '\'' || r == '"' || runeCells(r) == 0 {
+		if r == '\'' || r == '"' {
+			return -1
+		}
+		return r
+	}, copiedAs(text))
+}
+
+// copiedAs is text as a terminal would copy it if it left out every character
+// it gives no cell: those runeCells counts as none (variation selectors,
+// combining marks), and the Hangul vowels and final consonants
+// (U+1160-U+11FF, U+D7B0-U+D7FF), to which glibc's wcwidth and GLib give no
+// cell. runeCells counts one for each of those, as counting none where a
+// terminal draws one would overflow a row.
+func copiedAs(text string) string {
+	return strings.Map(func(r rune) rune {
+		if runeCells(r) == 0 || r >= 0x1160 && r <= 0x11ff || r >= 0xd7b0 && r <= 0xd7ff {
 			return -1
 		}
 		return r

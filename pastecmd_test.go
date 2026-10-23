@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -83,6 +84,13 @@ var pasteNames = []struct{ name, arg string }{
 	{"sc''term", ""},
 	{"sc\ufe0fterm forget Victim", ""}, // a variation selector
 	{"sc\U00016fe4term", ""},
+	{"sc\u20ddterm forget Victim", ""}, // an enclosing mark
+	{"sc\u1161term forget Victim", ""}, // a Hangul vowel, to which glibc and GLib give no cell
+	{"scte\ud7b0rm forget Victim", ""}, // another
+	{"sc\u11a8term forget Victim", ""}, // a final consonant
+	{"scte\ud7cbrm forget Victim", ""}, // another
+	{"sc\u11ffterm forget Victim", ""}, // the last of the first block
+	{"scte\ud7fbrm forget Victim", ""}, // the last of the second
 	// Blank-looking, so they can pad a row: a Braille cell without dots, and
 	// the Hangul fillers.
 	{"Pixel\u28008", ""},
@@ -106,6 +114,8 @@ var pasteNames = []struct{ name, arg string }{
 	{"İzmir", ""}, // Find lowercases it to izmir, and gives that pairing
 	{"Tab 7", ""}, // the same name in another case: neither says which
 	{"TAB 7", ""},
+	{"Pix\ufe0fel", ""},   // copied without the mark, it is Pixel, and Find gives that pairing
+	{"Zoe\u0308 Tab", ""}, // copied without the mark, it is Zoe Tab, which selects no pairing
 	{`back\slash`, ""},
 	{`a\\b`, ""},
 	{`ends\`, ""},
@@ -125,7 +135,9 @@ var pasteNames = []struct{ name, arg string }{
 	{"Moto ", ""}, // found only as the start of a name: Moto G would make it ambiguous
 	{" Nokia", ""},
 	{"Pixel  9", ""},
-	{"help", ""}, // scterm forget help prints the help
+	{"Pixel '' 9", ""},     // likewise, once a shell takes the quotes out
+	{"Pixel \ufe0f 9", ""}, // or a terminal leaves the mark out
+	{"help", ""},           // scterm forget help prints the help
 	{"-h", ""},
 	{"--help", ""},
 	{"-help", ""},
@@ -441,11 +453,41 @@ func runCommandLine(sh pasteShell, bin, root, line string) ([]string, error) {
 	}
 	cmd.Dir, cmd.Env = dir, []string{"PATH=" + bin, "HOME=" + dir}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Run() // most lines name no command, or leave a quote open
+	runErr := cmd.Run()
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("%s did not finish: %v", sh.name, ctx.Err())
 	}
+	// Most lines name no command, or leave a quote open, and the shell exits
+	// with a status; one that did not start, or that a signal ended, shows
+	// nothing of what the line runs.
+	var exited *exec.ExitError
+	if runErr != nil && !(errors.As(runErr, &exited) && exited.Exited()) {
+		return nil, fmt.Errorf("%s: %v", sh.name, runErr)
+	}
 	return filepath.Glob(filepath.Join(dir, "MARKER*"))
+}
+
+// TestRunCommandLineNeedsTheShellToExit: runCommandLine fails when the shell
+// did not start or a signal ended it, where no MARKER file would show that
+// the line ran nothing, and not when the line fails, as most pasted parts do.
+func TestRunCommandLineNeedsTheShellToExit(t *testing.T) {
+	sh := pasteShell{"sh", "/bin/sh", []string{"-c"}, ""}
+	missing := pasteShell{"missing", filepath.Join(t.TempDir(), "sh"), []string{"-c"}, ""}
+	for _, tc := range []struct {
+		sh    pasteShell
+		line  string
+		fails bool
+	}{
+		{missing, "true", true},
+		{sh, "kill -KILL $$", true},
+		{sh, "exit 3", false},
+		{sh, "no-such-command", false},
+		{sh, "'", false}, // a quote left open
+	} {
+		if _, err := runCommandLine(tc.sh, t.TempDir(), t.TempDir(), tc.line); (err != nil) != tc.fails {
+			t.Errorf("%s -c %q: %v; want an error: %v", tc.sh.path, tc.line, err, tc.fails)
+		}
+	}
 }
 
 // TestForgetRefusalPastesAsPrinted: without a terminal, scterm forget refuses
@@ -455,7 +497,8 @@ func runCommandLine(sh pasteShell, bin, root, line string) ([]string, error) {
 // Pasted into each shell, the command runs nothing else and gives
 // scterm forget and the name or, when the name is not plain text, the
 // identity; run, it forgets the pairing. A device named help is given by its
-// identity: scterm forget help prints the help.
+// identity: scterm forget help prints the help. So is one named help and a
+// mark, which a terminal may leave out when it copies.
 func TestForgetRefusalPastesAsPrinted(t *testing.T) {
 	withInteractive(t, false)
 	cases := []struct {
@@ -473,6 +516,7 @@ func TestForgetRefusalPastesAsPrinted(t *testing.T) {
 		{name: `x sc""term forget Victim`, query: "x"},
 		{name: "Pixel" + strings.Repeat("\u2800", 70) + "run scterm forget 'x;touch MARKER-pad #'", query: "pix"},
 		{name: "help", query: "hel"},
+		{name: "help\ufe0f", query: "hel"},
 		{name: dirtyPixel8, query: "pix"},
 		{name: "Pixel 8\u202e", query: "pix"}, // cleaned, it is Pixel 8, which only partly matches it
 	}

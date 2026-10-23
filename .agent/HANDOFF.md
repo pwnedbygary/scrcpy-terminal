@@ -7,6 +7,102 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-23: QoL overhaul, part 63: names a terminal's copying could change)
+
+- A printed command (`scterm --peer 'NAME'` after a pairing, the command
+  in forget's refusal) gives the device's name only if a paste of it does
+  the same, whatever the terminal leaves out of what it gives no width:
+  marks, and the Hangul vowels and final consonants (U+1160-U+11FF,
+  U+D7B0-U+D7FF). The name holds at most one of them, and as written
+  and without it, it selects this pairing and no other; without them and
+  its quotes (pastedAs), it is not empty, has no space at either end nor
+  two together, holds no scterm, and is not a help word or --damaged.
+  Otherwise the command gives the identity. On 531fd36, `Pix`, U+FE0F,
+  `el` beside `Pixel` was printed by name, and its command, copied
+  without the mark, forgot `Pixel` at once. This also closes the part 51
+  review's LOW-1 (the Hangul letters) and the part 52 review's LOW-1 and
+  OUT-1 (a space beside a mark).
+- doctor names several ready devices with their serials cleaned, as
+  scterm's own error does. TestNamePartsRunNoScterm's helper fails when
+  the shell did not start or a signal ended it.
+- Decisions: selection keeps the name's quotes, as a shell does inside
+  the command's (`Gary's Pixel` stays named). A copy that selects
+  nothing means the identity (`Mom's ❤️ phone`), and so does a second
+  such character (`Room 1️⃣`, a keycap). The rule is everyCopyFinds(name,
+  finds), which part 60's pasteArgFor can call. runeCells is unchanged.
+  pasteArg reads peers.json once more for a name with one such character.
+- Tests: new TestANameThatCopiesAsAnotherGoesByItsIdentity (9 pairs, as
+  printed and as copied, 7 shell modes) and
+  TestRunCommandLineNeedsTheShellToExit; pasteNames grows from 90 to 101
+  names; TestDamagedIsNoName from 2 to 6 rows; a help word with a mark;
+  a lone mark; a `$1` data line; a doctor row with a hostile serial.
+- Verification, round 1 (builder, base 531fd36, sbx, go1.27.1): gofmt,
+  vet, build, diff --check clean; ./... 547 pass, 3 skip, 0 fail
+  (531fd36: 545, 3, 0), and under -race; 73 related -race x3: 219/219;
+  11 new or changed x20: 220/220, -race x5: 55/55; 8 paste tests with
+  SCTERM_TEST_REQUIRE_SHELLS=1: 8/8. Mutants: 24 of 26 killed. Among
+  the characters a printed name may hold, copiedAs leaves out exactly
+  what glibc 2.44 and GLib 2.90.1 give no width.
+- Left alone: the rest of #19 (uncapped names, a lone program word,
+  forget's line wrap, how often pasteArg reads peers.json); quoteText;
+  the data lines; part 52's --damaged check. The root cause of the
+  review's LOW-1: Find matches a whole name with strings.EqualFold but
+  its start with strings.ToLower, which keep apart letters EqualFold
+  takes as equal (ſ and s, final sigma and sigma); making them agree is
+  a larger change, outside this part.
+- Not run by the builder: a terminal copying; dash, ksh; fish
+  interactive; adb, phone, peer target, Android app; CI.
+- Intake: on part 54's third round (/tmp/opencode/review-54c, on part
+  55's fourth, both on 531fd36 and in review then): README.md, which
+  part 55 also changes, merged three ways (the merge adds exactly this
+  part's lines); the other 7 files as built. Reviewed on
+  /tmp/opencode/review-63.
+- Review round 1 (NEEDS CHANGES), two LOWs and two NITs: a terminal that
+  leaves out some such characters and keeps others could paste a command
+  that forgot another pairing at once (`ſam's Pixel ❤️` and a vowel
+  beside `Sam's Pixel ❤️`); strict selection and 137 of the 231 jamo
+  were unpinned; the widths claim lacked its qualifier; a sweep's figure
+  followed another sweep.
+- Round 2: at most one such character per printed name (everyCopyFinds);
+  the attack, a Greek pair and a control in the namesake test; rows for
+  U+11A8, U+D7CB and `Zoe` U+0308; comments, README and entry say what
+  is checked and what it costs; doctor's row checked against pickDevice.
+- Verification, round 2 (builder, base 531fd36): the same checks give
+  547, 3, 0 (and under -race), 219/219, 220/220, 55/55 and 8/8. Round
+  1's peermode.go fails the namesake test; 531fd36's code fails 8.
+  Mutants: 35 of 37 killed (the review's R01-R06 re-made); the part 52
+  review's X01 and X02 survive, as there. The review's sweep: 0 of
+  13,800 swapped-letter names quoted (round 1: 13,800). The builder's
+  3,510,826 names: no quoted name's copy selects another pairing or
+  none, or holds two such characters; its round-1 sweep of 49,833 names
+  found 39,562 that select another on 531fd36's code. Part 52's: no
+  plain name's trimmed paste is --damaged.
+- Intake, round 2: on b7252bf, the tip once parts 55 and 54 had landed,
+  whose tree is the one round 1 was stacked on: README.md, which part 55
+  also changes, merged three ways again (the merge adds exactly this
+  part's lines); the other 7 files as built. Reviewed on
+  /tmp/opencode/review-63b.
+- Review round 2 (NEEDS CHANGES), one LOW and one NIT: two weakenings
+  still passed every test: copiedAs ending either Hangul block early, and
+  the one-character limit counted in bytes, under which `ſam's Cafe` and
+  two accents is named, and its command, copied without the second
+  accent, forgets `Sam's Cafe` and one at once; and the commit message
+  said round 2's rows pinned all the jamo.
+- Round 3 adds the three rows the review checked: `sc` U+11FF `term forget
+  Victim` and `scte` U+D7FB `rm forget Victim` in pasteNames, and that
+  accent pair in the namesake test, whose comment now says why. Nothing
+  else changes.
+- Verification, round 3 (builder's tree, base 531fd36, sbx): gofmt and vet
+  clean; ./... 547 pass, 3 skip, 0 fail; the 11 changed and the 73 related
+  tests pass. The review's mutants: J1 and J2 (either block ending early)
+  and J3 and J4 (either block's last letter kept) fail the three tests
+  that use pasteNames, E2 (the limit in bytes) the namesake test; with
+  round 2's test files, all five pass.
+- Intake, round 3: on b7252bf, as round 2: README.md merged as before, the
+  other 7 files as built, two of them with round 3's rows. Reviewed on
+  /tmp/opencode/review-63c; that tree's checks are in this part's commit
+  message.
+
 ## Update (2026-10-22: QoL overhaul, part 54: status kbps, rawBytes, dropped)
 
 - Issue #7. The browser's half-second status now fills in three fields

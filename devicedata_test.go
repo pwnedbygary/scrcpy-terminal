@@ -103,6 +103,7 @@ func TestDataLineNamePastesAsOneWord(t *testing.T) {
 		{name: "`touch MARKER-backtick`", fish: "\\`touch MARKER-backtick\\`"},
 		{name: "$HOME"},
 		{name: "${PATH}"},
+		{name: "$1"},
 		{name: `x"$(touch MARKER-quote)"`},
 		{name: `\$(touch MARKER-backslash)`},
 		{name: "!#;touch MARKER-bang;#"}, // to an interactive bash, !# is the line so far, opening quote and all
