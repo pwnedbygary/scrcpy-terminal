@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"scterm/peer"
 )
@@ -223,6 +225,188 @@ func TestANameThatCopiesAsAnotherGoesByItsIdentity(t *testing.T) {
 				t.Errorf("%s: %v", what, err)
 			}
 			wantLeft(t, store, what, p.other)
+		}
+	}
+}
+
+// TestACopyThatFindsNothingKeepsTheName: a name that holds one character a
+// terminal may leave out when it copies is given as it is when the name
+// without it selects no pairing at all: Mom's ❤️ phone without its emoji's
+// U+FE0F, Zoe Tab without the diaeresis beside Zoe and Tablet, Cafe Pixel
+// without the accent beside Cafe and Pixel. A command pasted from such a
+// terminal finds nothing and does nothing. When the name without it selects
+// this pairing and another (Tab beside Tablet), or others only (Pixe beside
+// Pixel 8 and Pixel 9), the commands give the identity. Pasted into each
+// shell as printed, each command forgets that device and no other; without
+// the character, one that gives the name forgets nothing.
+func TestACopyThatFindsNothingKeepsTheName(t *testing.T) {
+	withInteractive(t, false)
+	type paste struct {
+		meant  peer.Record
+		all    []peer.Record // the meant device, then the others
+		word   string        // what scterm forget should get
+		forget bool          // whether that forgets the meant device
+	}
+	var pastes []paste
+	var commands []string
+	for _, tc := range []struct {
+		name   string
+		others []string
+		arg    string // how the commands name the device; "": by its short identity
+		lost   string // what the terminal leaves out when it copies
+	}{
+		{"Mom's ❤\ufe0f phone", nil, `'Mom'\''s ❤` + "\ufe0f phone'", "\ufe0f"},
+		{"Zoe\u0308 Tab", []string{"Zoe", "Tablet"}, "'Zoe\u0308 Tab'", "\u0308"},
+		{"Cafe\u0301 Pixel", []string{"Cafe", "Pixel"}, "'Cafe\u0301 Pixel'", "\u0301"},
+		{"Tab\u0301", []string{"Tablet"}, "", "\u0301"},
+		{"Pi\u0301xe", []string{"Pixel 8", "Pixel 9"}, "", "\u0301"},
+	} {
+		fp := peer.FingerprintOf([]byte(tc.name))
+		meant := pairing(fp.Hex(), tc.name, "192.0.2.1")
+		all := []peer.Record{meant}
+		for i, o := range tc.others {
+			all = append(all, pairing(peer.FingerprintOf([]byte(o)).Hex(), o, "192.0.2."+strconv.Itoa(i+2)))
+		}
+		store := writePairings(t, all...)
+		want, word, copied := tc.arg, tc.name, strings.ReplaceAll(tc.name, tc.lost, "")
+		if want == "" {
+			want, word, copied = fp.Short(), fp.Short(), fp.Short()
+		}
+		if arg, ok := pasteArg(store, tc.name, fp); !ok || arg != want {
+			t.Errorf("%+q beside %+q: pasteArg gives %+q, %v; want %+q", tc.name, tc.others, arg, ok, want)
+		}
+		command := "scterm forget " + want
+		commands = append(commands, command, strings.ReplaceAll(command, tc.lost, ""))
+		pastes = append(pastes, paste{meant, all, word, true}, paste{meant, all, copied, tc.arg == ""})
+	}
+	var pasted [][]string // what scterm got from each command in the first shell
+	for _, sh := range pasteShells {
+		t.Run(sh.name, func(t *testing.T) {
+			got := pasteInto(t, sh, commands)
+			for i, p := range pastes {
+				if !slices.Equal(got[i], []string{"forget", p.word}) {
+					t.Errorf("%+q: pasted %+q, scterm got %+q; want forget %+q", p.meant.Name, commands[i], got[i], p.word)
+				}
+			}
+			if pasted == nil {
+				pasted = got
+			}
+		})
+	}
+	for i, p := range pastes {
+		if pasted == nil {
+			break
+		}
+		args := pasted[i]
+		if len(args) != 2 || args[0] != "forget" {
+			continue
+		}
+		store := writePairings(t, p.all...)
+		_, _, err := runForget(t, "", args[1])
+		what := fmt.Sprintf("%+q, scterm forget %+q", p.meant.Name, args[1])
+		if p.forget {
+			if err != nil {
+				t.Errorf("%s: %v", what, err)
+			}
+			wantLeft(t, store, what, p.all[1:]...)
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), "no paired device matches") {
+			t.Errorf("%s: %v; want no paired device to match", what, err)
+		}
+		wantLeft(t, store, what, p.all...)
+	}
+}
+
+// TestACopyThatFindsNothingDoesNothing: a name is given as it is although
+// its copy without the one character a terminal may leave out selects no
+// pairing, so that copy, pasted as scterm --peer or scterm forget, must do
+// nothing, with a terminal or without one: it fails with "no paired device
+// matches", asks nothing (though answers wait on the input), runs no
+// presence search and removes no pairing. A chooser of every paired device,
+// or a fallback to the only one, would act on a device the name never
+// selected.
+func TestACopyThatFindsNothingDoesNothing(t *testing.T) {
+	old := presenceSearch
+	t.Cleanup(func() { presenceSearch = old })
+	presenceSearch = func(context.Context, time.Duration) ([]peer.NearbyDevice, error) {
+		t.Errorf("a presence search ran")
+		return nil, nil
+	}
+	oldInput := terminalInput
+	t.Cleanup(func() { terminalInput = oldInput })
+	client := &peer.Client{Identity: &peer.Identity{Fingerprint: peer.FingerprintOf([]byte("this computer"))}}
+	for _, tc := range []struct {
+		name   string
+		others []string
+		lost   string
+		prefix string // a partial query that selects the device alone, for forget's refusal
+	}{
+		{"Mom's ❤\ufe0f phone", nil, "\ufe0f", "Mom"},
+		{"Mom's ❤\ufe0f phone", []string{"Pixel"}, "\ufe0f", "Mom"},
+		{"Zoe\u0308 Tab", []string{"Zoe", "Tablet"}, "\u0308", "Zoe\u0308"},
+		{"Cafe\u0301 Pixel", []string{"Cafe", "Pixel"}, "\u0301", "Cafe\u0301"},
+		{"Pix\u1161el 8", []string{"Pixel 9"}, "\u1161", "Pix\u1161"},
+		{"Pix\ufe0fel", nil, "\ufe0f", "Pix\ufe0f"},
+	} {
+		fp := peer.FingerprintOf([]byte(tc.name))
+		all := []peer.Record{pairing(fp.Hex(), tc.name, "192.0.2.1")}
+		for i, o := range tc.others {
+			all = append(all, pairing(peer.FingerprintOf([]byte(o)).Hex(), o, "192.0.2."+strconv.Itoa(i+2)))
+		}
+		copied := strings.ReplaceAll(tc.name, tc.lost, "")
+		what := fmt.Sprintf("%+q beside %+q", tc.name, tc.others)
+		quoted := "'" + strings.ReplaceAll(tc.name, "'", `'\''`) + "'"
+
+		// The printed commands give the name.
+		store := writePairings(t, all...)
+		out := captureStdout(t, func() { reportPaired(client, store, tc.name, fp, []string{peer.GrantView}) })
+		line, _, _ := strings.Cut(out, "\n")
+		if want := "Paired. Connect with: scterm --peer " + quoted; line != want {
+			t.Errorf("%s: printed %q, want %q", what, line, want)
+		}
+		withInteractive(t, false)
+		_, _, err := runForget(t, "", tc.prefix)
+		if want := "run scterm forget " + quoted; err == nil || !strings.HasSuffix(err.Error(), want) {
+			t.Errorf("%s: forget %+q refused with %v, want it to end %q", what, tc.prefix, err, want)
+		}
+		wantLeft(t, store, what+", forget refusal", all...)
+
+		// The copies, pasted into a shell.
+		commands := []string{"scterm --peer " + strings.ReplaceAll(quoted, tc.lost, ""), "scterm forget " + strings.ReplaceAll(quoted, tc.lost, "")}
+		got := pasteInto(t, pasteShells[0], commands)
+		if !slices.Equal(got[0], []string{"--peer", copied}) || !slices.Equal(got[1], []string{"forget", copied}) {
+			t.Fatalf("%s: the copies gave scterm %+q", what, got)
+		}
+		var cfg config
+		if err := parseArgs(newFlagSet(&cfg, new(float64)), &cfg, got[0]); err != nil || !cfg.usePeer || cfg.peerQuery != copied {
+			t.Errorf("%s: %+q parses as --peer %+q, %v", what, got[0], cfg.peerQuery, err)
+		}
+		cfg.video, cfg.audio = false, false
+		wantErr := fmt.Sprintf("no paired device matches %q", copied)
+		for _, term := range []bool{false, true} {
+			withInteractive(t, term)
+			store := writePairings(t, all...)
+			terminalInput = bufioReader("1\ny\n1\ny\n")
+			var s *session
+			var perr error
+			asked := captureStderr(t, func() {
+				_ = captureStdout(t, func() { s, perr = newPeerSession(cfg.peerQuery, cfg) })
+			})
+			if s != nil {
+				s.stop()
+			}
+			if perr == nil || perr.Error() != wantErr || asked != "" {
+				t.Errorf("%s, terminal %v: --peer %+q: %v, asked %q; want %q and no question", what, term, cfg.peerQuery, perr, asked, wantErr)
+			}
+			wantLeft(t, store, what+", --peer copy", all...)
+
+			store = writePairings(t, all...)
+			said, asked, ferr := runForget(t, "y\n", got[1][1])
+			if ferr == nil || ferr.Error() != wantErr || asked != "" || said != "" {
+				t.Errorf("%s, terminal %v: forget %+q: %v, said %q, asked %q; want %q and nothing else", what, term, got[1][1], ferr, said, asked, wantErr)
+			}
+			wantLeft(t, store, what+", forget copy", all...)
 		}
 	}
 }

@@ -219,13 +219,13 @@ func damagedWords(n int) (count, the, them string) {
 
 // pasteArg is how a command printed for the user to paste (scterm --peer ARG,
 // scterm forget ARG) names the pairing with identity fp: by its name, in
-// single quotes, when that is plain and every copy of it a terminal may make
-// finds this pairing and no other (everyCopyFinds), so that a paste of the
-// command does what the command does; else by its short or its whole
-// identity, whichever finds it alone, so that the command never carries text
-// the device chose. It reports false when none does (two pairings have the
-// identity, or the pairings cannot be read), and then no command should be
-// printed.
+// single quotes, when that is plain, finds this pairing and no other, and no
+// copy of it a terminal may make finds another (everyCopyFinds), so that a
+// paste of the command does what the command does, or nothing; else by its
+// short or its whole identity, whichever finds it alone, so that the command
+// never carries text the device chose. It reports false when none does (two
+// pairings have the identity, or the pairings cannot be read), and then no
+// command should be printed.
 // The quotes are there even when the name needs none: an interactive zsh
 // expands a global alias wherever a bare word names one.
 func pasteArg(store *peer.Store, name string, fp peer.Fingerprint) (string, bool) {
@@ -245,11 +245,16 @@ func pasteArgFor(recs []peer.Record, find func(string) (peer.Record, error), nam
 		rec, err := find(query)
 		return err == nil && rec.Fingerprint == fp.Hex()
 	}
+	// findsNoOther reports whether query means no other pairing: this one, or
+	// none at all. One that means several means another.
+	findsNoOther := func(query string) bool {
+		return finds(query) || len(peer.MatchesIn(recs, query)) == 0
+	}
 	// Find gives the first of the pairings that have the name in any case.
 	namesake := slices.ContainsFunc(recs, func(r peer.Record) bool {
 		return r.Fingerprint != fp.Hex() && strings.EqualFold(r.Name, name)
 	})
-	if plainName(name) && !namesake && everyCopyFinds(name, finds) {
+	if plainName(name) && !namesake && everyCopyFinds(name, finds, findsNoOther) {
 		return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'", true
 	}
 	// Another pairing's short identity can be the same.
@@ -261,16 +266,20 @@ func pasteArgFor(recs []peer.Record, find func(string) (peer.Record, error), nam
 	return "", false
 }
 
-// everyCopyFinds reports whether finds holds for every copy a terminal may
-// make of name: the name as written and, when it holds one character a
-// terminal may leave out (copiedAs, which keeps the name's quotes, as a shell
-// does inside the command's), the name without it. It reports false for a
-// name that holds more than one, as a terminal may leave out some of them
-// and keep the others, and those copies are not tried: a name with a keycap
-// (1, U+FE0F, U+20E3) goes by its identity.
-func everyCopyFinds(name string, finds func(string) bool) bool {
+// everyCopyFinds reports whether every copy a terminal may make of name finds
+// this pairing or nothing, and none finds another: the name as written must
+// find this pairing (finds) and, when it holds one character a terminal may
+// leave out (copiedAs, which keeps the name's quotes, as a shell does inside
+// the command's), the name without it must find no other (findsNoOther). It
+// may find none: copied without its U+FE0F, Mom's ❤️ phone is Mom's ❤ phone,
+// which matches no name, word or identity, so the command, pasted so, finds
+// no pairing and does nothing. It reports false for a name that holds more
+// than one, as a terminal may leave out some of them and keep the others,
+// and those copies are not tried: a name with a keycap (1, U+FE0F, U+20E3)
+// goes by its identity.
+func everyCopyFinds(name string, finds, findsNoOther func(string) bool) bool {
 	copied := copiedAs(name)
-	return finds(name) && (copied == name || utf8.RuneCountInString(name)-utf8.RuneCountInString(copied) == 1 && finds(copied))
+	return finds(name) && (copied == name || utf8.RuneCountInString(name)-utf8.RuneCountInString(copied) == 1 && findsNoOther(copied))
 }
 
 // shellChars are the characters a shell reads in a bare word: to end, chain or
@@ -291,8 +300,9 @@ const shellChars = "\\`;&|<>()$*?[]{}~#!^%="
 // two together; holds no "scterm" in any case, as words such as scterm forget
 // Pixel copied from it would run as they read; and is what scterm forget
 // takes as a name: not a word that asks a command for its help, nor
-// --damaged. A paste that loses less holds each of these too. Whether each
-// copy finds the pairing alone is everyCopyFinds's to check.
+// --damaged. A paste that loses less holds each of these too. Whether the
+// name finds the pairing alone, and no copy of it another, is
+// everyCopyFinds's to check.
 func plainName(name string) bool {
 	pasted := pastedAs(name)
 	return pasted != "" && utf8.ValidString(name) && textCells(name)+3*strings.Count(name, "'") <= nameCells &&

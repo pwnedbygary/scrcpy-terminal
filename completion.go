@@ -173,13 +173,13 @@ func dashedFlag(name string) string {
 // with forget of scterm forget, one to a line: for each pairing whose
 // identity parses and that pasteArg names, what the script inserts for it. A
 // name is the device's own text, so it comes from pasteArg's rule, which
-// names a pairing by its name only when that is plain and every copy of it
-// selects the pairing alone, and otherwise by its identity. After scterm
-// forget, when a pairing's identity does not parse, which no name selects,
-// the word that forgets such pairings comes last. The pairings are read
-// once, and searched as Store.Find searches them (peer.FindIn): pasteArg
-// reads them again for each name and identity it tries, which for a few
-// hundred pairings is a wait.
+// names a pairing by its name only when that is plain, selects the pairing
+// alone, and no copy of it selects another, and otherwise by its identity.
+// After scterm forget, when a pairing's identity does not parse, which no
+// name selects, the word that forgets such pairings comes last. The pairings
+// are read once, and searched as Store.Find searches them (peer.FindIn):
+// pasteArg reads them again for each name and identity it tries, which for a
+// few hundred pairings is a wait.
 //
 // With no args, a candidate is the value scterm is to get, for a shell that
 // quotes what it inserts: fish, and zsh inside a quote.

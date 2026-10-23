@@ -395,10 +395,10 @@ holds two); when the name without them and its quotes is nothing, has spaces at 
 two together, holds scterm in any case, or is a word scterm reads another way (`help`); and
 when the name, as written or without its one such character, would select another paired
 device too, or instead (one with the same name in another case, say, or `Pixel` beside `Pix`,
-a mark and `el`), or none: a name with that character before its end, as an emoji's U+FE0F in
-`Mom's ❤️ phone` or an accent written as a mark, gets its identity, as what is left does not
-start its own name. When nothing selects the device alone, scterm prints no command, and says
-that it cannot give one.
+a mark and `el`). A name whose copy without that character selects no device at all keeps its
+name: `Mom's ❤️ phone`, copied without its emoji's U+FE0F, selects no device, so the command,
+pasted from a terminal that leaves it out, finds none and does nothing. When nothing selects the
+device alone, scterm prints no command, and says that it cannot give one.
 
 ### Connecting
 

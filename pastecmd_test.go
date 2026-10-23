@@ -114,8 +114,11 @@ var pasteNames = []struct{ name, arg string }{
 	{"İzmir", ""}, // Find lowercases it to izmir, and gives that pairing
 	{"Tab 7", ""}, // the same name in another case: neither says which
 	{"TAB 7", ""},
-	{"Pix\ufe0fel", ""},   // copied without the mark, it is Pixel, and Find gives that pairing
-	{"Zoe\u0308 Tab", ""}, // copied without the mark, it is Zoe Tab, which selects no pairing
+	{"Pix\ufe0fel", ""}, // copied without the mark, it is Pixel, and Find gives that pairing
+	// Copied without the mark, each selects no pairing, so a paste of it
+	// does nothing.
+	{"Zoe\u0308 Tab", "'Zoe\u0308 Tab'"},
+	{"Mom's ❤\ufe0f phone", `'Mom'\''s ❤` + "\ufe0f phone'"},
 	{`back\slash`, ""},
 	{`a\\b`, ""},
 	{`ends\`, ""},

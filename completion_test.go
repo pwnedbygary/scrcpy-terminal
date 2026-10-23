@@ -400,8 +400,9 @@ func TestCompletionReadsThePairingsOnce(t *testing.T) {
 // scterm writes them, and names that a terminal's copy can change, each of
 // which goes by its name or its identity as everyCopyFinds says: a mark
 // that makes Pixel another name, a keycap (two characters a terminal may
-// leave out), the twin by case folding with a Hangul vowel, and a Hangul
-// vowel inside a name, whose copy is another's name.
+// leave out), the twin by case folding with a Hangul vowel, a Hangul vowel
+// inside a name, whose copy is another's name, and a mark whose copy is no
+// name, which keeps the name.
 func TestCompletionNamesEachPairingAsPasteArgDoes(t *testing.T) {
 	victim, other := peer.FingerprintOf([]byte("victim")), peer.FingerprintOf([]byte("other"))
 	marked := peer.FingerprintOf([]byte("marked"))
@@ -440,6 +441,9 @@ func TestCompletionNamesEachPairingAsPasteArgDoes(t *testing.T) {
 		{"a Hangul vowel inside", func() *peer.Store {
 			return writePairings(t, pairing(marked.Hex(), "Pix\u1161el", "192.0.2.1"), pairing(victim.Hex(), "Pixel\u1161", "192.0.2.2"))
 		}, map[string]string{"Pix\u1161el": marked.Short(), "Pixel\u1161": "'Pixel\u1161'"}},
+		{"a mark whose copy is no name", func() *peer.Store {
+			return writePairings(t, pairing(marked.Hex(), "Mom's ❤\ufe0f phone", "192.0.2.1"), pairing(victim.Hex(), "Pixel", "192.0.2.2"))
+		}, map[string]string{"Mom's ❤\ufe0f phone": `'Mom'\''s ❤` + "\ufe0f phone'", "Pixel": "'Pixel'"}},
 	} {
 		store := tc.open()
 		recs, err := store.All()
@@ -1272,8 +1276,10 @@ func TestCompletionInsertsPairingsSafely(t *testing.T) {
 	inCompletionChild()
 	_, pairings := pastePairings(t)
 	// Alone in its store, a pairing that pastePairings names by identity only
-	// because another is named alike is named by its name.
-	alike := []string{"İzmir", "Tab 7", "TAB 7"}
+	// because another is named alike, or because its copy without its mark
+	// starts other pairings' names there (Pixel, for Pix, U+FE0F, el), is
+	// named by its name.
+	alike := []string{"İzmir", "Tab 7", "TAB 7", "Pix\ufe0fel"}
 	homes := t.TempDir()
 	for i, p := range pairings {
 		if err := peer.OpenStore(filepath.Join(homes, fmt.Sprint(i))).Put(p.rec); err != nil {

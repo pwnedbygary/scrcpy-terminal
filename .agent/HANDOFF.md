@@ -7,6 +7,55 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-23: QoL overhaul, part 65: a copy that selects nothing)
+
+- A printed command (`scterm --peer`, `scterm forget`), and so completion,
+  gives a device's name when the name is plain and selects that pairing
+  alone and, if it holds one character a terminal may leave out as it
+  copies, the name without it selects no other pairing. That copy may now
+  select none: `Mom's ❤️ phone` (U+FE0F inside) and a name with an accent
+  written as a mark (Zoe, U+0308, Tab) print by name again, where part 63
+  gave their identity; pasted from a terminal that leaves the mark out,
+  such a command finds no pairing and does nothing. A copy that selects
+  another pairing, or this one and another (Tab and U+0301 beside Tablet),
+  and a name with two such characters (a keycap) still give the identity.
+- Owner's call: names like `Mom's ❤️ phone` are shown, not given by their
+  identity.
+- `pasteArgFor` gives `everyCopyFinds` a second check, findsNoOther: the
+  copy finds this pairing, or matches nothing in the pairings read
+  (`peer.MatchesIn`). `pasteArg` reads `peers.json` as often as before.
+  The README and `completePeers`'s doc comment say the new rule.
+- Keep: the copy must never select another pairing, nor several; the name
+  as written must still find the pairing alone. And a query that matches
+  nothing must do nothing: `--peer` and `forget` fail with "no paired
+  device matches", with no chooser and no fallback to the only pairing.
+- Tests: `pastecmd_test.go`'s table (Zoe Tab now by name; Mom's ❤️ phone
+  added); `TestACopyThatFindsNothingKeepsTheName` (five names, each pasted
+  into every shell as printed and without its mark: as printed, each
+  forgets its device; without the mark, those given by name forget
+  nothing); `TestACopyThatFindsNothingDoesNothing` (six cases: the copy,
+  pasted into sh as `scterm --peer` and as `scterm forget`, with a terminal
+  and without, fails, asks nothing, searches nothing and removes nothing);
+  a case in `TestCompletionNamesEachPairingAsPasteArgDoes`; and
+  `TestCompletionInsertsPairingsSafely`, which puts each of the table's
+  pairings alone in a store, lists Pix, U+FE0F, el among those named by
+  name there (its copy, Pixel, selects another pairing only in the table).
+- Verified, by the orchestrator on 92e6c04: gofmt and vet clean; the
+  module gives 580 pass, 3 skip, 0 fail with SCTERM_TEST_REQUIRE_SHELLS=1.
+- Intake, round 1: written by the orchestrator in /tmp/opencode/dev-65 on
+  92e6c04 and reviewed on /tmp/opencode/review-65, which asked for
+  changes: its suite failed in `TestCompletionInsertsPairingsSafely`;
+  `completePeers`'s comment still gave part 63's rule; no test held that a
+  copy that selects nothing does nothing in `--peer`, or in `forget` with
+  a terminal (a chooser of every pairing, or a fallback to the only one,
+  passed every test); and "starts no name" said less than what selects a
+  device.
+- Intake, round 2: all four fixed; reviewed on /tmp/opencode/review-65c;
+  that tree's checks are in the commit message.
+- Open: a name with two such characters, such as a keycap, still goes by
+  its identity; and a terminal that normalizes text as it copies (Zoe,
+  U+0308, Tab to Zoë Tab) is not modelled (#19).
+
 ## Update (2026-10-23: QoL overhaul, parts 1 to 64, condensed)
 
 The QoL overhaul is PR #6, one commit per part on the `overhaul` branch
