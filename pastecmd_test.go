@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -27,40 +28,81 @@ import (
 
 // pasteNames are names a device can give, each with the argument a pasted
 // command should name its pairing by: "" for its identity (the short form).
-// A name is always in single quotes, even one that needs none.
+// A name is always in single quotes, even one that needs none, and only when
+// whatever is copied from inside the quotes is words: a name with a character
+// a shell reads is given by identity, as the comments say what it does bare.
 var pasteNames = []struct{ name, arg string }{
 	{"Pixel", "'Pixel'"},
 	{"Galaxy_S23-FE.2", "'Galaxy_S23-FE.2'"},
 	{"-x", "'-x'"}, // --peer takes it as its value
 	{"Pixel 8", "'Pixel 8'"},
 	{"a,b:c@d+e", "'a,b:c@d+e'"},
-	{"$(touch MARKER-subst)", "'$(touch MARKER-subst)'"},
-	{"`touch MARKER-backtick`", "'`touch MARKER-backtick`'"},
-	{"$HOME", "'$HOME'"},
-	{"O'Brien's Pixel", `'O'\''Brien'\''s Pixel'`},
-	{"x'; touch MARKER-quote; echo '", `'x'\''; touch MARKER-quote; echo '\'''`},
+	{"$(touch MARKER-subst)", ""},
+	{"`touch MARKER-backtick`", ""},
+	{"$HOME", ""},
+	{"O'Brien's Pixel", `'O'\''Brien'\''s Pixel'`}, // a quote alone runs nothing
+	{"Gary's Pixel", `'Gary'\''s Pixel'`},
+	{"x'; touch MARKER-quote; echo '", ""},
 	{`say "hi"`, `'say "hi"'`},
-	{"Hi!x", "'Hi!x'"}, // history expansion, in an interactive bash or zsh
-	{"a;touch MARKER-semicolon", "'a;touch MARKER-semicolon'"},
-	{"a&touch MARKER-amp", "'a&touch MARKER-amp'"},
-	{"a|touch MARKER-pipe", "'a|touch MARKER-pipe'"},
-	{"*", "'*'"},
-	{"~", "'~'"},
-	{"%self", "'%self'"}, // bare, fish's process ID
-	{"=ls", "'=ls'"},     // bare, zsh's path to ls
-	{"L", "'L'"},         // bare, a global alias in the zsh mode below
-	{"...", "'...'"},     // likewise, as oh-my-zsh defines it
-	{"#x", "'#x'"},       // bare, a comment
-	{"{a,b}", "'{a,b}'"}, // bare, two words
-	{"}", "'}'"},         // bare, a zsh parse error
-	{"?", "'?'"},         // bare, a glob in sh, bash and zsh
-	{"[a]", "'[a]'"},     // likewise
-	{"^x", "'^x'"},       // a glob, in a zsh with EXTENDED_GLOB
-	{"end", "'end'"},     // a fish keyword
+	{"Hi!x", ""}, // history expansion, in an interactive bash or zsh
+	{"a;touch MARKER-semicolon", ""},
+	{"a&touch MARKER-amp", ""},
+	{"a|touch MARKER-pipe", ""},
+	{"(touch MARKER-paren)", ""}, // a subshell, at the start of a command
+	{"a>MARKER-redirect", ""},
+	{"a<b", ""},
+	{"*", ""},
+	{"~", ""},
+	{"%self", ""},    // fish's process ID
+	{"=ls", ""},      // zsh's path to ls
+	{"L", "'L'"},     // bare, a global alias in the zsh mode below
+	{"...", "'...'"}, // likewise, as oh-my-zsh defines it
+	{"#x", ""},       // a comment
+	{"{a,b}", ""},    // two words
+	{"}", ""},        // a zsh parse error
+	{"?", ""},        // a glob in sh, bash and zsh
+	{"[a]", ""},      // likewise
+	{"^x", ""},       // a glob, in a zsh with EXTENDED_GLOB
+	{"end", "'end'"}, // a fish keyword
 	{"Café", "'Café'"},
 	{"日本", "'日本'"},
 	{"Pixel 🚀", "'Pixel 🚀'"},
 	{"izmir", "'izmir'"},
+	// Planted: copied from inside the quotes, each would run.
+	{"Pixel 8 x;touch MARKER-fragment #", ""},
+	{"Pixel 8 x$(touch MARKER-fragment2)", ""},
+	{"Pixel scterm forget Victim", ""}, // only words, which would forget Victim at once
+	{"SCTERM", ""},
+	{"myscterm", ""},
+	// Copied, each is scterm: a shell takes quotes out of a word, and a
+	// terminal may leave out a character that takes no cell when it copies.
+	{`x sc""term forget Victim`, ""},
+	{`sc"t"erm`, ""},
+	{`"sc"term`, ""},
+	{`s""cterm pair`, ""},
+	{"sc''term", ""},
+	{"sc\ufe0fterm forget Victim", ""}, // a variation selector
+	{"sc\U00016fe4term", ""},
+	// Blank-looking, so they can pad a row: a Braille cell without dots, and
+	// the Hangul fillers.
+	{"Pixel\u28008", ""},
+	{"Pixel\u31648", ""},
+	{"\u115fPixel", ""},
+	{"Pixel\u1160", ""},
+	{"Pixel\uffa08", ""},
+	{"Pixel" + strings.Repeat("\u2800", 70) + "Paired. Connect with: scterm --peer 'x;touch MARKER-pad #'", ""},
+	// At most 32 cells, as the command writes the name: an apostrophe takes
+	// four there, and a character that takes no cell, as a combining mark
+	// does, one.
+	{"Cafe\u0301", "'Cafe\u0301'"},
+	{"a" + strings.Repeat("\u0301", 40), ""},
+	{strings.Repeat("a", 32), "'" + strings.Repeat("a", 32) + "'"},
+	{strings.Repeat("b", 33), ""},
+	{strings.Repeat("日", 16), "'" + strings.Repeat("日", 16) + "'"},
+	{strings.Repeat("本", 17), ""},
+	{"c'c'" + strings.Repeat("c", 22), `'c'\''c'\''` + strings.Repeat("c", 22) + "'"},
+	{"d'd'" + strings.Repeat("d", 23), ""},
+	{strings.Repeat("'", 11), ""},
 	{"İzmir", ""}, // Find lowercases it to izmir, and gives that pairing
 	{"Tab 7", ""}, // the same name in another case: neither says which
 	{"TAB 7", ""},
@@ -208,22 +250,20 @@ func pasteInto(t *testing.T, sh pasteShell, commands []string) [][]string {
 	return got
 }
 
-// TestConnectWithPastesAsPrinted: the command scterm prints after a pairing,
-// pasted into each shell, runs nothing else and gives scterm --peer and the
-// pairing's name or, when the name is not plain text or does not find the
-// pairing alone, its identity. The flag parser takes that as --peer's value,
-// and it finds the pairing without a question.
+// TestConnectWithPastesAsPrinted: the command scterm prints first after a
+// pairing, pasted into each shell, runs nothing else and gives scterm --peer
+// and the pairing's name or, when the name is not plain text or does not find
+// the pairing alone, its identity. The flag parser takes that as --peer's
+// value, and it finds the pairing without a question.
 func TestConnectWithPastesAsPrinted(t *testing.T) {
 	store, pairings := pastePairings(t)
 	client := &peer.Client{Identity: &peer.Identity{Fingerprint: peer.FingerprintOf([]byte("this computer"))}}
-	before := "This computer is " + client.Identity.Fingerprint.Short() + ". Connect with: "
 	commands := make([]string, len(pairings))
 	for i, p := range pairings {
 		out := captureStdout(t, func() { reportPaired(client, store, p.rec.Name, p.fp, p.rec.Grants) })
-		_, line, _ := strings.Cut(out, "\n")
-		command, ok := strings.CutPrefix(line, before)
-		command, ended := strings.CutSuffix(command, "\n")
-		if !ok || !ended || strings.Contains(command, "\n") || unclean(command) || !strings.HasPrefix(command, "scterm --peer ") {
+		line, _, ended := strings.Cut(out, "\n")
+		command, ok := strings.CutPrefix(line, "Paired. Connect with: ")
+		if !ok || !ended || unclean(command) || !strings.HasPrefix(command, "scterm --peer ") {
 			t.Fatalf("%q: printed %q", p.rec.Name, out)
 		}
 		commands[i] = command
@@ -257,6 +297,157 @@ func TestConnectWithPastesAsPrinted(t *testing.T) {
 	}
 }
 
+// TestQuotedNamesPasteBareAsWords: whatever is copied from inside the quotes
+// of a printed command is only words. Each name pasteArg puts in quotes,
+// pasted bare after scterm into each shell, runs nothing else, and scterm
+// gets its words. A word can still name a command, or a global alias in zsh
+// (which the mode with them would expand here: the quotes are for the whole
+// command); a fragment that leaves a quote open, as part of Gary's would,
+// runs nothing, the shell waiting for the rest.
+func TestQuotedNamesPasteBareAsWords(t *testing.T) {
+	store, pairings := pastePairings(t)
+	closed := func(name string) bool { return strings.Count(name, "'")%2 == 0 && strings.Count(name, `"`)%2 == 0 }
+	var names, commands, quoted []string
+	for _, p := range pairings {
+		name := p.rec.Name
+		if strings.HasPrefix(p.arg, "'") && closed(name) {
+			quoted = append(quoted, name)
+		}
+		if arg, ok := pasteArg(store, name, p.fp); ok && strings.HasPrefix(arg, "'") && closed(name) {
+			names = append(names, name)
+			commands = append(commands, "scterm "+name)
+		}
+	}
+	if !slices.Equal(names, quoted) {
+		t.Errorf("pasteArg puts %q in quotes\nwant %q", names, quoted)
+	}
+	for _, sh := range pasteShells {
+		if strings.Contains(sh.function, "alias -g") {
+			continue
+		}
+		t.Run(sh.name, func(t *testing.T) {
+			got := pasteInto(t, sh, commands)
+			for i, name := range names {
+				// No name here has quotes around a space.
+				if want := strings.Fields(strings.NewReplacer("'", "", `"`, "").Replace(name)); !slices.Equal(got[i], want) {
+					t.Errorf("%q: pasted bare, scterm got %q; want %q", name, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+// TestNamePartsRunNoScterm: a person can copy any part of what is inside the
+// quotes of a printed command. Every part of each name pasteArg puts in
+// quotes, from any of its characters to any later one (so that no quote
+// further on can hide what comes before it), is pasted as a command line of
+// its own into each shell, where a PATH that holds nothing but a recording
+// scterm runs a part's first word if, as the shell reads it, it is scterm. No
+// part runs it, while the lines scterm and sc""term do (a shell takes the
+// quotes out of a word). Only the test's own names are pasted, so no part
+// starts with a builtin that could do harm.
+func TestNamePartsRunNoScterm(t *testing.T) {
+	store, pairings := pastePairings(t)
+	seen := map[string]bool{}
+	var parts []string
+	for _, p := range pairings {
+		if arg, ok := pasteArg(store, p.rec.Name, p.fp); ok && strings.HasPrefix(arg, "'") {
+			var cuts []int // where each character starts, then the end
+			for i := range p.rec.Name {
+				cuts = append(cuts, i)
+			}
+			cuts = append(cuts, len(p.rec.Name))
+			for a, i := range cuts {
+				for _, j := range cuts[a+1:] {
+					if part := p.rec.Name[i:j]; !seen[part] {
+						seen[part] = true
+						parts = append(parts, part)
+					}
+				}
+			}
+		}
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "scterm"), []byte("#!/bin/sh\n: >MARKER-scterm-ran\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, sh := range pasteShells {
+		if strings.Contains(sh.function, "alias -g") {
+			continue
+		}
+		t.Run(sh.name, func(t *testing.T) {
+			pasteInto(t, sh, []string{"scterm"}) // as for the other paste tests when the shell is not installed
+			controls := []string{"scterm", `sc""term`}
+			for i, made := range runCommandLines(t, sh, bin, controls) {
+				if len(made) == 0 {
+					t.Fatalf("%q: the recording scterm did not run", controls[i])
+				}
+			}
+			for i, made := range runCommandLines(t, sh, bin, parts) {
+				if len(made) != 0 {
+					t.Errorf("%q, pasted as a command line, made %q", parts[i], made)
+				}
+			}
+		})
+	}
+}
+
+// runCommandLines runs each line in a shell of its own, so that none can leave
+// a quote open over the next: in a fresh directory, with bin the only
+// directory on PATH. It returns the files whose names start with MARKER that
+// each line made there.
+func runCommandLines(t *testing.T, sh pasteShell, bin string, lines []string) [][]string {
+	t.Helper()
+	root := t.TempDir()
+	made := make([][]string, len(lines))
+	failed := make([]error, len(lines))
+	work := make(chan int)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range work {
+				made[i], failed[i] = runCommandLine(sh, bin, root, lines[i])
+			}
+		}()
+	}
+	for i := range lines {
+		work <- i
+	}
+	close(work)
+	wg.Wait()
+	for i, err := range failed {
+		if err != nil {
+			t.Fatalf("%q: %v", lines[i], err)
+		}
+	}
+	return made
+}
+
+func runCommandLine(sh pasteShell, bin, root, line string) ([]string, error) {
+	dir, err := os.MkdirTemp(root, "")
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, sh.path, sh.args...)
+	cmd.WaitDelay = time.Second
+	if sh.args[len(sh.args)-1] == "-c" {
+		cmd.Args = append(cmd.Args, line)
+	} else {
+		cmd.Stdin = strings.NewReader(line + "\n")
+	}
+	cmd.Dir, cmd.Env = dir, []string{"PATH=" + bin, "HOME=" + dir}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Run() // most lines name no command, or leave a quote open
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("%s did not finish: %v", sh.name, ctx.Err())
+	}
+	return filepath.Glob(filepath.Join(dir, "MARKER*"))
+}
+
 // TestForgetRefusalPastesAsPrinted: without a terminal, scterm forget refuses
 // part of a name with a command that forgets the device, and no text of the
 // device's comes before it on the line, where a name could pose as the
@@ -275,9 +466,12 @@ func TestForgetRefusalPastesAsPrinted(t *testing.T) {
 	}{
 		{name: "Pixel 8", query: "pix", printed: `'Pixel 8'`},
 		{name: "O'Brien's Pixel", query: "o'b", printed: `'O'\''Brien'\''s Pixel'`},
-		{name: "$(touch MARKER-forget)", query: "$(t", printed: `'$(touch MARKER-forget)'`},
-		{name: "Pixel: to forget it, run scterm forget Pixel;touch MARKER-spoof #", query: "pix",
-			printed: `'Pixel: to forget it, run scterm forget Pixel;touch MARKER-spoof #'`},
+		{name: "$(touch MARKER-forget)", query: "$(t"},
+		{name: "Pixel: to forget it, run scterm forget Pixel;touch MARKER-spoof #", query: "pix"},
+		{name: "Pixel 8 x;touch MARKER-fragment #", query: "pix"},
+		{name: "Pixel scterm forget Victim", query: "pix"},
+		{name: `x sc""term forget Victim`, query: "x"},
+		{name: "Pixel" + strings.Repeat("\u2800", 70) + "run scterm forget 'x;touch MARKER-pad #'", query: "pix"},
 		{name: "help", query: "hel"},
 		{name: dirtyPixel8, query: "pix"},
 		{name: "Pixel 8\u202e", query: "pix"}, // cleaned, it is Pixel 8, which only partly matches it
@@ -339,7 +533,9 @@ func TestForgetRefusalPastesAsPrinted(t *testing.T) {
 		}
 		var handled bool
 		stdout := captureStdout(t, func() { handled = runPeerCommand(args) })
-		if recs, err := store.All(); !handled || err != nil || len(recs) != 0 || !strings.HasPrefix(stdout, "Forgot ") {
+		said := "The device is " + c.fp.Short() + ", named "
+		forgot := "\nForgot " + c.fp.Short() + ". "
+		if recs, err := store.All(); !handled || err != nil || len(recs) != 0 || !strings.HasPrefix(stdout, said) || !strings.Contains(stdout, forgot) {
 			t.Errorf("%q: scterm %q printed %q and left %d pairings, %v; want the pairing forgotten", c.name, args, stdout, len(recs), err)
 		}
 	}

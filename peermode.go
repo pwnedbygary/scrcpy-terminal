@@ -13,9 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"scterm/peer"
@@ -135,18 +135,33 @@ func pairCommand(args []string) error {
 	return nil
 }
 
-// reportPaired says what was paired. The name is the device's own text: the
-// sentence shows it cleaned, and the command names the device as pasteArg
-// writes it; when pasteArg gives none, the line says that scterm cannot give
-// one.
+// reportPaired says what was paired. The command comes first, naming the
+// device as pasteArg writes it (when pasteArg gives none, the line says that
+// scterm cannot give one), so no text of the device's comes before it; then
+// the device, as data, and what it allows.
 func reportPaired(client *peer.Client, store *peer.Store, name string, fp peer.Fingerprint, grants []string) {
-	fmt.Printf("Paired with %s (%s); it allows this computer to %s.\n", cleanText(name), fp.Short(), describeGrants(grants))
-	self := client.Identity.Fingerprint.Short()
 	if arg, ok := pasteArg(store, name, fp); ok {
-		fmt.Printf("This computer is %s. Connect with: scterm --peer %s\n", self, arg)
-		return
+		fmt.Printf("Paired. Connect with: scterm --peer %s\n", arg)
+	} else {
+		fmt.Println("Paired. scterm cannot give a command that selects only this device: scterm peers lists the pairings.")
 	}
-	fmt.Printf("This computer is %s. scterm cannot give a command that selects only this device: scterm peers lists the pairings.\n", self)
+	fmt.Printf("The device is %s.\n", deviceData(fp, name))
+	fmt.Printf("It allows this computer (%s) to %s.\n", client.Identity.Fingerprint.Short(), describeGrants(grants))
+}
+
+// nameCells is the most of a device's name that scterm shows, in cells: room
+// for the names devices give (Galaxy S24 Ultra), and little enough that the
+// lines after a pairing fit in 80 columns, so that no part of the name can
+// start a row of its own there.
+const nameCells = 32
+
+// deviceData shows a paired device as data, never as words of scterm's: its
+// identity, then its name in quotes, as quoteText shows it.
+func deviceData(fp peer.Fingerprint, name string) string {
+	if name == "" {
+		return fp.Short() + ", with no name"
+	}
+	return fp.Short() + ", named " + quoteText(name, nameCells)
 }
 
 // pasteArg is how a command printed for the user to paste (scterm --peer ARG,
@@ -154,41 +169,68 @@ func reportPaired(client *peer.Client, store *peer.Store, name string, fp peer.F
 // single quotes, when that is plain and finds this pairing and no other; else
 // by its short or its whole identity, whichever finds it alone, so that the
 // command never carries text the device chose. It reports false when none
-// does (other pairings can be named after both identities, or the pairings
-// cannot be read), and then no command should be printed.
+// does (two pairings have the identity, or the pairings cannot be read), and
+// then no command should be printed.
 // The quotes are there even when the name needs none: an interactive zsh
 // expands a global alias wherever a bare word names one.
-// A plain name is not empty, is UTF-8 and has only printable characters, none
-// of them a backslash (fish reads one even inside single quotes, where sh,
-// bash and zsh do not), no space at either end (a query loses them) and no
-// two together, so cleanText leaves it as it is; and it is not a word that
-// asks a command for its help.
 func pasteArg(store *peer.Store, name string, fp peer.Fingerprint) (string, bool) {
 	recs, err := store.All()
-	// finds reports whether query means this pairing: Find gives it, and no
-	// other pairing has that name in any case (Find gives the first of them).
+	// finds reports whether query means this pairing: Find gives it. An
+	// identity does whatever the pairings are named.
 	finds := func(query string) bool {
-		for _, r := range recs {
-			if r.Fingerprint != fp.Hex() && strings.EqualFold(r.Name, query) {
-				return false
-			}
-		}
 		rec, findErr := store.Find(query)
 		return err == nil && findErr == nil && rec.Fingerprint == fp.Hex()
 	}
-	plain := name != "" && utf8.ValidString(name) && strings.TrimSpace(name) == name && !strings.Contains(name, "  ") &&
-		!isHelpArg(name) && !strings.ContainsFunc(name, func(r rune) bool { return r == '\\' || !unicode.IsPrint(r) })
-	if plain && finds(name) {
+	// Find gives the first of the pairings that have the name in any case.
+	namesake := slices.ContainsFunc(recs, func(r peer.Record) bool {
+		return r.Fingerprint != fp.Hex() && strings.EqualFold(r.Name, name)
+	})
+	if plainName(name) && !namesake && finds(name) {
 		return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'", true
 	}
-	// Another pairing can be named after this one's short identity, or after
-	// its whole one.
+	// Another pairing's short identity can be the same.
 	for _, id := range []string{fp.Short(), fp.Hex()} {
 		if finds(id) {
 			return id, true
 		}
 	}
 	return "", false
+}
+
+// shellChars are the characters a shell reads in a bare word: to end, chain or
+// redirect a command, to substitute, expand or glob, to start a comment or a
+// history expansion, or to escape (fish reads a backslash even inside single
+// quotes, where sh, bash and zsh do not).
+const shellChars = "\\`;&|<>()$*?[]{}~#!^%="
+
+// plainName reports whether a command can name a device by its name, in single
+// quotes: whatever part of the name is copied from inside the quotes, it is
+// only words, and the name reads as cleanText shows it. A plain name is not
+// empty, is UTF-8, takes at most nameCells cells as textCells counts them and
+// the command writes it (an apostrophe takes four there), and every character
+// of it shows as what it is and is none of shellChars; it has no space at
+// either end (a query loses them) nor two together; no "scterm" in any case,
+// not even in what a paste of it can come to (pastedAs), as words such as
+// scterm forget Pixel copied from it would run as they read; and it is not a
+// word that asks a command for its help.
+func plainName(name string) bool {
+	return name != "" && utf8.ValidString(name) && textCells(name)+3*strings.Count(name, "'") <= nameCells &&
+		strings.TrimSpace(name) == name && !strings.Contains(name, "  ") &&
+		!strings.Contains(strings.ToLower(pastedAs(name)), "scterm") && !isHelpArg(name) &&
+		!strings.ContainsFunc(name, func(r rune) bool { return !shownAsIs(r) || strings.ContainsRune(shellChars, r) })
+}
+
+// pastedAs is what a paste of text can come to: a terminal may leave out the
+// characters that take no cell (variation selectors, combining marks) when it
+// copies, and a shell takes the quotes ' and " out of a word, so sc""term runs
+// scterm.
+func pastedAs(text string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\'' || r == '"' || runeCells(r) == 0 {
+			return -1
+		}
+		return r
+	}, text)
 }
 
 func peersCommand(args ...string) error {
@@ -212,7 +254,8 @@ func peersCommand(args ...string) error {
 
 // forgetCommand removes a pairing. It needs a name: unlike --peer=, an empty
 // query must not mean "the only paired device". A name that only matches
-// part of one is confirmed first.
+// part of one is confirmed first. The device is shown as data, on a line of
+// its own; the question and what was done name it by its identity.
 func forgetCommand(args []string) error {
 	query := strings.TrimSpace(strings.Join(args, " "))
 	if query == "" {
@@ -226,34 +269,38 @@ func forgetCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	name := cleanText(rec.Name)
-	if !namesExactly(rec, query) {
+	fp, err := rec.ID()
+	if err != nil {
+		return err
+	}
+	device := fmt.Sprintf("The device is %s.\n", deviceData(fp, rec.Name))
+	exact := namesExactly(rec, query)
+	if !exact {
 		if !interactive() {
 			// No text of the device's comes before the command, where it
 			// could pose as one; the command names the device as pasteArg
 			// writes it, and ends the line.
-			fp, err := rec.ID()
-			if err != nil {
-				return err
-			}
 			if arg, ok := pasteArg(store, rec.Name, fp); ok {
 				return fmt.Errorf("%q only partly matches a paired device: to forget it, run scterm forget %s", query, arg)
 			}
 			return fmt.Errorf("%q only partly matches a paired device, and scterm cannot give a command that selects only that device: forget it from a terminal, where scterm asks first", query)
 		}
-		answer, err := ask(fmt.Sprintf("Forget %s? [y/N] ", name))
+		answer, err := ask(device + fmt.Sprintf("Forget %s? [y/N] ", fp.Short()))
 		if err != nil {
 			return err
 		}
 		if a := strings.ToLower(answer); a != "y" && a != "yes" {
-			fmt.Printf("Kept %s.\n", name)
+			fmt.Printf("Kept %s.\n", fp.Short())
 			return nil
 		}
 	}
 	if _, err := store.Remove(rec.Fingerprint); err != nil {
 		return err
 	}
-	fmt.Printf("Forgot %s. Its own list still names this computer until it is removed there.\n", name)
+	if exact {
+		fmt.Print(device)
+	}
+	fmt.Printf("Forgot %s. Its own list still names this computer until it is removed there.\n", fp.Short())
 	return nil
 }
 

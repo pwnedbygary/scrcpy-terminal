@@ -288,6 +288,21 @@ func TestStoreFind(t *testing.T) {
 	if r, err := s.Find(""); err != nil || r.Name != "Pixel 9" {
 		t.Errorf("single record not found by empty query: %v", err)
 	}
+	// An identity, whole or short, in any case and with or without its
+	// dashes, finds its target even when others are named after it. A whole
+	// name still comes before the start of another, and of two targets that
+	// have the name in any case, the first is found.
+	for i, name := range []string{fpA.Short(), a.Fingerprint, strings.ReplaceAll(fpA.Short(), "-", ""), "Pixel 9 Pro", "PIXEL 9"} {
+		s.Put(Record{Fingerprint: strings.Repeat(hex.EncodeToString([]byte{byte(0x10 + i)}), 32), Name: name, Host: "10.0.0.5", Port: DefaultPort})
+	}
+	for _, query := range []string{fpA.Short(), strings.ToLower(fpA.Short()), strings.ReplaceAll(fpA.Short(), "-", ""), a.Fingerprint, strings.ToUpper(a.Fingerprint), " " + fpA.Short() + " "} {
+		if r, err := s.Find(query); err != nil || r.Fingerprint != a.Fingerprint {
+			t.Errorf("Find(%q) = %q, %v; want the target of that identity", query, r.Name, err)
+		}
+	}
+	if r, err := s.Find("pixel 9"); err != nil || r.Fingerprint != a.Fingerprint {
+		t.Errorf("Find(\"pixel 9\") = %q, %v; want the first target of that name", r.Name, err)
+	}
 }
 
 // TestStoreFindHandsBackSeveralMatches: a query that means several targets

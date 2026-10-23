@@ -24,8 +24,9 @@ var invitationSearch peerDiscovery = peer.DiscoverNearby
 
 // pairNearbyCommand pairs with a device inviting on this network: both
 // screens show a six-digit code, and both users confirm it. The names are
-// the devices' own text: they are cleaned where they are shown, and stored
-// as the device gave them.
+// the devices' own text: they are stored as the device gave them; on the
+// lines before the pairing's command they are shown in quotes, as quoteText
+// shows them, and why a pairing failed shows them cleaned.
 func pairNearbyCommand() error {
 	client, store, err := openPeerClient()
 	if err != nil {
@@ -40,7 +41,7 @@ func pairNearbyCommand() error {
 	if len(devices) > 1 {
 		labels := make([]string, len(devices))
 		for i, n := range devices {
-			labels[i] = fmt.Sprintf("%s (%s)", cleanText(n.Name), net.JoinHostPort(n.Host, strconv.Itoa(n.Port)))
+			labels[i] = fmt.Sprintf("%s (%s)", quoteText(n.Name, nameCells), net.JoinHostPort(n.Host, strconv.Itoa(n.Port)))
 		}
 		i, err := choose("Pair with which device?", labels)
 		if err != nil {
@@ -56,7 +57,7 @@ func pairNearbyCommand() error {
 	if name == "" {
 		name = d.Name
 	}
-	fmt.Fprintf(os.Stderr, "\n    %s\n\nCheck that %s shows the same code, then accept there too.\n", peer.DisplayCode(p.Code), cleanText(name))
+	fmt.Fprintf(os.Stderr, "\n    %s\n\nCheck that %s shows the same code, then accept there too.\n", peer.DisplayCode(p.Code), quoteText(name, nameCells))
 	answer := make(chan string, 1)
 	go func() {
 		a, _ := ask("Does it match? [y/N] ")
@@ -74,7 +75,7 @@ func pairNearbyCommand() error {
 		}
 	}
 	p.Confirm() // if this fails, the result says why
-	fmt.Printf("Waiting for %s to accept…\n", cleanText(name))
+	fmt.Println("Waiting for the device to accept…")
 	r := <-p.Result()
 	if r.Err != nil {
 		return nearbyFailure(name, r.Err)
@@ -141,7 +142,8 @@ func pickPeer(store *peer.Store, query string) (peer.Record, error) {
 	if len(hits) > 1 && interactive() {
 		labels := make([]string, len(hits))
 		for i, r := range hits {
-			labels[i] = fmt.Sprintf("%s (%s)", cleanText(r.Name), net.JoinHostPort(r.Host, strconv.Itoa(r.Port)))
+			fp, _ := r.ID() // Matches leaves out the pairings whose identity does not parse
+			labels[i] = fmt.Sprintf("%s (%s)", deviceData(fp, r.Name), net.JoinHostPort(r.Host, strconv.Itoa(r.Port)))
 		}
 		i, err := choose("Connect to which device?", labels)
 		if err != nil {
@@ -153,8 +155,9 @@ func pickPeer(store *peer.Store, query string) (peer.Record, error) {
 }
 
 // findPeer is store.Find for the terminal: when the query means several
-// devices, the error lists their names, which are the devices' own text, so
-// each is cleaned.
+// devices, the error lists them as pasteArg writes them, so that each can be
+// typed back as it is shown, and no other text of the devices' is shown (a
+// device that nothing selects alone is listed by its short identity).
 func findPeer(store *peer.Store, query string) (peer.Record, error) {
 	rec, err := store.Find(query)
 	var several *peer.AmbiguousError
@@ -162,7 +165,12 @@ func findPeer(store *peer.Store, query string) (peer.Record, error) {
 		shown := *several
 		shown.Matches = make([]peer.Record, len(several.Matches))
 		for i, r := range several.Matches {
-			r.Name = cleanText(r.Name)
+			fp, _ := r.ID() // Matches leaves out the pairings whose identity does not parse
+			arg, ok := pasteArg(store, r.Name, fp)
+			if !ok {
+				arg = fp.Short()
+			}
+			r.Name = arg
 			shown.Matches[i] = r
 		}
 		return rec, &shown

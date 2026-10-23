@@ -238,6 +238,8 @@ func pickTarget(devices []adbDevice, target string) (picked []int, ambiguous boo
 
 // pickDevice chooses the one device `adb devices` lists as ready, or says why
 // there is none: a device adb can see but not use needs something done on it.
+// A device chooses its own serial, so what the listing says is cleaned where
+// it is printed.
 func pickDevice(list string) (string, error) {
 	var ready []string
 	var notReady []adbDevice
@@ -252,11 +254,15 @@ func pickDevice(list string) (string, error) {
 	case len(ready) == 1:
 		return ready[0], nil
 	case len(ready) > 1:
-		return "", fmt.Errorf("%s: %s", severalDevices(ready), chooseDeviceHint)
+		shown := make([]string, len(ready))
+		for i, s := range ready {
+			shown[i] = cleanText(s)
+		}
+		return "", fmt.Errorf("%s: %s", severalDevices(shown), chooseDeviceHint)
 	case len(notReady) == 0:
 		return "", errors.New("no device found: " + noDeviceHint)
 	}
-	why, todo := notReadyAdvice(notReady[0].serial, notReady[0].state)
+	why, todo := notReadyAdvice(cleanText(notReady[0].serial), cleanText(notReady[0].state))
 	return "", fmt.Errorf("%s: %s", why, todo)
 }
 

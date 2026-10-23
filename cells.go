@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -73,6 +76,17 @@ func cellWidth(s string) int {
 	return n
 }
 
+// textCells is how long text from outside is, for the limits that keep it
+// short: its cells, a character that takes none counting as one, so that no
+// run of combining marks can make it longer without end.
+func textCells(s string) int {
+	n := 0
+	for _, r := range s {
+		n += max(runeCells(r), 1)
+	}
+	return n
+}
+
 // truncateCells cuts s to at most n cells, never inside a character.
 func truncateCells(s string, n int) string {
 	used := 0
@@ -114,5 +128,53 @@ func cleanText(s string) string {
 		}
 		b.WriteRune(r)
 	}
+	return b.String()
+}
+
+// shownAsIs reports whether r shows on a terminal as what it is: printable,
+// and not blank-looking, as U+2800 (a Braille cell without dots) and the
+// Hangul fillers are, which can pad a row or pass for a space.
+func shownAsIs(r rune) bool {
+	return unicode.IsPrint(r) && r != '\u2800' && !unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
+}
+
+// quoteText shows text from outside (a device's name) as data: in double
+// quotes, with an escape, as Go writes one, for each character that does not
+// show as what it is (control, format and blank-looking characters, spaces
+// other than the ASCII one, bytes that are not UTF-8), so that it can neither
+// act on the terminal nor pad a row, and a backslash before each ", \, $,
+// backquote and !, so that copied with its quotes into sh, bash, zsh or fish
+// it substitutes nothing, and an interactive bash or zsh expands no history
+// in it (there !# brings back the line so far, opening quote and all, and the
+// rest of the name runs). Only an interactive zsh takes out the backslash
+// before a !; the others keep it, and fish the one before a backquote too. It
+// is cut to n cells between the quotes, as textCells counts them, and then
+// ends in "…" after them.
+func quoteText(s string, n int) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	used := 0
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		var shown string
+		switch {
+		case r == utf8.RuneError && size == 1:
+			shown = fmt.Sprintf(`\x%02x`, s[0])
+		case r == '"' || r == '\\' || r == '$' || r == '`' || r == '!':
+			shown = `\` + string(r)
+		case shownAsIs(r):
+			shown = string(r)
+		default:
+			q := strconv.QuoteRuneToASCII(r)
+			shown = q[1 : len(q)-1]
+		}
+		if used += textCells(shown); used > n {
+			b.WriteString(`"…`)
+			return b.String()
+		}
+		b.WriteString(shown)
+		s = s[size:]
+	}
+	b.WriteByte('"')
 	return b.String()
 }

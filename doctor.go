@@ -301,7 +301,7 @@ func doctorDevices(paired int) []doctorLine {
 	for i, d := range devices {
 		switch {
 		case d.state != "device":
-			why, todo := notReadyAdvice(d.serial, d.state)
+			why, todo := notReadyAdvice(cleanText(d.serial), cleanText(d.state))
 			lines[i], unusable[i] = doctorLine{doctorWarn, "device", why, todo}, true
 		case used(i):
 			lines[i], unusable[i] = doctorDevice(d)

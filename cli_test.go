@@ -649,12 +649,12 @@ func TestForgetConfirmsAPartialName(t *testing.T) {
 	old := terminalInput
 	t.Cleanup(func() { terminalInput = old })
 
-	// The question goes to stderr, where it shows when stdout is redirected,
-	// and what was done to stdout.
-	const question = "Forget Pixel 8? [y/N] "
+	// The question, with the device it is about, goes to stderr, where it
+	// shows when stdout is redirected, and what was done to stdout.
+	const question = "The device is 0000-0000-0000-0000, named \"Pixel 8\".\nForget 0000-0000-0000-0000? [y/N] "
 	for _, tc := range []struct{ answer, said string }{
-		{"n\n", "Kept Pixel 8.\n"},
-		{"y\n", "Forgot Pixel 8. Its own list still names this computer until it is removed there.\n"},
+		{"n\n", "Kept 0000-0000-0000-0000.\n"},
+		{"y\n", "Forgot 0000-0000-0000-0000. Its own list still names this computer until it is removed there.\n"},
 	} {
 		terminalInput = bufioReader(tc.answer)
 		var err error
@@ -688,7 +688,7 @@ func TestQuestionsGoToStderr(t *testing.T) {
 	stdout := captureStdout(t, func() {
 		stderr = captureStderr(t, func() { rec, err = pickPeer(store, "pixel") })
 	})
-	want := "  1) Pixel 8 (192.0.2.1:27300)\n  2) Pixel 9 (192.0.2.1:27300)\n" +
+	want := "  1) 0000-0000-0000-0000, named \"Pixel 8\" (192.0.2.1:27300)\n  2) 0000-0000-0000-0000, named \"Pixel 9\" (192.0.2.1:27300)\n" +
 		"Connect to which device? [1-2] Connect to which device? [1-2] "
 	if err != nil || rec.Name != "Pixel 9" || stdout != "" || stderr != want {
 		t.Errorf("picked %q, %v; stdout %q, stderr %q; want Pixel 9, nothing on stdout and stderr %q", rec.Name, err, stdout, stderr, want)

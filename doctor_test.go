@@ -235,6 +235,8 @@ func TestDoctorExplainsEachDeviceState(t *testing.T) {
 		{"unauthorized", devicesHeader + "R5CT\tunauthorized usb:1-1 transport_id:3\n", "", nil,
 			"FAIL  device  R5CT has not allowed USB debugging from this computer\n" +
 				"              unlock it, accept the \"Allow USB debugging?\" prompt, and run scterm again\n"},
+		{"a serial and a state with control characters", devicesHeader + "R5\x1b]0;owned\x07CT\u202e\x9b\t\x1b[2Jrecovery usb:1-1 transport_id:6\n", "", nil,
+			"FAIL  device  R5 ]0;owned CT \uFFFD is in [2Jrecovery mode, not ready for scterm\n              start Android on it normally\n"},
 		{"no permissions", devicesHeader + "R5CT\tno permissions (missing udev rules? user is in the plugdev group); " +
 			"see [http://developer.android.com/tools/device.html] usb:1-1 transport_id:2\n", "", nil,
 			"FAIL  device  adb has no permission to open R5CT\n" +

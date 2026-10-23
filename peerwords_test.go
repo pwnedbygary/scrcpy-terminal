@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -48,5 +49,40 @@ func TestPeerConnectFailureIsClean(t *testing.T) {
 		if strings.ContainsFunc(got, unicode.IsControl) || !strings.Contains(got, "Pixel 8]0;x at pixel[2J.lan:27300") {
 			t.Errorf("%q: %q", err, got)
 		}
+	}
+}
+
+// TestPeerTextLosesFormatCharacters: what scterm peers, a failed --peer and
+// scterm doctor print of a device's text loses its format characters as it
+// loses control characters (a right-to-left override, an isolate, a
+// zero-width space, a soft hyphen, a byte order mark, which can reorder a
+// row or hide part of it), and the spaces at either end.
+func TestPeerTextLosesFormatCharacters(t *testing.T) {
+	for in, want := range map[string]string{
+		"Pixel 8\u202e": "Pixel 8",
+		" \u2066Pixel\u2069 8\u200b\u00ad\ufeff\x1b[2J ": "Pixel 8[2J",
+		"\u202e \u200b": "",
+	} {
+		if got := cleanPeerText(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+
+	const name = "Pixel\u202e 8\u2066"
+	fp := peer.FingerprintOf([]byte(name))
+	recs := []peer.Record{{Fingerprint: fp.Hex(), Name: name, Host: "192.0.2.1", Port: 27300, Grants: []string{peer.GrantView}}}
+	client := &peer.Client{Identity: &peer.Identity{Fingerprint: peer.FingerprintOf([]byte("this computer"))}}
+	var listed strings.Builder
+	if err := printPeers(context.Background(), &listed, client, nil, recs, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := "This computer: " + client.Identity.Fingerprint.Short() + "\n" +
+		"  Pixel 8                  " + fp.Short() + "  192.0.2.1:27300       may view\n"
+	if listed.String() != want {
+		t.Errorf("scterm peers: %q\nwant %q", listed.String(), want)
+	}
+	failed := peerConnectFailure(name, "pixel\u202e.lan:27300", controlOnlyRequest, os.ErrDeadlineExceeded).Error()
+	if want := "could not reach Pixel 8 at pixel.lan:27300 (no answer): "; !strings.HasPrefix(failed, want) {
+		t.Errorf("--peer: %q\nwant it to start %q", failed, want)
 	}
 }

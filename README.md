@@ -355,14 +355,23 @@ Pair each device once, in one of two ways:
   shows its invitation as an address and a code. Give both to `scterm pair`, in quotes:
   `scterm pair "192.168.1.20:27300 04HM-ASW9-NF6Y-Y093"`. A `scterm://pair` link also works.
 
-An invitation works once, for 10 minutes. When pairing succeeds, scterm says what the device
-allows this computer to do, and prints a `scterm --peer` command that connects to it. The
-command is safe to paste into sh, bash, zsh or fish: it names the device by its name, in single
-quotes, or else by its identity. The identity is used when the name is not plain printable text
-(it has control characters, a backslash, or spaces at either end, for example), when it is a
-word scterm reads another way (`help`), or when it would select another paired device too, or
-instead (one with the same name in another case, say). When neither selects the device alone,
-scterm prints no command, and says that it cannot give one.
+An invitation works once, for 10 minutes. When pairing succeeds, scterm first prints a
+`scterm --peer` command that connects to the device, then the device's identity and name, and
+what it allows this computer to do. The command is the line to copy: the name after it is the
+device's own text, shown as data: in double quotes, a backslash before `"`, `\`, `$`, `!` and
+the backquote, escapes for characters that would not show as written, and cut to at most 32
+columns. The command is safe to paste into sh, bash, zsh or fish: it names the device by its
+name, in single quotes, only when any part of the name copied from inside the quotes is just
+words, and else by its identity. The identity is used when the name has a character a shell
+reads (such as `$`, `;`, `*`, `#` or a backslash), a character that is not printable (a
+control, format, private-use or unassigned one, or a space other than the ASCII one) or that
+looks blank or like nothing (U+2800, a Hangul filler, U+034F, U+17B4, U+17B5), spaces at
+either end or two together, scterm in any case, even with quotes or marks of no width between
+its letters (a shell takes quotes out of a word, and a terminal may leave such marks out when
+it copies), or more than 32 columns as the command writes it (a combining mark counts as one);
+when it is a word scterm reads another way (`help`); or when it would select another paired
+device too, or instead (one with the same name in another case, say). When nothing selects the
+device alone, scterm prints no command, and says that it cannot give one.
 
 ### Connecting
 
@@ -373,8 +382,9 @@ scterm --peer "Pixel 8" --window --takeover
 ```
 
 `NAME` is the device's name in any case, the start of the name or of a word in it, or the start
-of its identity (at least four characters). When several devices match, scterm asks which one,
-or names them when there is no terminal to ask on.
+of its identity (at least four characters). The whole identity, short or long, selects the
+device even when another is named after it. When several devices match, scterm asks which one,
+or names them as the command after pairing does when there is no terminal to ask on.
 
 - The device decides what this computer may do (view, hear, control, share the clipboard), and
   can change that at any time. When it ends the session, scterm prints its reason.
@@ -396,10 +406,11 @@ or names them when there is no terminal to ask on.
   each. It also finds a device whose address changed on the local network, and checks its
   identity before it saves the new address.
 - `scterm forget NAME` forgets a device. The whole name, in any case, or the identity forgets
-  it at once. Part of a name asks for confirmation; when there is no terminal to ask on, it is
-  refused, with the command that forgets the device, written as after pairing (or, when scterm
-  cannot give one, a note to forget it from a terminal). The device keeps this computer in its
-  own list until you remove it there.
+  it at once. scterm shows the device's identity and name, as after pairing, and names it by its
+  identity when it asks and when it says what it did. Part of a name asks for confirmation; when
+  there is no terminal to ask on, it is refused, with the command that forgets the device,
+  written as after pairing (or, when scterm cannot give one, a note to forget it from a
+  terminal). The device keeps this computer in its own list until you remove it there.
 
 This computer's identity and the paired devices are in `~/.config/scterm` (see
 [Files](#files)).

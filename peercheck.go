@@ -269,7 +269,7 @@ func asked(req peer.StreamRequest) string {
 
 func cleanPeerText(value string) string {
 	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r

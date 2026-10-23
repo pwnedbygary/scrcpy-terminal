@@ -7,6 +7,70 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-22: QoL overhaul, part 51: device names shown as data)
+
+- After scterm pair the command comes first: `Paired. Connect with:
+  scterm --peer 'Pixel 8'`, then `The device is ID, named "Pixel 8".` and
+  `It allows this computer (SELF) to view.` (was `Paired with NAME (FP)`
+  first). The quoted name escapes control, format and blank-looking
+  characters (U+2800, Hangul fillers, other spaces); it is cut at 32 cells.
+- The command gives the name only if no part copied from inside the quotes
+  can run: none of `` \`;&|<>()$*?[]{}~#!^%= ``, every character shown as
+  itself, at most 32 cells as written (' = 4, a combining mark = 1), and no
+  "scterm" in any case, even with ' " and marks of no width taken out (a
+  shell drops the quotes: `sc""term forget X` copied alone forgets at once).
+- forget shows that data line; the question, Kept and Forgot use the short
+  identity. Match lists name each as the command would, or by identity;
+  the --peer chooser shows `ID, named "NAME" (ADDR)`.
+- Find: an exact identity (short, with or without dashes, or whole) beats
+  a pairing named after it; Find("") unchanged. pickDevice cleans serials;
+  cleanPeerText drops format characters too. README updated.
+- Decisions: names with "scterm" go by identity; the cap counts what the
+  command writes, so the lines after pairing fit 80 columns; a quoter of
+  our own, as %q keeps U+2800 and the Hangul fillers.
+- Tests: new devicedata_test.go, TestAnIdentityIsNotTakenByANamesake,
+  TestQuotedNamesPasteBareAsWords (quoted names pasted bare, 6 shell
+  modes), TestPickDeviceCleansTheSerials,
+  TestPeerTextLosesFormatCharacters; pasteNames 83 names; TestStoreFind
+  gains the impostor case; 13 more tests updated.
+- Verification (builder, bee1feb, sandbox, go1.27.1): gofmt, vet, build,
+  diff --check clean; full suite 520 pass, 3 skip, 0 fail (base 514, 3, 0);
+  46 related tests -race x3: 138/138; 20 new/changed x20: 400/400, -race
+  x5: 100/100. On bee1feb's code 19 of the 20 fail. Mutants: 64 of 65
+  killed; M29 (finds without its err check) is equivalent.
+- Left alone: a plain name can hold a word-only fragment that names a
+  program (reboot); forget's refusal line wraps; peers listing, doctor,
+  failures and notices keep the cleaned name, uncapped; forget now parses
+  the identity first (part 52 must show unparseable pairings another way).
+- Not run by the builder: a person pasting in a real terminal; dash, ksh;
+  fish interactive; adb, phone, peer target, Android app; CI.
+- Intake: taken in on 20dad0f, the tip once parts 57, 59 and 58 had
+  landed: 12 of the builder's 14 files as built, and README.md (part 59)
+  and pastecmd_test.go (part 57) merged three ways (each merge adds
+  exactly this part's lines). Reviewed on /tmp/opencode/review-51.
+- Review round 1 (NEEDS CHANGES): quotes inside a word (`sc""term`) got
+  "scterm" past plainName (MEDIUM); no test pinned the 32-cell cap on the
+  nearby chooser and check line (LOW); the data line's name, copied with
+  its quotes, ran `$(...)` (LOW); the README said "invisible" (NIT).
+- Round 2: plainName looks for scterm in pastedAs(name), the name without
+  ' " and characters of no width; quoteText also puts \ before $, ` and !
+  (in bash -i and zsh -i, !# brought back the open quote and ran the rest
+  of the name; only zsh -i drops that \); doctor cleans serial and state;
+  README says what plainName refuses; 3 tests renamed. In sh, bash, zsh
+  and fish no other allowed character joins letters into scterm (159,708
+  words, C and C.UTF-8). shownAsIs unchanged: emoji use U+FE0F.
+- Verification, round 2 (builder, base bee1feb): full suite 522 pass, 3
+  skip, 0 fail; 49 related -race x3: 147/147; 12 new/changed x20: 240/240,
+  -race x5: 60/60. TestNamePartsRunNoScterm (736 parts, 6 shells, ~1 s)
+  fails with round 1's plainName, as each new test does on what it guards.
+  Mutants: 76 of 77 killed; M29 equivalent, as before.
+- Intake, round 2: on fc7d19e, the tip once parts 61 and 53 had also
+  landed: the builder's round-2 files as built, with README.md (parts 59
+  and 53) and pastecmd_test.go (part 57) merged three ways again (each
+  merge adds exactly this part's lines). Reviewed on
+  /tmp/opencode/review-51b; that tree's checks are in this part's commit
+  message.
+
 ## Update (2026-10-22: QoL overhaul, part 53: no silent stream left behind)
 
 - Once the session's sound has stopped while the picture goes on (any end

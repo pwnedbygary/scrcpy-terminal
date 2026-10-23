@@ -94,10 +94,12 @@ func (s *Store) Remove(fingerprint string) (bool, error) {
 	return false, nil
 }
 
-// Matches lists the targets a query could mean: the one whose name it is
-// (case-insensitive), else those whose name, or any word in it, starts with
-// the query, or whose fingerprint starts with it (at least four characters,
-// hex or short form). An empty query matches every target.
+// Matches lists the targets a query could mean: the one whose fingerprint it
+// is (hex or short form; two can share a short one), whatever the others are
+// named; else the first whose name it is (case-insensitive); else those whose
+// name, or any word in it, starts with the query, or whose fingerprint starts
+// with it (at least four characters, hex or short form). An empty query
+// matches every target.
 func (s *Store) Matches(query string) ([]Record, error) {
 	recs, err := s.All()
 	if err != nil {
@@ -105,7 +107,7 @@ func (s *Store) Matches(query string) ([]Record, error) {
 	}
 	q := strings.ToLower(strings.TrimSpace(query))
 	compact := strings.ReplaceAll(q, "-", "")
-	var hits []Record
+	var exact, named, hits []Record
 	for _, r := range recs {
 		fp, err := r.ID()
 		if err != nil {
@@ -115,12 +117,20 @@ func (s *Store) Matches(query string) ([]Record, error) {
 		switch {
 		case q == "":
 			hits = append(hits, r)
+		case compact == fp.Hex() || compact == short:
+			exact = append(exact, r)
 		case strings.EqualFold(r.Name, q):
-			return []Record{r}, nil
+			named = append(named, r)
 		case startsNameOrWord(r.Name, q),
 			len(compact) >= 4 && (strings.HasPrefix(r.Fingerprint, compact) || strings.HasPrefix(short, compact)):
 			hits = append(hits, r)
 		}
+	}
+	switch {
+	case len(exact) > 0:
+		return exact, nil
+	case len(named) > 0:
+		return named[:1], nil
 	}
 	return hits, nil
 }
