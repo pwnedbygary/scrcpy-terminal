@@ -7,6 +7,58 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-23: QoL overhaul, part 64: fish 4.2's looser matches)
+
+- CI's first run on 879202f (run 39967011252, Ubuntu's fish 4.2.1-3.2)
+  failed in TestFishCompletesAsTheHelpSays: for `scterm -n`, fish gave -n
+  and seven long flags (--no-audio ... --window-size); the test wanted -n.
+- Fish's matching, not the script. Where no candidate starts with the
+  word, both fishes give looser (subsequence) matches, for commands,
+  options and values alike (fish 4.0.0: "if there is no better match").
+  Fish 4.2.1 also gives looser long options beside those that start with
+  an option's name (-n: every long flag with an n); 4.7.0 lists the fix,
+  "Long options were spuriously completed after typing short options". A
+  made-up command, and scterm's flags declared one to a call, do the same.
+  The scripts are unchanged.
+- The test compares what fish offers for each line whole, as at 879202f,
+  but where the word is an option's name longer than a dash and some
+  candidate starts with it: those must equal the expectation, and each
+  other must be offered by the line cut to a dash, itself a case. A case
+  line with a quote or a stray backslash, or needing a dash line that is
+  not a case, fails the test at once.
+- Intake, round 1: taken in on 879202f, the builder's completion_test.go
+  as built. The orchestrator reworded CI's step that installs zsh and
+  fish, the test step's comment and docs/RELEASING.md, which said the
+  shells serve only the paste tests; since part 60 the completion tests
+  need them too (found in part 62's review of its rounds 4 and 5).
+  Reviewed on /tmp/opencode/review-64.
+- Review round 1 (NEEDS CHANGES): MEDIUM, the rule let looser matches
+  through on lines fish ran only for it, so a fish script offering the
+  commands as --dump-frames's value (G1) passed, which 879202f's test
+  catches; LOW, the entry, report and comment said 4.9.3 gives only
+  prefix matches.
+- Round 2: the rule above; the comment, report and entry say what fish
+  does; G1, G2 and three test mutants added; the table puts 879202f's
+  test under 4.9.3 beside the new one.
+- Verification, round 2 (builder, base 879202f, sbx, go1.27.1; fish
+  4.2.1 is upstream's standalone build bound over /usr/bin/fish, 4.9.3
+  this computer's; SCTERM_TEST_REQUIRE_SHELLS=1): gofmt, vet, build,
+  diff --check clean; ./... 578 pass, 3 skip, 0 fail under each fish; the
+  18 completion tests -race x3: 54/54, no data race, under each; the
+  changed test x20: 20/20 under each. Fail-before: 879202f under 4.2.1
+  fails that test with CI's message; G1 fails 879202f's test and the new
+  one under both fishes, and passed round 1's under both. Mutants (23):
+  the 14 that 879202f's test kills under 4.9.3 fail the new test under
+  both; N6 fails it under 4.2.1 only; F08 equivalent; G2, F09 and K4
+  escape both fish tests (F09 and K4 fail other completion tests).
+- Intake, round 2: taken in on 879202f, the builder's completion_test.go
+  as built, the orchestrator's two files unchanged. Reviewed on
+  /tmp/opencode/review-64b; that tree's checks are in the commit message.
+- Left alone: the scripts and completion.go; G2, which no test catches,
+  as at 879202f.
+- Not run by the builder: CI, and Ubuntu's fish 4.2.1-3.2 package; other
+  fish versions; the whole module under -race; a person at a fish.
+
 ## Update (2026-10-23: QoL overhaul, part 60: shell completion)
 
 - `scterm completion bash|zsh|fish` prints a completion script (README:

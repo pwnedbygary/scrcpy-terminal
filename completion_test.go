@@ -867,6 +867,13 @@ func pasteShellNamed(t *testing.T, name string) pasteShell {
 // lists the candidates as fish shows them, sorted), but the pairings, which
 // are the values themselves: fish quotes each as it inserts it. fish offers a
 // command's options, as it offers any, once the word starts with a dash.
+// What fish offers for a line is compared whole, its looser matches included:
+// where no candidate starts with the word, fish gives those that hold the
+// word's letters in order (version for rsi). For an option's name longer than
+// a dash, fish 4.2 also gives such matches of long options beside the
+// candidates that start with the word, in any case (--window for -n); there
+// each of those others must be offered by the line with the word cut to a
+// dash, itself a case.
 func TestFishCompletesAsTheHelpSays(t *testing.T) {
 	inCompletionChild()
 	needShell(t, "/usr/bin/fish")
@@ -924,10 +931,30 @@ func TestFishCompletesAsTheHelpSays(t *testing.T) {
 		}
 		cases[typed] = want
 	}
+	// split gives the word line ends in, as fish reads it (\  is a space), and,
+	// for an option's name longer than a dash, the line with it cut to a dash.
+	split := func(line string) (word, dash string) {
+		start := strings.LastIndex(strings.ReplaceAll(line, `\ `, "__"), " ") + 1
+		word = strings.ReplaceAll(line[start:], `\ `, " ")
+		if len(word) > 1 && strings.HasPrefix(word, "-") && !strings.Contains(word, "=") {
+			return word, line[:start] + "-"
+		}
+		return word, ""
+	}
 	var lines []string
-	script := "source " + shellQuoted(sh.script["fish"]) + "\n"
 	for line := range cases {
+		if strings.ContainsAny(line, `'"`) || strings.Contains(strings.ReplaceAll(line, `\ `, ""), `\`) {
+			t.Fatalf("%q holds a quote or a backslash not before a space, which split does not read", line)
+		}
+		if _, dash := split(line); dash != "" {
+			if _, ok := cases[dash]; !ok {
+				t.Fatalf("%q needs a case for %q, against which its looser matches are checked", line, dash)
+			}
+		}
 		lines = append(lines, line)
+	}
+	script := "source " + shellQuoted(sh.script["fish"]) + "\n"
+	for _, line := range lines {
 		script += "complete -C " + shellQuoted(line) + "; printf '%s\\n' '-- end --'\n"
 	}
 	cmd := exec.Command("/usr/bin/fish", "--no-config", "-c", script)
@@ -938,15 +965,34 @@ func TestFishCompletesAsTheHelpSays(t *testing.T) {
 	if err != nil || len(blocks) != len(lines) {
 		t.Fatalf("%d completions gave %d (%v): %q", len(lines), len(blocks), err, out)
 	}
+	offered := map[string][]string{}
 	for i, line := range lines {
-		var got []string
 		if blocks[i] != "" {
 			for _, c := range strings.Split(strings.TrimSuffix(blocks[i], "\n"), "\n") {
 				c, _, _ = strings.Cut(c, "\t") // a description follows a tab
-				got = append(got, c)
+				offered[line] = append(offered[line], c)
 			}
 		}
-		want := slices.Clone(cases[line])
+	}
+	for line, want := range cases {
+		word, dash := split(line)
+		var got, looser []string
+		for _, c := range offered[line] {
+			if strings.HasPrefix(strings.ToLower(c), strings.ToLower(word)) {
+				got = append(got, c)
+			} else {
+				looser = append(looser, c)
+			}
+		}
+		if dash == "" || len(got) == 0 {
+			got, looser = append(got, looser...), nil
+		}
+		for _, c := range looser {
+			if !slices.Contains(offered[dash], c) {
+				t.Errorf("%q: %q, which %q does not offer", line, c, dash)
+			}
+		}
+		want = slices.Clone(want)
 		slices.Sort(got)
 		slices.Sort(want)
 		if !slices.Equal(got, want) {

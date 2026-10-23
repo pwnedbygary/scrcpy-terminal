@@ -30,7 +30,7 @@ jobs:
             libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
             libpulse-dev
 
-      - name: Install zsh and fish, for the paste tests
+      - name: Install zsh and fish, for the paste and completion tests
         run: |
           sudo apt-get install -y --no-install-recommends zsh fish
           /usr/bin/zsh --version
@@ -40,8 +40,9 @@ jobs:
         run: go vet ./...
 
       # Some tests catch their data races only under the race detector. With
-      # SCTERM_TEST_REQUIRE_SHELLS set, a shell that the paste tests need fails
-      # them when it is missing, where a skip would not show in this log.
+      # SCTERM_TEST_REQUIRE_SHELLS set, a shell that the paste or completion
+      # tests need fails them when it is missing, where a skip would not show
+      # in this log.
       - name: Test
         env:
           SCTERM_TEST_REQUIRE_SHELLS: "1"
