@@ -105,6 +105,12 @@ func (s *Store) Matches(query string) ([]Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	return MatchesIn(recs, query), nil
+}
+
+// MatchesIn is Matches for the records recs, read once by a caller that asks
+// many queries of them.
+func MatchesIn(recs []Record, query string) []Record {
 	q := strings.ToLower(strings.TrimSpace(query))
 	compact := strings.ReplaceAll(q, "-", "")
 	var exact, named, hits []Record
@@ -128,11 +134,11 @@ func (s *Store) Matches(query string) ([]Record, error) {
 	}
 	switch {
 	case len(exact) > 0:
-		return exact, nil
+		return exact
 	case len(named) > 0:
-		return named[:1], nil
+		return named[:1]
 	}
-	return hits, nil
+	return hits
 }
 
 func startsNameOrWord(name, q string) bool {
@@ -151,10 +157,17 @@ func startsNameOrWord(name, q string) bool {
 // Find is Matches narrowed to exactly one target; when the query means
 // several, the error is an *AmbiguousError.
 func (s *Store) Find(query string) (Record, error) {
-	hits, err := s.Matches(query)
+	recs, err := s.All()
 	if err != nil {
 		return Record{}, err
 	}
+	return FindIn(recs, query)
+}
+
+// FindIn is Find for the records recs, read once by a caller that asks many
+// queries of them.
+func FindIn(recs []Record, query string) (Record, error) {
+	hits := MatchesIn(recs, query)
 	q := strings.TrimSpace(query)
 	switch {
 	case len(hits) == 1:

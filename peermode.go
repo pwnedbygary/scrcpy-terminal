@@ -230,11 +230,20 @@ func damagedWords(n int) (count, the, them string) {
 // expands a global alias wherever a bare word names one.
 func pasteArg(store *peer.Store, name string, fp peer.Fingerprint) (string, bool) {
 	recs, err := store.All()
-	// finds reports whether query means this pairing: Find gives it. An
+	if err != nil {
+		return "", false
+	}
+	return pasteArgFor(recs, store.Find, name, fp)
+}
+
+// pasteArgFor is pasteArg for the pairings recs, which find searches as
+// Store.Find does.
+func pasteArgFor(recs []peer.Record, find func(string) (peer.Record, error), name string, fp peer.Fingerprint) (string, bool) {
+	// finds reports whether query means this pairing: find gives it. An
 	// identity does whatever the pairings are named.
 	finds := func(query string) bool {
-		rec, findErr := store.Find(query)
-		return err == nil && findErr == nil && rec.Fingerprint == fp.Hex()
+		rec, err := find(query)
+		return err == nil && rec.Fingerprint == fp.Hex()
 	}
 	// Find gives the first of the pairings that have the name in any case.
 	namesake := slices.ContainsFunc(recs, func(r peer.Record) bool {

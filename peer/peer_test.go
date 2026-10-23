@@ -331,6 +331,26 @@ func TestStoreFindHandsBackSeveralMatches(t *testing.T) {
 	}
 }
 
+// TestStoreFindReportsPairingsThatCannotBeRead: when peers.json does not
+// parse, Find and Matches report that, for any query, rather than finding
+// a target or none.
+func TestStoreFindReportsPairingsThatCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "peers.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := OpenStore(dir)
+	for _, query := range []string{"", "Pixel"} {
+		var syntax *json.SyntaxError
+		if r, err := s.Find(query); !errors.As(err, &syntax) {
+			t.Errorf("Find(%q) = %q, %v; want the error parsing peers.json", query, r.Name, err)
+		}
+		if hits, err := s.Matches(query); hits != nil || !errors.As(err, &syntax) {
+			t.Errorf("Matches(%q) = %d targets, %v; want the error parsing peers.json", query, len(hits), err)
+		}
+	}
+}
+
 // fakeTarget is a minimal target: enough protocol to exercise the client's
 // TLS pinning, handshake and control-channel demultiplexing.
 type fakeTarget struct {

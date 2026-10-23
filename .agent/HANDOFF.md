@@ -7,6 +7,71 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-23: QoL overhaul, part 60: shell completion)
+
+- `scterm completion bash|zsh|fish` prints a completion script (README:
+  Install > Shell completion, Commands row; scterm -h Commands). A missing,
+  extra or unknown shell is a usage error, status 1.
+- It completes commands, flags (scrcpy's aliases too), --audio-codec and
+  --audio-source values, command options, --dump-frames dirs, --dump-audio
+  files, and the pairing of --peer, --peer= and forget through the hidden
+  `scterm __complete peers|forget [WORD]`. No serials: it never runs adb.
+- Pairings: each as pasteArg names it (pasteArgFor, pasteArg's rule on the
+  records, calls part 63's everyCopyFinds); none whose identity does not
+  parse; after forget, --damaged last while one is damaged. The store is
+  read once and searched with peer.FindIn, which Store.Find calls too;
+  the identity file is never opened.
+- bash inserts as written, and offers no pairing with text after the
+  cursor. zsh: outside quotes compadd -Q -U of those words; inside a
+  quote, values zsh quotes and matches in any case. fish: values fish
+  escapes. Each script runs the helper with `command`, and none expands
+  what it prints.
+- Intake, round 1: built first on bee1feb, then moved by the builder onto
+  parts 51 and 52 (842b213, the tip then), before any review. Taken in on
+  b7252bf, the tip once parts 55 and 54 had also landed: README.md, which
+  part 55 also changes, merged three ways (the merge adds exactly this
+  part's lines); the other 11 files as built. Reviewed on
+  /tmp/opencode/review-60.
+- Review round 1 (NEEDS CHANGES): MEDIUM: bash completed mid-word and kept
+  the text after the cursor, so 'Pixel 8'el selected My Pixel 8el. LOWs:
+  no test pinned that the scripts never expand the helper's lines, nor
+  `command`; completion's copy of Store.Matches could drift unseen; the
+  zsh test widget broke under a zshenv setting SH_WORD_SPLIT. NITs: zsh
+  matched case inside quotes; README tied names to the pairing's command.
+- Round 2: moved onto part 63 (pasteArgFor calls everyCopyFinds); bash's
+  mid-word rule; peer.MatchesIn and FindIn, which Store.Matches and
+  Store.Find now call, replace the copy (a refactor: both return what they
+  did; peer's existing tests unchanged, one new pins the read error); the
+  zsh widget under emulate -L zsh with quotes; zsh's -M matcher inside
+  quotes; README. Tests: mid-word in the three shells; a stand-in helper
+  printing 15 hostile lines in 10 contexts beside a decoy scterm
+  function; part 63's 4 cases in the parity test; zsh 'gal, "gal, 'GAL.
+- Verification, round 2 (builder, base 970573b, sbx, go1.27.1): gofmt,
+  vet, build, diff --check clean; ./... 578 pass, 3 skip, 0 fail (base
+  559, 3, 0), the same with SCTERM_TEST_REQUIRE_SHELLS=1 and under -race;
+  71 related tests -race x3: 213/213; the 22 new or changed x20: 440/440,
+  -race x5: 110/110, with and without the shells required; no data race.
+  CI's step: scterm 135.2 s on CPUs 0-3, 153.2 s on 0-1 (base 92.3 s,
+  95.4 s), at a load of 9-12; one run failed once in a base screenshot
+  test, then passed 50/50 alone and in the step. Fail-before: on base
+  (stub) 21 of 22 fail; round 1's scripts fail mid-word and zsh's case;
+  round 1's tests pass under Z10, the 4 no-command mutants and round 1's
+  bash rule. Mutants: 80 of 82 killed; S17 and F08 equivalent. Under the
+  review's drift mutants completion and pasteArg agree. A zshenv with
+  SH_WORD_SPLIT: all pass; round 1's widget fails the review's five.
+- Intake, round 2: on 85901e2, the tip once part 63 had landed. Its tree
+  differs from the builder's base only in the handoff and in part 63's
+  third-round rows in pastearg_test.go and pastecmd_test.go, which this
+  part does not touch, so all 14 files are as built. Reviewed on
+  /tmp/opencode/review-60b; that tree's checks are in this part's commit
+  message.
+- Left alone: CI's workflow; how Find reads names (D2, D3); MatchesIn
+  parses each identity per query (640 ms at 1000 pairings, 122 with
+  round 1's copy); pasteArg's reads (#19); INPUTRC for the bash ptys.
+- Not run by the builder: a person in a terminal; bash-completion,
+  oh-my-zsh, fish config; older shells, dash, ksh, Ubuntu's zsh and fish;
+  CI on a hosted runner; adb, a phone, a peer target or the app.
+
 ## Update (2026-10-23: QoL overhaul, part 63: names a terminal's copying could change)
 
 - A printed command (`scterm --peer 'NAME'` after a pairing, the command

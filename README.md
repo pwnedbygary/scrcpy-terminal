@@ -79,6 +79,27 @@ go build -o scterm .
 A build from source reports its version as `scterm dev`. Keep the binary in the checkout if you
 want `scterm update` to update it (see [Updating](#updating)).
 
+### Shell completion
+
+bash, zsh and fish can complete scterm's commands and flags, the values of `--audio-codec` and
+`--audio-source`, and the paired devices after `--peer` and `scterm forget`. A device is
+completed by its name only when the commands scterm prints would name it that way: when the
+name is plain and selects the device alone (see [Pairing](#pairing)), judged on the pairings as
+they are when you press Tab. Otherwise it is completed by its identity. adb serials are not
+completed. For bash or zsh, add a line to the shell's startup file:
+
+```sh
+source <(scterm completion bash)    # bash, in ~/.bashrc
+source <(scterm completion zsh)     # zsh, in ~/.zshrc, after compinit
+```
+
+fish loads completions from a directory. Save the script there, and save it again after you
+update scterm:
+
+```sh
+scterm completion fish > ~/.config/fish/completions/scterm.fish
+```
+
 ## Quick start
 
 1. On the device, turn on USB debugging. On most devices: open Settings, then About phone, tap
@@ -680,6 +701,7 @@ variables also help: `SCT_DEBUG_WEB=1` logs each browser's paint and decode stat
 | `scterm update [--check] [-y]` | Update to the latest release, or pull and rebuild |
 | `scterm version` | Print the version |
 | `scterm licenses` | Print the licenses of scterm and what it includes |
+| `scterm completion bash\|zsh\|fish` | Print a completion script for that shell |
 | `scterm help` | Print the help, as `scterm -h` does |
 | `scterm COMMAND -h` | Print a command's own help |
 

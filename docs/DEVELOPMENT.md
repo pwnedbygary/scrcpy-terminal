@@ -80,7 +80,8 @@ also runs on its own:
 The tests of the commands that scterm prints for you to paste (`pastecmd_test.go`) run them in
 `sh`, `bash`, `zsh` and `fish`, in `/usr/bin`, and skip each shell that is not installed. CI
 installs zsh and fish and sets `SCTERM_TEST_REQUIRE_SHELLS` to 1: with that variable set, a
-shell that is not installed fails the tests instead of skipping them.
+shell that is not installed fails the tests instead of skipping them. The shell completion tests
+(`completion_test.go`), which run the completion scripts in bash, zsh and fish, do the same.
 
 ### Tests that need a device or a target
 
@@ -104,7 +105,8 @@ SCTERM_PEER_INVITATION="127.0.0.1:27411 XXXX-XXXX-XXXX-XXXX" go test ./peer -run
 
 `SCTERM_TEST_MAIN_ARGS`, `SCTERM_TEST_NO_PRESENCE`, `SCTERM_TEST_CLEANUP_LOG`,
 `SCTERM_TEST_LOST_DEVICE`, `SCTERM_TEST_SESSION_END`, `SCTERM_TEST_INPUT_LOOP`,
-`SCTERM_TEST_DOCTOR`, `SCTERM_TEST_UPDATE` and `SCTERM_TEST_PASTE_SHELL` are set by tests for
+`SCTERM_TEST_DOCTOR`, `SCTERM_TEST_UPDATE`, `SCTERM_TEST_PASTE_SHELL`, `SCTERM_TEST_COMPLETION`
+and `SCTERM_TEST_MISSING_SHELL` are set by tests for
 the child processes they start. Do not set them yourself. With `SCTERM_TEST_NO_PRESENCE`, main
 in a child process that cannot reach its paired device does not search the network for it
 (multicast DNS), and notes each search in the file that the variable names.

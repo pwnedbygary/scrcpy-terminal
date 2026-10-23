@@ -477,6 +477,14 @@ func TestCommandLineExitStatus(t *testing.T) {
 		{[]string{"forget"}, "", 1, "", "scterm: usage: scterm forget NAME (scterm peers lists the names)\n"},
 		{[]string{"doctor", "extra"}, "", 1, "", "scterm: usage: scterm doctor (it takes no arguments)\n"},
 		{[]string{"--web", "doctor"}, "", 1, "", "scterm: \"doctor\" is a command, not a flag value: run it on its own, as scterm doctor\n"},
+		{[]string{"completion"}, "", 1, "", "scterm: usage: scterm completion bash|zsh|fish\n"},
+		{[]string{"completion", "tcsh"}, "", 1, "", "scterm: usage: scterm completion bash|zsh|fish (\"tcsh\" is not one of these)\n"},
+		{[]string{"completion", "bash", "zsh"}, "", 1, "", "scterm: usage: scterm completion bash|zsh|fish\n"},
+		{[]string{"--web", "completion"}, "", 1, "", "scterm: \"completion\" is a command, not a flag value: run it on its own, as scterm completion\n"},
+		{[]string{"__complete", "peers", "a", "b"}, "", 1, "", "scterm: usage: scterm __complete peers|forget [WORD]\n"},
+		{[]string{"__complete", "pair"}, "", 1, "", "scterm: usage: scterm __complete peers|forget [WORD]\n"},
+		{[]string{"__complete", "peers"}, "", 0, "", ""},
+		{[]string{"__complete", "forget", ""}, "", 0, "", ""},
 		{nil, "", 1, "", "scterm dev\nscterm: adb not found: install Android platform-tools (often packaged as android-tools or adb), " +
 			"or use --peer NAME to reach the scterm Android app without it\n"},
 		{nil, unauthorized, 1, "", "scterm dev\nscterm: R5CT has not allowed USB debugging from this computer: unlock it, " +
@@ -487,6 +495,8 @@ func TestCommandLineExitStatus(t *testing.T) {
 		{[]string{"licenses"}, "", 0, "scterm is released under the MIT License:", ""},
 		{[]string{"doctor", "-h"}, "", 0, "usage: scterm doctor", ""},
 		{[]string{"licenses", "-h"}, "", 0, "usage: scterm licenses", ""},
+		{[]string{"completion", "-h"}, "", 0, "usage: scterm completion bash|zsh|fish", ""},
+		{[]string{"completion", "zsh"}, "", 0, "# zsh completion for scterm: its commands, its flags and their values, and", ""},
 	} {
 		home := t.TempDir()
 		cmd := exec.Command(os.Args[0], "-test.run=^TestCommandLineExitStatus$")
