@@ -7,6 +7,62 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-22: QoL overhaul, part 61: debug app next to the release)
+
+- Debug builds of the Android app are a separate app, "scterm debug"
+  (io.github.pwnedbygary.scterm.debug): they install next to the release,
+  with their own identity and pairings, instead of replacing it. Release
+  builds are unchanged.
+- app/build.gradle.kts: debug { applicationIdSuffix = ".debug" }. The
+  namespace (R, BuildConfig, Kotlin packages, class names) is unchanged.
+- src/debug/res/values/strings.xml: app_name "scterm debug", and the
+  accessibility service's label "scterm debug remote input".
+- When a release is out, debug builds no longer advise uninstalling (which
+  loses pairings): AppUpdates.DEBUG_BUILD says the release installs next to
+  them. Release-type builds keep DIFFERENT_KEY.
+- devicetest/activate_helper.py starts the helper from the APK of the app
+  showing the command (its uiautomator package, release or debug only).
+- android/README.md: the note on builds from source deleting pairings now
+  covers debug builds (separate app) and release builds (other key).
+- Decisions: no version-name suffix (the update-done notice compares the
+  release tag with VERSION_NAME, and peers see it); both apps open
+  scterm://pair links and Android asks which (fine: invitations are
+  protocol-level).
+- Already followed the build: ${applicationId}.shizuku, Shizuku's
+  ComponentName, the accessibility check, the helper's CLASSPATH, settings
+  intents, update checks. Kept: class names, the binder descriptor,
+  internal intent actions, protocol names. No Go change was needed.
+- Tests: PackageNameTest pins BuildConfig.APPLICATION_ID per build type.
+- Verification (builder, base bee1feb; substitutes, no Gradle): kotlinc
+  2.3.20 type-checked protocol, peer, the app and its tests, base and
+  after, with stand-ins for Shizuku, the scrcpy Server and
+  ShizukuActivation.kt (25 of the app's 26 main sources): 0 errors, 2
+  identical warnings each. PackageNameTest on AGP-shaped BuildConfig stubs
+  passes for debug and release, fails for base and 2 mutants. aapt2 link:
+  label 'scterm' -> 'scterm debug'. activate_helper harness: base 2/5,
+  after 5/5, 4 mutants caught.
+- Left alone: both apps serving at once share port 27300 and the helper
+  log; a debug build made with -Pscterm.releaseCert= and the GitHub URL
+  calls the release "not scterm".
+- Not run by the builder: Gradle (lint, assembleDebug, testDebugUnitTest:
+  CI), any device install, kotlinc 2.4.20.
+- Intake: round 1 was taken in on bee1feb, the branch tip then, all 7 files
+  byte for byte, and reviewed on /tmp/opencode/review-61. CI's Gradle run
+  is its first real build; it runs PackageNameTest in the debug build only
+  (testDebugUnitTest).
+- Review round 1 (PASS), with three LOWs and two NITs. Left for a later
+  change: as CI runs PackageNameTest for debug only, nothing that runs pins
+  the release application ID (a suffix moved into defaultConfig would pass
+  CI); the release and a debug build on one phone are two peers with the
+  same name and port; the texts that name the accessibility service, or
+  the app in Shizuku's list, and android/README.md don't say which app's.
+  The verification bullet's wording is corrected above.
+- Round 2 changes only this entry, and moves the part onto 20dad0f, the tip
+  once parts 57, 59 and 58 had landed: android/README.md, which part 59
+  also changed, merged three ways (the merge adds exactly this part's
+  lines). Reviewed on /tmp/opencode/review-61b; that tree's checks are in
+  this part's commit message.
+
 ## Update (2026-10-22: QoL overhaul, part 58: a lock for the canvas pool)
 
 - What changed: the terminal display's two-canvas pool (`takePooled`,

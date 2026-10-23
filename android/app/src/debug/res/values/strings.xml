@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds install next to the release; these tell the two apart. -->
+<resources>
+    <string name="app_name">scterm debug</string>
+    <string name="accessibility_label">scterm debug remote input</string>
+</resources>

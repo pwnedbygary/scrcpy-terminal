@@ -947,7 +947,7 @@ class MainActivity : ComponentActivity() {
                     release.versionCode <= BuildConfig.VERSION_CODE -> toast(getString(R.string.update_none, BuildConfig.VERSION_NAME))
                     !AppUpdates.releaseCanReplace(this) -> AlertDialog.Builder(this)
                         .setTitle(getString(R.string.update_released, release.version))
-                        .setMessage(AppUpdates.DIFFERENT_KEY)
+                        .setMessage(if (BuildConfig.DEBUG) AppUpdates.DEBUG_BUILD else AppUpdates.DIFFERENT_KEY)
                         .setPositiveButton(R.string.update_page) { _, _ -> openPage(release.page) }
                         .setNegativeButton(R.string.done, null)
                         .show()

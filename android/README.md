@@ -18,10 +18,14 @@ when asked). Release APKs are signed by the certificate with SHA-256
 `8b:dc:c9:7a:62:21:ad:9e:03:75:12:eb:79:e1:2b:5a:39:63:19:fb:39:5f:2b:23:a0:fd:dc:50:cc:3d:ca:76`
 (`apksigner verify --print-certs` shows it).
 
-A build from source is signed with your own debug key, and Android will not
-replace an app signed with one key by the same app signed with another:
-switching between the two means uninstalling first, which deletes the device's
-identity and pairings (pair again afterwards).
+A debug build from source (`./gradlew :app:assembleDebug`) is a separate app,
+*scterm debug* (package `io.github.pwnedbygary.scterm.debug`): it installs
+next to the release, with its own identity and pairings, and when both are
+installed Android asks which one opens a `scterm://pair` link. A release build
+from source signed with your own key is the same app as the release, and
+Android will not replace an app signed with one key by the same app signed
+with another: switching between the two means uninstalling first, which
+deletes the device's identity and pairings (pair again afterwards).
 
 Updates, from 2.1.0 on: *Check for updates* on the main screen (release builds
 also look once a day and say when one is out). The app downloads the new APK,

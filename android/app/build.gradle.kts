@@ -53,6 +53,11 @@ android {
     }
 
     buildTypes {
+        // A separate app next to the release: with one package name, switching
+        // between the two means uninstalling one, which deletes its pairings.
+        debug {
+            applicationIdSuffix = ".debug"
+        }
         release {
             signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
