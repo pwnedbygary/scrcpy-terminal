@@ -216,8 +216,7 @@ func TestNoSoundFromTheDeviceIsPrinted(t *testing.T) {
 	t.Cleanup(func() { signal.Reset(syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP) })
 	t.Setenv("PATH", t.TempDir()) // no adb or pactl to reach anything with
 	const want = "scterm: no sound from Pixel 8: Audio disabled: audio playback capture source not supported before Android 13\n"
-	// An Opus stream cut inside its first packet, an error both modes print
-	// (--web leaves out a stream that simply ends).
+	// An Opus stream cut inside its first packet, an error both modes print.
 	started := [][]byte{[]byte("opus"), {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100}, make([]byte, 10)}
 	const cut = "scterm: audio: audio packet: unexpected EOF\n"
 	cfg := config{web: true, audio: true, webAddr: "127.0.0.1"}

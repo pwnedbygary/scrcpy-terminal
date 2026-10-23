@@ -655,8 +655,8 @@ func (a *app) toggleGrab() {
 // toggleLocalMute mutes the local audio stream, or brings back the volume it
 // had before the mute (Alt+M).
 func (a *app) toggleLocalMute() {
-	if a.audio == nil || a.audio.failure() != nil {
-		return // no sink to mute
+	if !a.localVolumeWorks() {
+		return
 	}
 	a.audio.toggleMute()
 	a.refreshStatus()
@@ -664,11 +664,27 @@ func (a *app) toggleLocalMute() {
 
 // adjustLocalVolume changes local playback volume (Alt+- / Alt+=).
 func (a *app) adjustLocalVolume(delta int) {
-	if a.audio == nil || a.audio.failure() != nil {
-		return // no sink to adjust
+	if !a.localVolumeWorks() {
+		return
 	}
 	a.audio.setGain(a.audio.gainPercent() + delta)
 	a.refreshStatus()
+}
+
+// localVolumeWorks reports whether the volume keys may change the local
+// volume: the session's sound has not stopped, and there is a sink that has
+// not failed. Once the sound has stopped, the sink is closed (playAudio), and
+// the first key pressed says why nothing changed; the status row says audio
+// off from then on.
+func (a *app) localVolumeWorks() bool {
+	if a.stream.soundStopped() != nil {
+		if !a.soundOffSaid {
+			a.soundOffSaid = true
+			notice("scterm: the sound is off, so its volume stays as it is\n")
+		}
+		return false
+	}
+	return a.audio != nil && a.audio.failure() == nil // a sink to change
 }
 
 // shotWait bounds how long a screenshot waits for the video goroutine before

@@ -89,6 +89,11 @@ type app struct {
 	// shotKeyAt is when the last Alt+S key press came (screenshotKey).
 	shotKeyAt time.Time
 
+	// soundOffSaid is whether a volume key has said that the sound is off,
+	// which it says once (localVolumeWorks). Only the run loop reads or sets
+	// it.
+	soundOffSaid bool
+
 	// quitting is set once shutdown has begun, so teardown-time socket errors
 	// ("stream ended: use of closed network connection") are not reported as
 	// failures on the way out.
@@ -248,7 +253,7 @@ func (a *app) run() error {
 	if pactl, ok := a.audioFollower(); ok {
 		stopFollow, every := make(chan struct{}), audioFollowEvery
 		defer close(stopFollow)
-		a.goTUI(func() { followAudioSink(pactl, stopFollow, every) })
+		a.goTUI(func() { followAudioSink(pactl, a.audio, stopFollow, every) })
 	}
 
 	return a.loop(wake, lost)
@@ -343,13 +348,19 @@ func (a *app) watchStreams() <-chan error {
 }
 
 // playAudio runs the audio demuxer and returns how the audio stream ended.
-// When the device turns the stream off, the session goes on without sound, as
-// in scrcpy: playAudio says so, with the server's reason, and returns nil.
-// The reason is the device's text, and the line also goes to stderr and to
-// the replay at exit, which print it as it is: its control characters are
-// taken out here.
+// Once the session's sound has stopped, nothing more comes to play on this
+// computer, so playAudio closes the sink: its stream would stay in the
+// desktop's mixer, silent, until scterm quits, and the follower would go on
+// moving it. When the device turns the stream off, the session goes on
+// without sound, as in scrcpy: playAudio says so, with the server's reason,
+// and returns nil. The reason is the device's text, and the line also goes to
+// stderr and to the replay at exit, which print it as it is: its control
+// characters are taken out here.
 func (a *app) playAudio() error {
 	err := a.stream.runAudio(a.audio)
+	if a.stream.soundStopped() != nil && a.audio != nil {
+		a.audio.close()
+	}
 	if !errors.Is(err, errAudioOff) {
 		return err
 	}
@@ -543,12 +554,15 @@ func (a *app) runWeb() error {
 		}
 	}()
 	go func() {
-		if err := a.playAudio(); err != nil && !a.quitting.Load() && !isClosedConnErr(err) {
-			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
+		// Nothing once quitting: sess.stop closes the socket on the way out.
+		// Before that, the device ending the audio stream, EOF, is worth a
+		// line, as in the other displays.
+		if err := a.playAudio(); err != nil && !a.quitting.Load() {
+			fmt.Fprintf(stderrWriter(), "scterm: audio: %s\n", cleanText(err.Error()))
 		}
 	}()
 	if pactl, ok := a.audioFollower(); ok {
-		go followAudioSink(pactl, a.web.done, audioFollowEvery)
+		go followAudioSink(pactl, a.audio, a.web.done, audioFollowEvery)
 	}
 
 	// A 500ms tick keeps the mouse-drag coalescer fed even when no browser is

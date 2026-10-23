@@ -9,12 +9,12 @@ import (
 var audioFollowEvery = time.Second
 
 // audioFollower says whether scterm's stream should follow the desktop's
-// sink: only when the sink plays on this computer (it opened, and the browser
-// is not the only output), SCT_AUDIO_DEVICE does not pin it, and
-// pactl is on PATH. It returns pactl, with the environment as it is now. The
-// runs call it before they start the follower, which then reads neither
-// PATH nor the environment, which a test that started it puts back when it
-// ends.
+// sink: only when the sink plays on this computer (it opened, has not failed
+// or been closed since, and the browser is not the only output),
+// SCT_AUDIO_DEVICE does not pin it, and pactl is on PATH. It returns pactl,
+// with the environment as it is now. The runs call it before they start the
+// follower, which then reads neither PATH nor the environment, which a test
+// that started it puts back when it ends.
 func (a *app) audioFollower() (pactlTool, bool) {
 	if !a.audio.plays() {
 		return pactlTool{}, false
@@ -29,8 +29,11 @@ func (a *app) audioFollower() (pactlTool, bool) {
 // followAudioSink watches the desktop-selected default sink and moves our
 // stream to it whenever the user switches output devices (KDE panel,
 // `pactl set-default-sink`, ...), asking pactl every `every`. Runs until stop
-// is closed, when the run that started it ends.
-func followAudioSink(pactl pactlTool, stop <-chan struct{}, every time.Duration) {
+// is closed, when the run that started it ends, or until sink, whose stream it
+// moves, is closed, when the session's sound has stopped: a tick that begins
+// after that asks pactl nothing. sink is never nil: the runs start a follower
+// only for a sink that plays (audioFollower).
+func followAudioSink(pactl pactlTool, sink *audioSink, stop <-chan struct{}, every time.Duration) {
 	poll := time.NewTicker(every)
 	defer poll.Stop()
 	var lastMoved string
@@ -44,6 +47,9 @@ func followAudioSink(pactl pactlTool, stop <-chan struct{}, every time.Duration)
 		case <-stop:
 			return
 		default:
+		}
+		if sink.closed.Load() {
+			return
 		}
 		def := pactl.defaultSink()
 		if def == "" {

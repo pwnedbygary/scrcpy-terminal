@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -55,5 +56,29 @@ func TestWebGainOp(t *testing.T) {
 				t.Errorf("volume %d%% after %v, want %d%%", got, tc.msgs, tc.want)
 			}
 		})
+	}
+}
+
+// TestWebGainOpLeavesAStoppedSoundAlone: once the session's sound has stopped
+// (here the device turns it off), no gain op changes this computer's volume,
+// as the terminal's volume keys change nothing then either.
+func TestWebGainOpLeavesAStoppedSoundAlone(t *testing.T) {
+	stream := newStreamState(&session{deviceName: "Pixel 8", audio: soundOff(t)}, config{audio: true}, nil)
+	if err := stream.runAudio(nil); !errors.Is(err, errAudioOff) {
+		t.Fatalf("runAudio: %v, want the device to turn the sound off", err)
+	}
+	a := &app{audio: &audioSink{gain: 256, pct: 100}, stream: stream}
+	a.audio.setGain(70)
+	s := &webServer{app: a}
+	for _, msg := range []string{`{"op":"gain","gain":40}`, `{"op":"gain","mute":true}`,
+		`{"op":"gain","gain":0}`, `{"op":"gain","mute":false}`, `{"op":"gain","gain":150,"mute":false}`} {
+		var ev webEvent
+		if err := json.Unmarshal([]byte(msg), &ev); err != nil {
+			t.Fatalf("%s: %v", msg, err)
+		}
+		s.applyControl(nil, &ev)
+		if got := a.audio.gainPercent(); got != 70 {
+			t.Errorf("volume %d%% after %s, want it left at 70%%", got, msg)
+		}
 	}
 }

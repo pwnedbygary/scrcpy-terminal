@@ -7,6 +7,83 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-22: QoL overhaul, part 53: no silent stream left behind)
+
+- Once the session's sound has stopped while the picture goes on (any end
+  but scterm's quit, `soundStopped()`; codec id 0 included), `playAudio`
+  closes this computer's sink, also one whose write failed: no silent
+  `scterm` stream stays in the desktop's mixer, and the follower ends; a
+  tick that begins after the close asks pactl nothing (new `sink`
+  argument, `closed` flag). Before, both lasted until scterm quit.
+- Terminal: Alt+M, Alt+- and Alt+= then leave the volume alone; the first
+  press says "the sound is off, so its volume stays as it is" (status row,
+  once in the replay), later ones nothing; the same with a sink that never
+  opened.
+- Browser: the `gain` op changes nothing once the sound has stopped; the
+  status says `audio` off, `hostAudio` false, `gain` 100, `muted` false
+  (new comments on `Gain` and `Muted`; `sendStatus` reads `soundOn()` once).
+- `--web`/`--window`: every end of the sound stream before the quit is one
+  line, `scterm: audio: REASON` through `cleanText`, EOF and a reset
+  connection included (left out before); when the device turns the sound
+  off (codec id 0), the line is `scterm: no sound from DEVICE[: REASON]`,
+  as before, and no `scterm: audio:` line follows; nothing at the quit.
+- Decisions: closing is safe (`close` and `writePCM16` share `a.mu`, the
+  writer has returned, no drain); `plays()` honours `closed`, `failure()`
+  does not; a sink whose write failed keeps its follower until the sound
+  stops.
+- Tests: soundstopped_test.go (new, 5 tests: the close in each display, the
+  keys, `--web` end to end, the `--web` line, reads under -race),
+  `TestAudioFollowerEndsWhenItsSinkCloses`,
+  `TestWebGainOpLeavesAStoppedSoundAlone`, a closed-sink row in
+  `TestAudioFollowerNeedsASinkAndPactl`.
+- Checks, round 1 (builder, base bee1feb, go1.27.1, sandbox): gofmt, vet,
+  build and diff --check clean; `go test ./...` 521 passed, 3 skipped,
+  0 failed (base 514, 3, 0), `-race` the same, no race; new tests x20
+  160/160, -race x10 80/80; 86 sound tests -race x3 258/258; node suites
+  0 failed; docs 2 files, 36 links, 0 problems. Base code with an API-only
+  shim: only the 8 new or changed tests fail. Mutants: 16 of 16 killed.
+- Left alone: `writePCM16` scales PCM in place before `fanPCM`, so with
+  --audio-dup the host volume scales the browser's sound (older than this
+  part, filed as an issue); check.mjs's "host sink stays silent"; one quit
+  rule for every display.
+- Not run by the builder: a real device, sound server (the close
+  mid-session), browser or window; the terminal `run()`; CI; Android.
+- Intake: taken in on 20dad0f, the tip once parts 57, 59 and 58 had
+  landed: 11 of the builder's 12 files as built, and README.md, which part
+  59 also changed, merged three ways (the merge adds exactly this part's
+  lines). Reviewed on /tmp/opencode/review-53; that tree's checks are in
+  this part's commit message.
+- Review round 1 (NEEDS CHANGES): no fault in the code. LOW: README and
+  ARCHITECTURE said the volume keys change nothing once the sound stops,
+  in every display (in the browser they set the page's volume, as
+  before); no test held the close of a sink whose write had failed
+  (mutant R05) or `--web`'s line for a reset connection (R06). NITs:
+  three comments (`audioFollower`, `soundEnd`'s readers, the op table's
+  `gain`); this entry's `--web` bullet and ARCHITECTURE's quit sentence
+  said more than the code; R01, R02 and R04 showed design claims no test
+  held. Suggested: say that `followAudioSink` takes no nil sink.
+- Round 2: README and ARCHITECTURE say it of the terminal only; the three
+  comments (stream.go: that comment only); the quit sentence says what
+  each display does; the `--web` bullet and the follower's claim above
+  corrected; tests for R05 (a failed-write row), R06 (a reset
+  connection), R04 (keys before the stop), R01 and R02 (new
+  `TestAudioFollowerAsksNothingOnceItsSinkCloses`: a sink closed before
+  the follower's first tick gets no pactl call); `followAudioSink`'s doc
+  says sink is never nil. The code's behaviour is unchanged.
+- Verification, round 2 (builder, base bee1feb): gofmt, vet, build, diff
+  --check clean; `go test ./...` 522 passed, 3 skipped, 0 failed, and the
+  same under -race, no race; sound tests -race x3 261/261; the 9 new or
+  changed tests x20 180/180, -race x5 45/45; each round-2 test passes and
+  fails under its mutant; the round-1 shim fails exactly those 9; mutants
+  21 of 21 killed; stream.go and README.md merge onto 20dad0f without
+  conflict.
+- Intake, round 2: on 8b5fa95, the tip once part 61 had also landed (it
+  changes none of this part's files): the builder's round-2 files as
+  built, with README.md (part 59) and stream.go (part 58) merged three
+  ways (each merge adds exactly this part's lines). Reviewed on
+  /tmp/opencode/review-53b; that tree's checks are in this part's commit
+  message.
+
 ## Update (2026-10-22: QoL overhaul, part 61: debug app next to the release)
 
 - Debug builds of the Android app are a separate app, "scterm debug"

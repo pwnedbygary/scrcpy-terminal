@@ -22,8 +22,9 @@ package main
 //	gain    {gain,mute}         host sound output (the PulseAudio sink): gain is a
 //	                            percent (absent or negative: unchanged), then
 //	                            mute:true mutes and mute:false restores the volume
-//	                            from before the mute; the page's own volume is
-//	                            local and never sent
+//	                            from before the mute; ignored once the sink has
+//	                            failed or the sound has stopped; the page's own
+//	                            volume is local and never sent
 //	quit                        end the session
 
 import (
@@ -111,7 +112,7 @@ func (s *webServer) applyControl(c *webClient, ev *webEvent) {
 		if a == nil {
 			break
 		}
-		if a.audio != nil && a.audio.failure() == nil {
+		if a.audio != nil && a.audio.failure() == nil && a.stream.soundStopped() == nil {
 			if ev.Gain != nil && *ev.Gain >= 0 {
 				a.audio.setGain(*ev.Gain)
 			}

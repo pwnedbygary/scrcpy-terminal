@@ -1513,8 +1513,12 @@ type webStatus struct {
 	CanvasH int     `json:"canvasH"`
 	FitW    int     `json:"fitW"`
 	FitH    int     `json:"fitH"`
-	Gain    int     `json:"gain"`
-	Muted   bool    `json:"muted"`
+	// Gain is the volume of this computer's sound output in percent, which
+	// the gain op sets, and Muted whether it is 0. Once that output has
+	// failed, at open or since, or the session's sound has stopped, the op
+	// changes nothing, and they say 100 and false.
+	Gain  int  `json:"gain"`
+	Muted bool `json:"muted"`
 	// Audio is the session's sound as the browser gets it: "on" while the
 	// session has a sound stream that has not stopped (soundStopped), and
 	// "off" otherwise. The PCM tap feeds the browser whether or not this
@@ -1571,14 +1575,17 @@ func (c *webClient) sendStatus() {
 	c.mu.Lock()
 	cv := c.cv
 	c.mu.Unlock()
+	// Read once, so that a status worked out as the sound stops gives the
+	// volume only along with audio on.
+	on := c.srv.stream.soundOn()
 	gain := 100
 	muted := false
-	if c.srv.audio != nil && c.srv.audio.failure() == nil {
+	if on && c.srv.audio != nil && c.srv.audio.failure() == nil {
 		gain = c.srv.audio.gainPercent()
 		muted = gain == 0
 	}
 	audio, hostAudio := "off", false
-	if c.srv.stream.soundOn() {
+	if on {
 		audio, hostAudio = "on", c.srv.audio.plays()
 	}
 	c.srv.clientsMu.Lock()

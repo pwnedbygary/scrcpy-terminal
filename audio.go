@@ -179,6 +179,11 @@ type audioSink struct {
 	// window on the same machine is plainly wrong. This is independent of
 	// fanPCM, so browser audio is unaffected.
 	silent atomic.Bool
+
+	// closed is set by close: the stream is gone from the sound server, and
+	// the sink plays nothing more. plays and the follower read it from other
+	// goroutines than the one that closes.
+	closed atomic.Bool
 }
 
 func newAudioSink() *audioSink {
@@ -211,15 +216,17 @@ func browserOnlySink() *audioSink {
 }
 
 // plays reports whether the sink plays the sound on this computer: it
-// opened, has not failed since, and is not kept silent for the browser.
+// opened, has not failed or been closed since, and is not kept silent for the
+// browser.
 func (a *audioSink) plays() bool {
-	return a != nil && a.failure() == nil && !a.silent.Load()
+	return a != nil && a.failure() == nil && !a.closed.Load() && !a.silent.Load()
 }
 
 // failure is why the sink does not play: why it never opened, or the write
 // that failed since; nil while it works, and for the sink of a browser-only
-// session, which is silent instead (browserOnlySink). The run loop, the status
-// row and the browser ask from other goroutines than the one that writes.
+// session, which is silent instead (browserOnlySink). Closing the sink is no
+// failure: failure stays what it was. The run loop, the status row and the
+// browser ask from other goroutines than the one that writes.
 func (a *audioSink) failure() error {
 	switch {
 	case a.err != nil:
@@ -597,9 +604,13 @@ func killStaleStreams(servers []string, kill func(server, app string) int) int {
 	return 0
 }
 
+// close takes the stream off the sound server at once (sct_audio_close). It
+// can run while the session goes on, once its sound has stopped (playAudio):
+// the lock keeps it from freeing the stream under a write.
 func (a *audioSink) close() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.closed.Store(true)
 	if a.sink != nil {
 		C.sct_audio_close(a.sink)
 		a.sink = nil

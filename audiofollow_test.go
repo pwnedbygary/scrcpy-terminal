@@ -67,7 +67,7 @@ func startFollower(t *testing.T, a *app, stop <-chan struct{}, every time.Durati
 		t.Fatal("no follower for this sink and PATH")
 	}
 	ended := make(chan struct{})
-	go func() { followAudioSink(pactl, stop, every); close(ended) }()
+	go func() { followAudioSink(pactl, a.audio, stop, every); close(ended) }()
 	return ended
 }
 
@@ -181,6 +181,84 @@ func TestAudioFollowerStopsWithItsRun(t *testing.T) {
 	}
 }
 
+// TestAudioFollowerEndsWhenItsSinkCloses: once scterm closes its stream, as it
+// does when the session's sound has stopped, the follower ends though its run
+// goes on: there is no stream to move. A write that failed before does not end
+// it: scterm closes that stream only once the sound stops. Before, it went on
+// asking pactl every second until the run ended.
+func TestAudioFollowerEndsWhenItsSinkCloses(t *testing.T) {
+	fastAudioFollower(t)
+	count := countingPactl(t, isolatePulse(t))
+	a := &app{audio: &audioSink{gain: 256, pct: 100}}
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	ended := startFollower(t, a, stop, audioFollowEvery)
+	eventually(t, "the follower asks for the default sink", func() bool { return count() > 0 })
+	a.audio.writeFailed.Store(true)
+	n := count()
+	eventually(t, "the follower asks 3 more times once a write has failed", func() bool { return count() >= n+3 })
+	a.audio.close()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the follower went on after its sink was closed, and asked pactl %d times", count())
+	}
+}
+
+// TestAudioFollowerAsksNothingOnceItsSinkCloses: a tick that begins after the
+// sink is closed asks pactl nothing. A sink closed after the run asked
+// audioFollower and before the follower's first tick, as when the sound stops
+// just then, gets no pactl call at all. A sink closed while the follower's
+// pactl runs, which waits until the test lets it go: that call ends, and
+// pactl runs no more.
+func TestAudioFollowerAsksNothingOnceItsSinkCloses(t *testing.T) {
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) }) // a failed test still lets its followers end
+	count := countingPactl(t, isolatePulse(t))
+	a := &app{audio: &audioSink{gain: 256, pct: 100}}
+	pactl, ok := a.audioFollower()
+	if !ok {
+		t.Fatal("no follower for this sink and PATH")
+	}
+	a.audio.close()
+	early := make(chan struct{})
+	go func() { followAudioSink(pactl, a.audio, stop, time.Millisecond); close(early) }()
+	select {
+	case <-early:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the follower of a sink closed before its first tick went on")
+	}
+	if n := count(); n != 0 {
+		t.Errorf("pactl ran %d times for a sink closed before the follower's first tick", n)
+	}
+
+	dir := isolatePulse(t)
+	release := filepath.Join(dir, "release")
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) })
+	// The wait also ends when the script itself is gone, or after about 10 s,
+	// as in TestAudioFollowerStopsBeforeAnotherTick.
+	count = pactlScript(t, dir, "n=0\n"+
+		"while [ ! -e '"+release+"' ] && [ -e \"$0\" ] && [ $n -lt 2000 ]; do\n"+
+		"\tPATH=/usr/bin:/bin sleep 0.005\n"+
+		"\tn=$((n+1))\n"+
+		"done\n")
+	a = &app{audio: &audioSink{gain: 256, pct: 100}}
+	ended := startFollower(t, a, stop, time.Millisecond)
+	eventually(t, "the follower asks for the default sink", func() bool { return count() > 0 })
+	a.audio.close()
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the follower went on after its sink was closed")
+	}
+	if n := count(); n != 1 {
+		t.Errorf("pactl ran %d times, though the sink was closed during its first run", n)
+	}
+}
+
 // TestAudioFollowerStopsBeforeAnotherTick: a stop that comes while pactl runs
 // ends the follower when pactl returns, though a tick is due by then too.
 // Each round's pactl waits until the test, having closed stop, lets it go;
@@ -269,14 +347,16 @@ func TestAudioFollowerKeepsThePactlItFound(t *testing.T) {
 
 // TestAudioFollowerNeedsASinkAndPactl: audioFollower, which the runs ask
 // before they start the follower, says to start it only when the sink plays
-// on this computer (it opened, and the browser is not the only output),
-// SCT_AUDIO_DEVICE does not pin it, and pactl is on PATH, and hands
-// over that pactl. TestWebRunStartsTheFollowerOnlyWhenItShould checks that
-// runWeb asks it.
+// on this computer (it opened, has not been closed since, and the browser is
+// not the only output), SCT_AUDIO_DEVICE does not pin it, and pactl is on
+// PATH, and hands over that pactl.
+// TestWebRunStartsTheFollowerOnlyWhenItShould checks that runWeb asks it.
 func TestAudioFollowerNeedsASinkAndPactl(t *testing.T) {
 	dir := isolatePulse(t)
 	pactl := filepath.Join(dir, "bin", "pactl")
 	working := &audioSink{gain: 256, pct: 100}
+	closed := &audioSink{gain: 256, pct: 100}
+	closed.close()
 	for _, tc := range []struct {
 		name     string
 		sink     *audioSink
@@ -287,6 +367,7 @@ func TestAudioFollowerNeedsASinkAndPactl(t *testing.T) {
 		{"no sink", nil, "", true, false},
 		{"a sink that did not open", &audioSink{err: errPulseUnavailable{}}, "", true, false},
 		{"a browser-only session's sink", browserOnlySink(), "", true, false},
+		{"a sink closed as the sound stopped", closed, "", true, false},
 		{"SCT_AUDIO_DEVICE", working, "speakers", true, false},
 		{"no pactl", working, "", false, false},
 		{"a sink and pactl", working, "", true, true},

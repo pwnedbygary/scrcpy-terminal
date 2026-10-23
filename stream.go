@@ -79,8 +79,9 @@ type streamState struct {
 	// at scterm's quit, because the device turned the audio stream off (see
 	// errAudioOff), sent an audio config error or a codec scterm cannot
 	// decode, or the stream ended or failed to decode. From then on the
-	// session has no sound. The terminal's status row, the statistics line of
-	// --no-tui and the browser's status read it from other goroutines.
+	// session has no sound. The terminal's status row and volume keys, the
+	// statistics line of --no-tui, and the browser's status and gain op read
+	// it from other goroutines.
 	soundEnd atomic.Pointer[error]
 
 	// quitting is the app's flag that scterm has begun to quit (newApp), nil

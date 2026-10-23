@@ -482,6 +482,12 @@ connection it was waiting for.
   line at the bottom of the page says `audio off` in place of the device volume. Both say
   `audio off` too once the sound stops later in the session while the picture goes on: when
   the device sends an audio error or a codec scterm cannot decode, or its sound stream ends.
+  scterm then says how the sound stream ended, for example
+  `scterm: audio: audio stream ended: EOF`, with `--web` and `--window` too.
+- Once the device's sound has stopped, either way, scterm closes its sound stream on this
+  computer, so that it no longer shows in your desktop's sound settings, and stops following
+  your desktop's output. In the terminal display, Alt+M, Alt+- and Alt+= then change nothing,
+  and the first of them says so.
 - In the terminal display, sound needs a PulseAudio server. Without one, scterm prints
   `scterm: audio disabled: …` before it starts, and the bottom line says `audio off`. The
   browser display still plays the sound in the browser, and shows the device volume.
@@ -494,7 +500,8 @@ connection it was waiting for.
   `--window` but without `--audio-dup` (the browser plays the sound), or in peer mode when the
   device does not let this computer hear. scterm decides both when it starts, before the device
   says whether it sends sound: a device that turns its sound off (see above) still stops the
-  other scterms' sound, and opens a sound stream here that stays silent.
+  other scterms' sound, and opens a sound stream here, which it closes as soon as the device
+  says that it sends none.
 - The default `--audio-source output` mutes the device while scterm runs. To hear the sound on
   the device too, use `--audio-source playback --audio-dup` (Android 13 and later).
 - In the browser, the sound chip says what is wrong: *Tap for sound*, *Sound off · Alt+M* (the

@@ -125,7 +125,7 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   whatever kind of sink that is (`audiofollow.go`, which needs `pactl`): with a Bluetooth or
   virtual default, the order above holds only for that first second. PipeWire also moves a
   stream opened without a sink name to a new default by itself (seen with PipeWire 1.6 and
-  WirePlumber 0.5).
+  WirePlumber 0.5). The follower ends when scterm closes the stream (see below).
 - scterm tries libpulse's default server first (`PULSE_SERVER`, or client.conf's default
   server, or else the user's socket), then the socket in `XDG_RUNTIME_DIR` by name. It tries
   every server and sink once per round, in up to three rounds 150 and 300 ms apart, for a
@@ -137,20 +137,27 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   them alone: they can belong to another live session (`playsHere` in `app.go`). The decision
   comes at start, from the session's sockets, before the device sends its codec id: a device
   that then turns the sound off (codec id 0, as Android 10 does, and the playback source
-  before Android 13) has stopped them by then, and has its sink open.
+  before Android 13) has stopped them by then, and has opened its sink, which it then closes
+  (see below).
 - In the browser display, the browser plays the sound, and scterm opens no PulseAudio stream
   unless `--audio-dup` is given (`app.go`). The `audio` field of the hello and status messages
   says whether the session's sound is on: on while the session has a sound stream that has not
   stopped (see below), whether or not this computer's stream opened. `hostAudio` says whether
   this computer plays the sound too. Once this computer's stream has failed, at open or since
-  (`failure` in `audio.go`), `hostAudio` is false, `gain` and `muted` say 100 and false, and
-  the `gain` op changes nothing (`web.go`, `webinput.go`).
+  (`failure` in `audio.go`), or the session's sound has stopped, `hostAudio` is false, `gain`
+  and `muted` say 100 and false, and the `gain` op changes nothing (`web.go`, `webinput.go`).
 - The session's sound stops when the audio demuxer ends for any reason but scterm's quit: the
   device turns the stream off (codec id 0), sends an audio config error (codec id 1) or a
   codec scterm cannot decode, or the stream ends or fails to decode while the picture goes on
   (`runAudio` in `stream.go`, which keeps why). From then on the `audio` field says off, the
   terminal's bottom line says `audio off` instead of the volume, and `--no-tui`'s statistics
-  line says `audio=off`.
+  line says `audio=off`. scterm then closes this computer's PulseAudio stream, so that no
+  silent stream stays in the desktop's mixer, and the follower ends with it (`playAudio` in
+  `app.go`). The terminal's Alt+M, Alt+- and Alt+= change nothing, and the first of them says
+  so (`input.go`). Every display says how the stream ended, the terminal in its bottom line
+  and the others on stderr. At scterm's quit, `--web` and `--window` say nothing; the terminal
+  and `--no-tui` leave out only the errors of a socket that went away (`isClosedConnErr` in
+  `util.go`), so a peer that closes mid-packet (`unexpected EOF`) is still said.
 
 ## The browser display
 
