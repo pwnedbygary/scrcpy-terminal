@@ -951,15 +951,17 @@ func TestDoctorChecksThePairings(t *testing.T) {
 			"              move <home>/identity.pem aside, then pair each device again (scterm pair makes a new identity)\n" +
 			"ok    peers   1 paired device: Pixel 8\n" +
 			"              scterm peers --check tests whether it is reachable\n", 0},
-		// A pairing whose identity does not parse is left out by scterm peers
-		// and --peer, so it is not counted, and says so.
+		// A pairing whose identity does not parse is left out by --peer and
+		// listed apart by scterm peers, so it is not counted, and says so:
+		// scterm forget --damaged forgets it, and the device can then pair
+		// again.
 		{"a pairing that does not parse", func(t *testing.T, home string) string {
 			pairedWith(t, home, "not-a-fingerprint", "Pixel 8")
 			return identity(t, home)
 		}, "ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n" +
 			"ok    peers   no paired devices\n" + pairTodo +
 			"warn  peers   1 pairing in <home>/peers.json has an identity that does not parse, so peer mode leaves it out: Pixel 8\n" +
-			"              pair that device again with scterm pair\n", 0},
+			"              forget it with scterm forget --damaged, then pair that device again with scterm pair\n", 0},
 		{"one of two pairings does not parse", func(t *testing.T, home string) string {
 			paired(t, home, "Tab S9")
 			pairedWith(t, home, fmt.Sprintf("%063x", 2), "Pixel 8")
@@ -968,7 +970,7 @@ func TestDoctorChecksThePairings(t *testing.T) {
 			"ok    peers   1 paired device: Tab S9\n" +
 			"              scterm peers --check tests whether it is reachable\n" +
 			"warn  peers   1 pairing in <home>/peers.json has an identity that does not parse, so peer mode leaves it out: Pixel 8\n" +
-			"              pair that device again with scterm pair\n", 1},
+			"              forget it with scterm forget --damaged, then pair that device again with scterm pair\n", 1},
 		{"two pairings do not parse", func(t *testing.T, home string) string {
 			pairedWith(t, home, "", "Pixel 8")
 			pairedWith(t, home, fmt.Sprintf("%064x", 3)+"0", "Tab S9")
@@ -976,7 +978,7 @@ func TestDoctorChecksThePairings(t *testing.T) {
 		}, "ok    peers   this computer is <fp> (identity in <home> (SCTERM_HOME))\n" +
 			"ok    peers   no paired devices\n" + pairTodo +
 			"warn  peers   2 pairings in <home>/peers.json have identities that do not parse, so peer mode leaves them out: Pixel 8, Tab S9\n" +
-			"              pair those devices again with scterm pair\n", 0},
+			"              forget them with scterm forget --damaged, then pair those devices again with scterm pair\n", 0},
 		{"damaged pairings", func(t *testing.T, home string) string {
 			os.WriteFile(filepath.Join(home, "peers.json"), []byte("[{"), 0o600)
 			return ""
@@ -1201,7 +1203,7 @@ func TestDoctorOnAPeerOnlyComputer(t *testing.T) {
 			identityOK + "ok    peers   no paired devices\n" +
 				"              scterm pair pairs with a device that runs the scterm app, to reach it without adb\n" +
 				"warn  peers   1 pairing in <home>/peers.json has an identity that does not parse, so peer mode leaves it out: Pixel 8\n" +
-				"              pair that device again with scterm pair\n", true},
+				"              forget it with scterm forget --damaged, then pair that device again with scterm pair\n", true},
 		{"an adb that lists no device, the identity damaged", adbScript(devicesHeader+"\n", nil), "", func(t *testing.T, home string) string {
 			pair(t, home, fmt.Sprintf("%064x", 1), "Pixel 8")
 			if err := os.WriteFile(filepath.Join(home, "identity.pem"), []byte("not a key"), 0o600); err != nil {

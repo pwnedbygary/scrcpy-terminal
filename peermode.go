@@ -10,10 +10,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -94,12 +96,21 @@ also connects to each one, authenticated, without starting a stream, and
 says whether it is ready.
 `,
 	"forget": `usage: scterm forget NAME
+       scterm forget --damaged
 
 Forgets a paired device. NAME is its whole name, in any case, or its
 identity; anything less is confirmed first, and refused when there is no
 terminal to ask on.
+
+With --damaged, scterm forgets the pairings whose identity does not parse
+(scterm peers lists them after the others), which no NAME selects: it shows
+them and asks first, and refuses when there is no terminal to ask on.
 `,
 }
+
+// damagedArg is what scterm forget takes instead of a name to forget the
+// pairings whose identity does not parse.
+const damagedArg = "--damaged"
 
 // usageErr is a command run the wrong way; it is reported through usageError,
 // as a bad flag is.
@@ -164,6 +175,48 @@ func deviceData(fp peer.Fingerprint, name string) string {
 	return fp.Short() + ", named " + quoteText(name, nameCells)
 }
 
+// identityCells is the most of an identity as stored that scterm shows, in
+// cells: all 64 hex digits of a whole one. addressCells is the most of a saved
+// address shown after a name of nameCells: what 80 columns leave on its line.
+const (
+	identityCells = 64
+	addressCells  = 29
+)
+
+// damagedPairings are the pairings in recs whose identity does not parse.
+// Matches leaves them out, so no name or identity selects them.
+func damagedPairings(recs []peer.Record) []peer.Record {
+	var damaged []peer.Record
+	for _, r := range recs {
+		if _, err := r.ID(); err != nil {
+			damaged = append(damaged, r)
+		}
+	}
+	return damaged
+}
+
+// damagedData shows pairings whose identity does not parse as data, two lines
+// each, which fit in 80 columns: the name and the saved address, then the
+// identity as stored, each in quotes, as quoteText shows it.
+func damagedData(recs []peer.Record) string {
+	var b strings.Builder
+	for _, r := range recs {
+		fmt.Fprintf(&b, "  named %s, at %s\n    identity %s\n", quoteText(r.Name, nameCells),
+			quoteText(net.JoinHostPort(r.Host, strconv.Itoa(r.Port)), addressCells), quoteText(r.Fingerprint, identityCells))
+	}
+	return b.String()
+}
+
+// damagedWords gives the words for n pairings whose identity does not parse:
+// what is wrong ("2 pairings' identities do not parse"), the pairings ("the 2
+// pairings"), and "it" or "them".
+func damagedWords(n int) (count, the, them string) {
+	if n == 1 {
+		return "1 pairing's identity does not parse", "the pairing", "it"
+	}
+	return fmt.Sprintf("%d pairings' identities do not parse", n), fmt.Sprintf("the %d pairings", n), "them"
+}
+
 // pasteArg is how a command printed for the user to paste (scterm --peer ARG,
 // scterm forget ARG) names the pairing with identity fp: by its name, in
 // single quotes, when that is plain and finds this pairing and no other; else
@@ -211,12 +264,13 @@ const shellChars = "\\`;&|<>()$*?[]{}~#!^%="
 // of it shows as what it is and is none of shellChars; it has no space at
 // either end (a query loses them) nor two together; no "scterm" in any case,
 // not even in what a paste of it can come to (pastedAs), as words such as
-// scterm forget Pixel copied from it would run as they read; and it is not a
-// word that asks a command for its help.
+// scterm forget Pixel copied from it would run as they read; and scterm forget
+// takes it as a name: it is not a word that asks a command for its help, and
+// no paste of it can come to --damaged.
 func plainName(name string) bool {
 	return name != "" && utf8.ValidString(name) && textCells(name)+3*strings.Count(name, "'") <= nameCells &&
 		strings.TrimSpace(name) == name && !strings.Contains(name, "  ") &&
-		!strings.Contains(strings.ToLower(pastedAs(name)), "scterm") && !isHelpArg(name) &&
+		!strings.Contains(strings.ToLower(pastedAs(name)), "scterm") && !isHelpArg(name) && pastedAs(name) != damagedArg &&
 		!strings.ContainsFunc(name, func(r rune) bool { return !shownAsIs(r) || strings.ContainsRune(shellChars, r) })
 }
 
@@ -261,6 +315,9 @@ func forgetCommand(args []string) error {
 	if query == "" {
 		return usageErr("usage: scterm forget NAME (scterm peers lists the names)")
 	}
+	if query == damagedArg {
+		return forgetDamaged()
+	}
 	_, store, err := openPeerClient()
 	if err != nil {
 		return err
@@ -301,6 +358,48 @@ func forgetCommand(args []string) error {
 		fmt.Print(device)
 	}
 	fmt.Printf("Forgot %s. Its own list still names this computer until it is removed there.\n", fp.Short())
+	return nil
+}
+
+// forgetDamaged removes the pairings whose identity does not parse, once they
+// are shown, as data, and the user agrees; with no terminal to ask on, it
+// refuses. Each goes by its identity as stored, which Remove matches exactly,
+// so no pairing whose identity parses can go with them.
+func forgetDamaged() error {
+	home, err := peerHome()
+	if err != nil {
+		return err
+	}
+	store := peer.OpenStore(home)
+	recs, err := store.All()
+	if err != nil {
+		return err
+	}
+	damaged := damagedPairings(recs)
+	if len(damaged) == 0 {
+		fmt.Println("No pairing has an identity that does not parse: there is nothing to forget.")
+		return nil
+	}
+	count, the, them := damagedWords(len(damaged))
+	shown := count + ":\n" + damagedData(damaged)
+	if !interactive() {
+		fmt.Print(shown)
+		return fmt.Errorf("%s: forget %s from a terminal, where scterm asks first", count, them)
+	}
+	answer, err := ask(shown + "Forget " + the + "? [y/N] ")
+	if err != nil {
+		return err
+	}
+	if a := strings.ToLower(answer); a != "y" && a != "yes" {
+		fmt.Printf("Kept %s.\n", the)
+		return nil
+	}
+	for _, rec := range damaged {
+		if _, err := store.Remove(rec.Fingerprint); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("Forgot %s. A device keeps this computer in its own list until it is removed there.\n", the)
 	return nil
 }
 

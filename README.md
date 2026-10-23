@@ -411,6 +411,11 @@ or names them as the command after pairing does when there is no terminal to ask
   there is no terminal to ask on, it is refused, with the command that forgets the device,
   written as after pairing (or, when scterm cannot give one, a note to forget it from a
   terminal). The device keeps this computer in its own list until you remove it there.
+  `scterm forget --damaged` forgets the pairings whose identity does not parse (in a
+  `peers.json` that was damaged or edited by hand), which no name selects; `scterm peers` lists
+  them after the other devices, and `scterm doctor` warns about them. It shows the name, the
+  saved address and the identity of each, as data, and asks once; without a terminal, it is
+  refused.
 
 This computer's identity and the paired devices are in `~/.config/scterm` (see
 [Files](#files)).

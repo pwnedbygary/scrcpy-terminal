@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ type peerProbe func(context.Context, string, int, peer.Fingerprint) (*peer.Messa
 type peerDiscovery func(context.Context, time.Duration) ([]peer.NearbyDevice, error)
 
 // Plain listing is offline; opt-in checks use bounded pinned probes and stable output ordering.
+// The pairings whose identity does not parse are not checked: they are listed
+// after the others, as data, with the command that forgets them.
 func printPeers(ctx context.Context, out io.Writer, client *peer.Client, store *peer.Store, recs []peer.Record, check bool, discover peerDiscovery, probe peerProbe) error {
 	recs = append([]peer.Record(nil), recs...)
 	fmt.Fprintf(out, "This computer: %s\n", client.Identity.Fingerprint.Short())
@@ -27,6 +30,8 @@ func printPeers(ctx context.Context, out io.Writer, client *peer.Client, store *
 		fmt.Fprintln(out, `No paired devices. On the device choose "Invite a device…", then run scterm pair on the same network, or type its invitation: scterm pair "HOST:PORT CODE"`)
 		return nil
 	}
+	damaged := damagedPairings(recs)
+	recs = slices.DeleteFunc(recs, func(r peer.Record) bool { _, err := r.ID(); return err != nil })
 	labels := make([]string, len(recs))
 	if check {
 		candidates, _ := discover(ctx, time.Second) // saved addresses remain usable when multicast fails
@@ -40,11 +45,7 @@ func printPeers(ctx context.Context, out io.Writer, client *peer.Client, store *
 				defer wg.Done()
 				for i := range work {
 					rec := recs[i]
-					fp, err := rec.ID()
-					if err != nil {
-						labels[i] = "Invalid paired identity"
-						continue
-					}
+					fp, _ := rec.ID() // the pairings whose identity does not parse are set apart above
 					deadline, cancel := context.WithTimeout(ctx, 5*time.Second)
 					addresses := make([]peer.NearbyDevice, 0, 3)
 					for _, candidate := range candidates {
@@ -65,7 +66,7 @@ func printPeers(ctx context.Context, out io.Writer, client *peer.Client, store *
 					var result *peer.Message
 					var accepted peer.NearbyDevice
 					var pinFailure error
-					err = fmt.Errorf("no serving address")
+					err := fmt.Errorf("no serving address")
 					for index, address := range addresses {
 						attempt := deadline
 						endAttempt := func() {}
@@ -130,15 +131,16 @@ func printPeers(ctx context.Context, out io.Writer, client *peer.Client, store *
 		}
 	}
 	for i, rec := range recs {
-		fp, err := rec.ID()
-		if err != nil {
-			continue
-		}
+		fp, _ := rec.ID()
 		fmt.Fprintf(out, "  %-24s %s  %-21s may %s", cleanPeerText(rec.Name), fp.Short(), net.JoinHostPort(rec.Host, strconv.Itoa(rec.Port)), describeGrants(rec.Grants))
 		if check {
 			fmt.Fprintf(out, " · %s", labels[i])
 		}
 		fmt.Fprintln(out)
+	}
+	if len(damaged) > 0 {
+		count, _, them := damagedWords(len(damaged))
+		fmt.Fprintf(out, "%s (scterm forget --damaged forgets %s):\n%s", count, them, damagedData(damaged))
 	}
 	return nil
 }

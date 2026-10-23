@@ -7,6 +7,94 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-23: QoL overhaul, part 52: forgetting a damaged pairing)
+
+- `scterm forget --damaged` forgets the pairings whose identity in
+  peers.json does not parse (issue #9), which no name or identity selects.
+  It lists each as data on two lines, each within 80 columns: `named
+  "NAME", at "HOST:PORT"`, then `identity "TEXT"` (quoteText, cut at 32,
+  29 and 64 cells). In a terminal it asks once, on stderr, [y/N]; without
+  one it lists them and refuses (exit 1); with none it says so (exit 0).
+- `scterm peers` lists them after the devices: `N pairings' identities do
+  not parse (scterm forget --damaged forgets them):`, then the data lines.
+  --check never probes them; its label, set and never shown, is gone.
+- doctor advises `forget it with scterm forget --damaged, then pair that
+  device again`. forget -h gains the usage line; README's forget bullet.
+- Decisions: each listed pairing goes by Store.Remove of its stored text,
+  which only an unparseable record can have, so none whose identity
+  parses is selected, even if the file changes before the answer (the
+  store has no lock across processes, as before); two stored alike both
+  go. The word is the whole query, exactly `--damaged`; plainName refuses
+  that name, and any name a paste can turn into it (part 51's pastedAs),
+  so such a device is given by identity; before this part,
+  `scterm forget --damaged` forgot one at once. It opens the store only,
+  so it makes no identity.pem. peer/store.go and scterm -h are unchanged.
+- Tests: new damaged_test.go, 9 tests: yes, no, no answer; no terminal;
+  none; namesakes both ways; hostile name, address and identity; peers
+  and --check; --damaged as a name, also with a variation selector after
+  it; forget -h; identity.pem damaged. 4 doctor expectations.
+- Verification (builder, on part 51's first round, sbx, go1.27.1): gofmt,
+  vet, build, diff --check, mdcheck clean; ./... 733 pass, 4 skip, 0 fail
+  (top-level 534, 3, 0; before this part 725, 4, 0 and 526, 3, 0). The
+  10 new or changed tests x20: 200/200, -race x5: 50/50; 61 related
+  tests -race x3: 183/183; root package shuffled (seed
+  1792739445959291128): 698, 2, 0. On the code before this part all 10
+  fail. Mutants: 30 of 30 killed. The binary in the sandbox, with a pty
+  from script(1): list, refusal, n, y, none.
+- Left alone: doctor's detail names stay cleaned, not quoted; peers -h,
+  the README's peers bullet and Commands table; --peer with only damaged
+  pairings says none matches; device lines' raw address (part 51); --check
+  and --peer look for a moved device by the identity as stored, so one a
+  hand edit stored in another form is not found at a new address.
+- Not run by the builder: a person at a real terminal; adb, phone, peer
+  target, Android app; CI.
+- Intake: taken in on part 51's first round (/tmp/opencode/review-51, on
+  20dad0f), the builder's six files as built. Reviewed on
+  /tmp/opencode/review-52.
+- Review round 1 (NEEDS CHANGES): the code was right on every input the
+  reviewer tried; the tests had gaps. MEDIUM-1: every valid identity in
+  them was canonical, so mutants that remove pairings stored in upper
+  case, as colon pairs or with spaces around (all parse) passed the root
+  package. LOW-1: nothing held that --damaged works with identity.pem
+  damaged. NIT-1: the entry said more than the store gives across
+  processes.
+- Round 2 (damaged_test.go only; production code unchanged):
+  TestForgetDamagedAsksFirst and TestPeersListDamagedPairings add valid
+  pairings stored in upper case, as colon pairs and with spaces around,
+  and a damaged one in upper case with spaces: --damaged lists and
+  forgets the damaged alone, says how many, and peers.json keeps the
+  three; scterm peers lists them as devices, --check probes them. New
+  TestForgetDamagedWithADamagedIdentity: with identity.pem `not a key`,
+  the pairing is listed and forgotten, identity.pem left byte for byte.
+  NIT-1 reworded above.
+- Verification, round 2 (builder, base be8ab8b, part 51's first round):
+  gofmt, vet, build, diff --check clean; ./... 734 pass, 4 skip, 0 fail
+  (top-level 535, 3, 0), the same under -race, no race. The part's 11
+  tests x20: 220/220, -race x5: 55/55, -cpu=1 x20: 220/220. On the code
+  before this part all 11 fail. Mutants: the builder's 30 and the
+  review's R01-R05, R07, R10, R11, R14 are killed; R15 (the word read
+  before trimming, judged benign) survives. With round 1's tests,
+  R01-R05 each pass the whole root package.
+- Intake, round 2: on part 51's second round (/tmp/opencode/review-51b,
+  on fc7d19e, the tip once parts 61 and 53 had landed), moved there by
+  the builder: README.md, doctor.go and doctor_test.go merged three ways
+  (each merge adds exactly this part's lines). peermode.go conflicted in
+  plainName, where part 51 now looks for scterm in what a paste of the
+  name can come to (pastedAs). Both checks stay, and --damaged is matched
+  against that pasted form too: otherwise a device named --damaged plus a
+  variation selector would be named in the commands scterm prints, and a
+  terminal that drops the mark would paste scterm forget --damaged.
+  TestDamagedIsNoName gains that case.
+- Verification of the move (builder, base fa9d79e, part 51's second
+  round): gofmt, vet, build, diff --check clean; ./... top-level 545
+  pass, 3 skip, 0 fail (before this part 536, 3, 0); the 65 related tests
+  -race x3: 195/195; the 11 tests x20: 220/220, -race x5: 55/55; on the
+  code before this part all 11 fail. Mutants: 40 of 41 killed, round 2's
+  39 (M16 and R11 re-made on the new line) and M31, the conflict resolved
+  with the name as written; R15 survives as before. Reviewed on
+  /tmp/opencode/review-52b; that tree's checks are in this part's commit
+  message.
+
 ## Update (2026-10-22: QoL overhaul, part 51: device names shown as data)
 
 - After scterm pair the command comes first: `Paired. Connect with:

@@ -610,8 +610,8 @@ func unreadableTodo(path string, err error, aside string) string {
 // doctorPeers checks peer mode's identity and pairings where scterm keeps them,
 // without creating either or connecting to any device, and returns how many
 // paired devices peer mode can reach: none without an identity it can load,
-// and none whose identity in peers.json does not parse, which --peer and
-// scterm peers leave out.
+// and none whose identity in peers.json does not parse, which --peer leaves
+// out and scterm peers lists apart.
 func doctorPeers() ([]doctorLine, int) {
 	home, err := peerHome()
 	if err != nil {
@@ -670,10 +670,10 @@ func doctorPeers() ([]doctorLine, int) {
 	switch n := len(unparsed); {
 	case n == 1:
 		lines = append(lines, doctorLine{doctorWarn, "peers", fmt.Sprintf("1 pairing in %s has an identity that does not parse, so peer mode leaves it out: %s", pj, peer.Names(unparsed)),
-			"pair that device again with scterm pair"})
+			"forget it with scterm forget --damaged, then pair that device again with scterm pair"})
 	case n > 1:
 		lines = append(lines, doctorLine{doctorWarn, "peers", fmt.Sprintf("%d pairings in %s have identities that do not parse, so peer mode leaves them out: %s", n, pj, peer.Names(unparsed)),
-			"pair those devices again with scterm pair"})
+			"forget them with scterm forget --damaged, then pair those devices again with scterm pair"})
 	}
 	if idErr != nil {
 		return lines, 0
