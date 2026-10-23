@@ -8,9 +8,9 @@ CI builds and tests every change, and publishes a release for each version tag. 
 The workflow runs on every push to `main`, on every pull request to `main`, on every `v*` tag,
 and when you start it by hand. It has three jobs:
 
-- **build**: installs `pkg-config` and the FFmpeg and PulseAudio development packages, runs
-  `go vet ./...` and `go test ./...`, and builds a stripped binary, uploaded as the artifact
-  `scterm-linux-x86_64`.
+- **build**: installs `pkg-config`, the FFmpeg and PulseAudio development packages, and zsh and
+  fish for the paste tests; runs `go vet ./...` and `go test -race ./...`, and builds a stripped
+  binary, uploaded as the artifact `scterm-linux-x86_64`.
 - **android**: runs the Android unit tests and lint, builds the debug APK and `peerctl`, and
   uploads the debug APK as `scterm-android-debug`. It rebuilds the scrcpy server that the binary
   embeds, and fails unless the result is the embedded jar (see

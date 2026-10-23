@@ -159,10 +159,14 @@ var pasteShells = []pasteShell{
 // with no terminal and only PATH and HOME set, HOME being a fresh directory
 // that is also the working directory. It returns the arguments scterm got
 // from each command, and fails the test when a command made a file there
-// whose name starts with MARKER.
+// whose name starts with MARKER. When sh is not installed it skips the test,
+// or fails it if SCTERM_TEST_REQUIRE_SHELLS is set, as CI sets it.
 func pasteInto(t *testing.T, sh pasteShell, commands []string) [][]string {
 	t.Helper()
 	if _, err := os.Stat(sh.path); err != nil {
+		if os.Getenv("SCTERM_TEST_REQUIRE_SHELLS") != "" {
+			t.Fatalf("%s is not installed, and SCTERM_TEST_REQUIRE_SHELLS is set", sh.path)
+		}
 		t.Skipf("%s is not installed", sh.path)
 	}
 	const end = "-- end of command --"
@@ -337,6 +341,44 @@ func TestForgetRefusalPastesAsPrinted(t *testing.T) {
 		stdout := captureStdout(t, func() { handled = runPeerCommand(args) })
 		if recs, err := store.All(); !handled || err != nil || len(recs) != 0 || !strings.HasPrefix(stdout, "Forgot ") {
 			t.Errorf("%q: scterm %q printed %q and left %d pairings, %v; want the pairing forgotten", c.name, args, stdout, len(recs), err)
+		}
+	}
+}
+
+// TestMissingShellSkipsUnlessRequired: a shell that is not installed skips the
+// test that pastes into it, unless SCTERM_TEST_REQUIRE_SHELLS is set, as CI
+// sets it: then it fails the test, where a skip would go unnoticed. A shell
+// that is installed runs, with the variable set or not. Runs pasteInto in a
+// child process, on the shell that SCTERM_TEST_PASTE_SHELL names.
+func TestMissingShellSkipsUnlessRequired(t *testing.T) {
+	if path := os.Getenv("SCTERM_TEST_PASTE_SHELL"); path != "" {
+		got := pasteInto(t, pasteShell{"sh", path, []string{"-c"}, posixScterm}, []string{"scterm x"})
+		if !slices.Equal(got[0], []string{"x"}) {
+			t.Fatalf("pasted into %s, scterm got %q; want x", path, got[0])
+		}
+		return
+	}
+	missing := filepath.Join(t.TempDir(), "sh")
+	for _, tc := range []struct {
+		shell, require string // require is SCTERM_TEST_REQUIRE_SHELLS
+		status         int
+		want           []string // in the child's output
+	}{
+		{missing, "", 0, []string{"--- SKIP: TestMissingShellSkipsUnlessRequired", missing + " is not installed\n"}},
+		{missing, "1", 1, []string{"--- FAIL: TestMissingShellSkipsUnlessRequired", missing + " is not installed, and SCTERM_TEST_REQUIRE_SHELLS is set\n"}},
+		{"/bin/sh", "", 0, []string{"--- PASS: TestMissingShellSkipsUnlessRequired"}},
+		{"/bin/sh", "1", 0, []string{"--- PASS: TestMissingShellSkipsUnlessRequired"}},
+	} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestMissingShellSkipsUnlessRequired$", "-test.v")
+		cmd.Env = append(os.Environ(), "SCTERM_TEST_PASTE_SHELL="+tc.shell, "SCTERM_TEST_REQUIRE_SHELLS="+tc.require)
+		out, err := cmd.CombinedOutput()
+		if status := cmd.ProcessState.ExitCode(); status != tc.status {
+			t.Errorf("SCTERM_TEST_REQUIRE_SHELLS=%q, pasting into %s: exit status %d (%v), want %d; output %q", tc.require, tc.shell, status, err, tc.status, out)
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(string(out), w) {
+				t.Errorf("SCTERM_TEST_REQUIRE_SHELLS=%q, pasting into %s: output %q, want %q in it", tc.require, tc.shell, out, w)
+			}
 		}
 	}
 }

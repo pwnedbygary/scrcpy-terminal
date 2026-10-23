@@ -7,6 +7,50 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-22: QoL overhaul, part 57: CI runs -race and the shell tests)
+
+- CI's Go job installs zsh and fish and runs `go test -race ./...` (no plain
+  run besides), so the paste tests run all 7 shell modes there; zsh's and
+  fish's used to skip (issue #12). The Test step sets
+  `SCTERM_TEST_REQUIRE_SHELLS=1`: with it set (any non-empty value, as
+  `SCTERM_NEARBY_LIVE` is read), a shell that `pasteInto` does not find fails
+  the test instead of skipping it, sh and bash included. Locally it skips.
+- New `TestMissingShellSkipsUnlessRequired` runs `pasteInto` in a child
+  (`SCTERM_TEST_PASTE_SHELL`): a missing shell skips without the variable and
+  fails with it; /bin/sh passes either way. docs/DEVELOPMENT.md: CI runs
+  `-race`; a paragraph on the shells and the variable; the child variable.
+- Decisions: race only, as every test runs under it (no race build tags, no
+  `testing.Short`); on 4 CPUs the race suite took 77.5 s, plain 34.7 s, a
+  cold race build 14.3 s. The shells install in a step of their own
+  (`--no-install-recommends`, then /usr/bin/zsh's and fish's versions).
+- Node: the job installs none; GitHub's 22.04 and 24.04 images ship it (from
+  memory); ubuntu-26.04's list was not checked (offline), and `go test`
+  without -v does not show whether `TestWebClientSuites` skipped. Nothing
+  about node was added to the YAML.
+- Verification (dev-57, base bee1feb, go1.27.1, sandbox): gofmt, vet, build,
+  `git diff --check` clean; `go test -count=1 ./...` 515 pass, 3 skip, 0
+  fail (base 514/3/0); `SCTERM_TEST_REQUIRE_SHELLS=1 go test -race ./...`
+  the same, no race. New test x20 20/20 (unset and set), -race x5 5/5.
+- With zsh and fish overlaid to /nonexistent: variable set, their 8 subtests
+  fail ("is not installed, and SCTERM_TEST_REQUIRE_SHELLS is set"); unset,
+  they skip; on base, set, they skip. Base's check fails the new test;
+  base's doc fails `TestDevelopmentNamesTheTestVariables`. Mutants: 10 of 12
+  killed; `== "1"` survives by choice, Errorf (then Skipf: still FAIL) is
+  equivalent.
+- YAML: PyYAML parses it; actionlint 1.7.12 gives base's 4 findings
+  (ubuntu-26.04 unknown x3, one SC2012 info), none new; only the build job
+  changed.
+- Left alone: the release job; node in CI; CI's test cache.
+- Not run by the builder: CI; apt-get on ubuntu-26.04 and its zsh and fish
+  (tests made on zsh 5.9.2, fish 4.9.3); a machine really missing a shell
+  (overlays instead); node on the runner.
+- Intake: taken in on bee1feb, the branch tip: the builder's 3 files as
+  built, plus docs/RELEASING.md's account of the build job, outside the
+  files it was given, which still said CI runs `go test ./...`: it now says
+  the job installs zsh and fish for the paste tests and runs
+  `go test -race ./...`. Reviewed on its own snapshot,
+  /tmp/opencode/review-57.
+
 ## Update (2026-10-22: QoL overhaul, part 50: suggested commands are safe to paste)
 
 - "Connect with: scterm --peer %q" (after `scterm pair`, typed or nearby)

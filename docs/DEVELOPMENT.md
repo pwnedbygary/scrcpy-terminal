@@ -43,8 +43,8 @@ and the one scterm passes the server.
 
 ## Checks
 
-CI runs `go vet ./...` and `go test ./...` on every push to `main` and every pull request
-(see [RELEASING.md](RELEASING.md)). Run them, and `gofmt`, before you send a change:
+CI runs `go vet ./...` and `go test -race ./...` on every push to `main` and every pull request
+(see [RELEASING.md](RELEASING.md)). Run `gofmt`, vet and the tests before you send a change:
 
 ```sh
 gofmt -l .
@@ -52,7 +52,7 @@ go vet ./...
 go test ./...
 ```
 
-Some tests catch a data race only under Go's race detector, which CI does not use. Among them
+Some tests catch a data race only under Go's race detector, which is why CI uses it. Among them
 are the browser display's tests of a stop that comes while the server starts (the order under
 `srvMu`), of the frame buffers that its viewers share, and of its list of viewers. When you
 change the browser display, run its tests under the detector too, or the whole module with
@@ -77,6 +77,11 @@ also runs on its own:
 | `node web/page_test.mjs` | The whole page: connection wiring, action bar, Controls sheet |
 | `node web/audio_test.mjs` | Starting the sound, the compatibility path, the sound chip |
 
+The tests of the commands that scterm prints for you to paste (`pastecmd_test.go`) run them in
+`sh`, `bash`, `zsh` and `fish`, in `/usr/bin`, and skip each shell that is not installed. CI
+installs zsh and fish and sets `SCTERM_TEST_REQUIRE_SHELLS` to 1: with that variable set, a
+shell that is not installed fails the tests instead of skipping them.
+
 ### Tests that need a device or a target
 
 These tests in `./peer` are skipped unless you set their environment variable:
@@ -99,10 +104,10 @@ SCTERM_PEER_INVITATION="127.0.0.1:27411 XXXX-XXXX-XXXX-XXXX" go test ./peer -run
 
 `SCTERM_TEST_MAIN_ARGS`, `SCTERM_TEST_NO_PRESENCE`, `SCTERM_TEST_CLEANUP_LOG`,
 `SCTERM_TEST_LOST_DEVICE`, `SCTERM_TEST_SESSION_END`, `SCTERM_TEST_INPUT_LOOP`,
-`SCTERM_TEST_DOCTOR` and `SCTERM_TEST_UPDATE` are set by tests for the child processes they
-start. Do not set them yourself. With `SCTERM_TEST_NO_PRESENCE`, main in a child process that
-cannot reach its paired device does not search the network for it (multicast DNS), and notes
-each search in the file that the variable names.
+`SCTERM_TEST_DOCTOR`, `SCTERM_TEST_UPDATE` and `SCTERM_TEST_PASTE_SHELL` are set by tests for
+the child processes they start. Do not set them yourself. With `SCTERM_TEST_NO_PRESENCE`, main
+in a child process that cannot reach its paired device does not search the network for it
+(multicast DNS), and notes each search in the file that the variable names.
 
 ## Debug logging
 
