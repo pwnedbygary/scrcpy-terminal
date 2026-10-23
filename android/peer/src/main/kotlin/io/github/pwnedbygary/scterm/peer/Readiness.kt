@@ -14,8 +14,26 @@ data class Readiness(
     val address: TargetAddress? = null,
     val detail: String = "",
     val lastContactMs: Long? = null,
+    /** What a probe found; logic tests this, never [label]'s wording. Null for statuses set without one. */
+    val state: State? = null,
 ) {
     enum class Tone { GREEN, YELLOW, RED }
+
+    /** A probe's outcome and its badge. */
+    enum class State(val tone: Tone, val label: String) {
+        READY(Tone.GREEN, "Ready"),
+        CONTROL_TAKEN(Tone.GREEN, "Ready—another device has control"),
+        VIEW_NOT_GRANTED(Tone.YELLOW, "Viewing permission missing"),
+        HELPER_NOT_RUNNING(Tone.YELLOW, "Helper not running"),
+        TOO_MANY_SESSIONS(Tone.YELLOW, "Too many viewers"),
+        NOT_READY(Tone.YELLOW, "Serving not ready"),
+        NO_VIDEO(Tone.YELLOW, "Video unavailable"),
+        OLDER_PEER(Tone.YELLOW, "Status unavailable—update the peer"),
+        IDENTITY_MISMATCH(Tone.RED, "Identity mismatch"),
+        NOT_PAIRED(Tone.RED, "Pairing no longer accepted"),
+        REFUSED(Tone.RED, "Peer refused the check"),
+        UNREACHABLE(Tone.RED, "Not reachable"),
+    }
 
     fun fresh(nowElapsedMs: Long, intervalMs: Long): Readiness =
         if (elapsedAtMs != null && nowElapsedMs - elapsedAtMs >= 2 * intervalMs) {
@@ -23,43 +41,65 @@ data class Readiness(
         } else this
 
     companion object {
-        fun checking(previous: Readiness? = null) = Readiness(
-            Tone.YELLOW, "Checking…", previous?.checkedAtMs, previous?.elapsedAtMs,
-            previous?.result, previous?.address, lastContactMs = previous?.lastContactMs,
-        )
+        /**
+         * Not-ready reasons this app's targets send. The Go client and older
+         * apps show a reason as it is, so these stay whole sentences on the
+         * wire; [classify] gives them short labels.
+         */
+        const val HELPER_NOT_RUNNING_REASON =
+            "its full-control helper is not running. Start it on that device (Start with Shizuku) or from a computer with adb"
+        const val TOO_MANY_SESSIONS_REASON = "too many sessions"
+
+        fun checking() = Readiness(Tone.YELLOW, "Checking…")
 
         fun classify(result: PeerMessage.ProbeResult): Readiness {
-            val label = when {
-                Grant.VIEW !in Grant.parse(result.grants) -> "Viewing permission missing"
-                !result.ready -> result.reason.ifBlank { "Serving not ready" }
-                result.caps?.video != true -> "Video unavailable"
-                result.controlOccupied -> "Ready—another device has control"
-                else -> "Ready"
+            val state = when {
+                Grant.VIEW !in Grant.parse(result.grants) -> State.VIEW_NOT_GRANTED
+                !result.ready -> when (result.reason) {
+                    HELPER_NOT_RUNNING_REASON -> State.HELPER_NOT_RUNNING
+                    TOO_MANY_SESSIONS_REASON -> State.TOO_MANY_SESSIONS
+                    else -> State.NOT_READY
+                }
+                result.caps?.video != true -> State.NO_VIDEO
+                result.controlOccupied -> State.CONTROL_TAKEN
+                else -> State.READY
             }
-            val ready = result.ready && Grant.VIEW in Grant.parse(result.grants) && result.caps?.video == true
-            return Readiness(if (ready) Tone.GREEN else Tone.YELLOW, label, result = result)
+            val detail = when (state) {
+                State.HELPER_NOT_RUNNING, State.TOO_MANY_SESSIONS, State.NOT_READY -> sentence(result.reason)
+                else -> ""
+            }
+            return Readiness(state.tone, state.label, result = result, detail = detail, state = state)
         }
 
         /** A pinned peer's rejection is more authoritative than a failed discovery hint. */
         fun preferFailure(previous: Readiness?, error: Exception): Readiness {
             val current = failure(error)
-            return if (error is PeerException || previous?.label != "Identity mismatch") current else previous
+            return if (error is PeerException || previous?.state != State.IDENTITY_MISMATCH) current else previous
         }
 
         fun failure(error: Exception): Readiness {
-            val label = when {
-                generateSequence<Throwable>(error) { it.cause }.any { it is CertificateException } -> "Identity mismatch"
+            val state = when {
+                generateSequence<Throwable>(error) { it.cause }.any { it is CertificateException } -> State.IDENTITY_MISMATCH
                 error is PeerException -> when (error.code) {
-                    "bad_request", "unsupported", "version" -> "Status unavailable—update the peer"
-                    "not_paired" -> "Pairing no longer accepted"
-                    "forbidden" -> "Viewing permission missing"
-                    else -> error.message ?: "Peer refused the check"
+                    "bad_request", "unsupported", "version" -> State.OLDER_PEER
+                    "not_paired" -> State.NOT_PAIRED
+                    "forbidden" -> State.VIEW_NOT_GRANTED
+                    else -> State.REFUSED
                 }
-                else -> "Not reachable"
+                else -> State.UNREACHABLE
             }
-            val limited = label.startsWith("Status unavailable") || label == "Viewing permission missing"
-            return Readiness(if (limited) Tone.YELLOW else Tone.RED, label,
-                detail = if (label == "Not reachable") "The app may be closed, serving stopped, or the network unavailable. Check the other device and refresh." else label)
+            val detail = when (state) {
+                State.UNREACHABLE -> "The app may be closed, serving stopped, or the network unavailable. Check the other device and refresh."
+                State.REFUSED -> sentence(error.message.orEmpty()).ifEmpty { state.label }
+                else -> state.label
+            }
+            return Readiness(state.tone, state.label, detail = detail, state = state)
+        }
+
+        /** A peer's reason, worded to follow "<device> isn't ready: ", as a sentence of its own. */
+        private fun sentence(reason: String): String {
+            val text = reason.trim().replaceFirstChar(Char::uppercaseChar)
+            return if (text.isEmpty() || text.endsWith('.')) text else "$text."
         }
     }
 }
@@ -75,7 +115,8 @@ class ReadinessLedger {
         val ticket = ++generation
         tickets[id] = ticket
         pending += id
-        values[id] = Readiness.checking(values[id])
+        // A re-check keeps showing the last result until the new one arrives.
+        if (id !in values) values[id] = Readiness.checking()
         return ticket
     }
     fun complete(id: String, ticket: Long, value: Readiness): Boolean {

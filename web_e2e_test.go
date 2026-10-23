@@ -10,6 +10,8 @@ import (
 	"image/jpeg"
 	"net"
 	"net/http"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -593,10 +595,11 @@ func TestWebAssetsAreServed(t *testing.T) {
 		{"/player.css", "text/css", "#ime {"},
 		// The controls overhaul: pointer indication, action bar and sheet are
 		// each served and wired, so a missing chunk fails here, not in a
-		// user's browser.
+		// user's browser. The page carries the action catalog the player
+		// builds the bar and the sheet from (TestServedPageCarriesTheActionCatalog).
 		{"/pointer.js", "text/javascript", "cursor-ghost"},
-		{"/player.js", "text/javascript", "MNEMONIC_ACTIONS"},
-		{"/", "text/html", "data-act=\"home\""},
+		{"/player.js", "text/javascript", "getElementById(\"actions\")"},
+		{"/", "text/html", "<script type=\"application/json\" id=\"actions\">"},
 		{"/", "text/html", "id=\"sheet\""},
 		{"/player.css", "text/css", "#cursor-ghost"},
 	}
@@ -617,5 +620,105 @@ func TestWebAssetsAreServed(t *testing.T) {
 		if !strings.Contains(body.String(), c.needle) {
 			t.Errorf("GET %s: body does not contain %q", c.path, c.needle)
 		}
+	}
+}
+
+// catalogBlock returns what is inside the page's one action catalog block,
+// failing unless there is exactly one.
+func catalogBlock(t *testing.T, page string) string {
+	t.Helper()
+	const open = `<script type="application/json" id="actions">`
+	if n := strings.Count(page, open); n != 1 {
+		t.Fatalf("the page has %d action catalog blocks, want 1", n)
+	}
+	inner := page[strings.Index(page, open)+len(open):]
+	end := strings.Index(inner, "</script>")
+	if end < 0 {
+		t.Fatal("the action catalog block is never closed")
+	}
+	return inner[:end]
+}
+
+// TestServedPageCarriesTheActionCatalog: the page is served with the action
+// catalog in it, as one JSON block ahead of the player script that reads it as
+// it loads, equal to the fixture on disk, and with no placeholder left.
+func TestServedPageCarriesTheActionCatalog(t *testing.T) {
+	const placeholder = "<!--scterm:actions-->"
+	tmpl, err := os.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tmpl), placeholder) {
+		t.Fatalf("web/index.html has no %s for the server to replace", placeholder)
+	}
+
+	h := newWebTestHarness(t, config{web: true}, false)
+	resp, err := http.Get("http://" + h.url() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := new(bytes.Buffer)
+	_, _ = body.ReadFrom(resp.Body)
+	resp.Body.Close()
+	page := body.String()
+
+	if strings.Contains(page, placeholder) {
+		t.Errorf("the served page still has the placeholder %s", placeholder)
+	}
+	block := catalogBlock(t, page)
+	if strings.Index(page, block) > strings.Index(page, `<script src="/player.js">`) {
+		t.Error("the catalog block comes after player.js, which reads it as it loads")
+	}
+	if strings.ContainsAny(block, "<>&") {
+		t.Errorf("the catalog block holds raw markup characters: %.200q", block)
+	}
+	raw, err := os.ReadFile("protocol/fixtures/actions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var served, fixture any
+	if err := json.Unmarshal([]byte(block), &served); err != nil {
+		t.Fatalf("the served catalog is not JSON: %v", err)
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(served, fixture) {
+		t.Errorf("the served catalog differs from protocol/fixtures/actions.json:\nserved:  %.300s\nfixture: %.300s", block, raw)
+	}
+}
+
+// TestActionCatalogCannotBreakOutOfThePage: a catalog string that holds markup
+// stays inside the JSON block and still decodes to what it was, and a page
+// without exactly one placeholder is refused.
+func TestActionCatalogCannotBreakOutOfThePage(t *testing.T) {
+	hostile := "{\"label\": \"</script><script>alert(1)</script><!-- a & b \u2028\"}"
+	page := withActionCatalog("<p><!--scterm:actions--></p>", []byte(hostile))
+	block := catalogBlock(t, page)
+	if want := `<p><script type="application/json" id="actions">` + block + `</script></p>`; page != want {
+		t.Fatalf("the page around the block changed: %q", page)
+	}
+	if strings.ContainsAny(block, "<>&\u2028") {
+		t.Errorf("the block is not escaped: %q", block)
+	}
+	var got, want any
+	if err := json.Unmarshal([]byte(block), &got); err != nil {
+		t.Fatalf("the escaped block is not JSON: %v", err)
+	}
+	if err := json.Unmarshal([]byte(hostile), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the escaped catalog decodes to %v, want %v", got, want)
+	}
+	for _, bad := range []string{"<p></p>", "<!--scterm:actions--><!--scterm:actions-->"} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("a page %q was accepted", bad)
+				}
+			}()
+			withActionCatalog(bad, actionsCatalogJSON)
+		}()
 	}
 }

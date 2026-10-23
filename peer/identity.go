@@ -75,6 +75,23 @@ func LoadOrCreateIdentity(dir string) (*Identity, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseIdentity(path, data)
+}
+
+// LoadIdentity reads the identity LoadOrCreateIdentity keeps in dir, and never
+// creates one: without dir/identity.pem it fails with an error that wraps
+// fs.ErrNotExist.
+func LoadIdentity(dir string) (*Identity, error) {
+	path := filepath.Join(dir, "identity.pem")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseIdentity(path, data)
+}
+
+// parseIdentity reads the key and certificate of the identity.pem at path.
+func parseIdentity(path string, data []byte) (*Identity, error) {
 	cert, err := tls.X509KeyPair(data, data)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)

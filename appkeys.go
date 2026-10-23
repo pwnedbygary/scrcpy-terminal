@@ -1,12 +1,11 @@
 package main
 
 import (
-	"fmt"
 	"sync"
 )
 
 // ---------------------------------------------------------------------------
-// app-level keys: one table, shared by the terminal and the browser
+// app-level keys: the terminal and browser view of the action catalog
 //
 // The terminal reaches these through F1..F12, the browser through F1..F12 as
 // well (or Alt+F1..F12 where the OS owns a bare F-key). Both end up here, so
@@ -18,54 +17,17 @@ import (
 // The browser also reaches these through Alt+<letter>, and so does the terminal
 // (input.go). Phone keyboards (Unexpected Keyboard and friends) have Ctrl and
 // Alt but no F-key row, so Alt+<letter> is the primary binding for them, not a
-// fallback. The table below is the one authority for those letters: the web
-// player has the same table (MNEMONIC_ACTIONS in player.js) and
-// TestMnemonicOpsMatchTheBrowser in web_keymap_test.go pins the two together.
-// ---------------------------------------------------------------------------
-
-// appMnemonicOps maps Alt+<letter> to an app-level action. Letters are chosen
-// so that a chord does nothing today unless it is in this table: Ctrl+A..Z
-// (Android shortcuts) and unmapped Alt+letters are untouched.
+// fallback.
 //
-//	mnemonic  action       why
-//	b         back         Back
-//	c         collapse     Collapse
-//	d         voldown      Down (volume; deliberate, see below)
-//	e         settings     sEttings (S is screenshot)
-//	g         grab         Grab (was browser-only)
-//	h         home         Home
-//	i         keyboard     Input (the software keyboard)
-//	k         resetvideo   Keyframe
-//	n         notif        Notifications
-//	p         power        Power
-//	q         quit         Quit
-//	r         rotate       Rotate
-//	s         screenshot   Screenshot (local)
-//	t         appswitch    Tasks / recents
-//	u         volup        Up (volume; deliberate)
-//	/         toolbar      Open the action menu (TUI) / controls sheet (web)
+// The tables this section reads (appMnemonicOps, appKeyOps, appActionOps,
+// appFKeyOps) are derived from protocol/fixtures/actions.json in actions.go;
+// the web player has the same catalog (MNEMONIC_ACTIONS in player.js) and
+// TestMnemonicOpsMatchTheBrowser in web_keymap_test.go pins the two together.
 //
 // Mute and Menu-as-Android-key have no letter chord: Alt+M stays the LOCAL mute
 // (existing behaviour, both modes), Alt+O types an "o" in the browser, and both
 // actions remain on F7/F2 and on the action bar/menu.
-var appMnemonicOps = map[byte]string{
-	'b': "back",
-	'c': "collapse",
-	'd': "voldown",
-	'e': "settings",
-	'g': "grab",
-	'h': "home",
-	'i': "keyboard",
-	'k': "resetvideo",
-	'n': "notif",
-	'p': "power",
-	'q': "quit",
-	'r': "rotate",
-	's': "screenshot",
-	't': "appswitch",
-	'u': "volup",
-	'/': "toolbar",
-}
+// ---------------------------------------------------------------------------
 
 // mnemonicOp returns the app-level action for an Alt+<letter> chord, ignoring
 // the case of a letter (Alt+B and Alt+b are the same chord). The slash that
@@ -76,26 +38,6 @@ func mnemonicOp(c byte) (string, bool) {
 	}
 	op, ok := appMnemonicOps[c]
 	return op, ok
-}
-
-// appKeyOps maps an app-level action to the Android keycode both front ends
-// send for it.
-var appKeyOps = map[string]uint32{
-	"home":      3,   // KEYCODE_HOME
-	"menu":      82,  // KEYCODE_MENU
-	"appswitch": 187, // KEYCODE_APP_SWITCH
-	"power":     26,  // KEYCODE_POWER
-	"voldown":   25,  // KEYCODE_VOLUME_DOWN
-	"volup":     24,  // KEYCODE_VOLUME_UP
-	"mute":      164, // KEYCODE_VOLUME_MUTE (91, KEYCODE_MUTE, toggles the microphone)
-}
-
-// appActionOps are the app-level actions that are not a keycode: scrcpy control
-// messages (rotate/notif/settings/collapse/resetvideo/back) and local state
-// (grab, quit).
-var appActionOps = map[string]bool{
-	"rotate": true, "notif": true, "settings": true, "collapse": true,
-	"resetvideo": true, "back": true, "grab": true, "quit": true,
 }
 
 // isAppOp reports whether op is an app-level action of either kind.
@@ -112,17 +54,11 @@ func appFKeyOp(code uint32) string {
 	if code < 131 || code > 142 {
 		return ""
 	}
-	return [...]string{
-		"home", "menu", "appswitch", "power", "voldown", "volup", "mute",
-		"rotate", "notif", "settings", "collapse", "grab",
-	}[code-131]
-}
-
-// appFKeyOps lists the F1..F12 actions in order, so a test can assert the
-// terminal and the browser agree without restating the table twice.
-var appFKeyOps = []string{
-	"home", "menu", "appswitch", "power", "voldown", "volup", "mute",
-	"rotate", "notif", "settings", "collapse", "grab",
+	i := int(code - 131)
+	if i >= len(appFKeyOps) {
+		return ""
+	}
+	return appFKeyOps[i]
 }
 
 // mapAppFKey dispatches F1..F12 (F12 = grab is also handled earlier, as a
@@ -132,25 +68,17 @@ func (a *app) mapAppFKey(code uint32) {
 }
 
 // applyAppOp performs one app-level action. Both the terminal's keys and the
-// browser's control events call this one function.
+// browser's control events call this one function, and the headless browser
+// dispatcher performs the same catalog action through performDeviceAction.
 func (a *app) applyAppOp(op string) {
-	if code, ok := appKeyOps[op]; ok {
-		a.sendAndroidKeyMeta(code, 0)
+	if act, ok := deviceActionFor(op); ok {
+		err := performDeviceAction(a.ctrl, act)
+		if err != nil && a.ctrl != nil && act.Kind == kindKeycode {
+			noticef("scterm: inject key: %v\n", err)
+		}
 		return
 	}
 	switch op {
-	case "rotate":
-		a.rotateDevice()
-	case "notif":
-		a.expandNotifications()
-	case "settings":
-		a.expandSettings()
-	case "collapse":
-		a.collapsePanels()
-	case "back":
-		a.backPress()
-	case "resetvideo":
-		a.resetVideo()
 	case "grab":
 		a.toggleGrab()
 	case "quit":
@@ -174,7 +102,7 @@ func (a *app) scrollAt(cellX, cellY int, delta int) {
 	}
 	err := a.ctrl.scroll(a.posAt(cellX, cellY), float32(delta), 0)
 	if err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: scroll: %v\n", err)
+		noticef("scterm: scroll: %v\n", err)
 	}
 }
 
@@ -202,7 +130,7 @@ func (a *app) keyboardInput(b []byte) bool {
 			a.closeKeyboard()
 			return true
 		case 0x11: // Ctrl-Q
-			return false // let the global handler quit
+			return false // not the keyboard's: it goes to the device, as with the keyboard closed
 		}
 	}
 	switch string(b) {
@@ -267,7 +195,8 @@ type dragState struct {
 	down    bool
 	lastNs  int64
 	pending position
-	have    bool // pending holds a real position awaiting its flush
+	have    bool     // pending holds a real position awaiting its flush
+	last    position // the last position the device was given: where its finger is
 }
 
 // setDown records the button press/release. Releasing also drops any queued
@@ -287,6 +216,21 @@ func (d *dragState) isDown() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.down
+}
+
+// sent records pos as the last position the device was given, by the press
+// or by a move.
+func (d *dragState) sent(pos position) {
+	d.mu.Lock()
+	d.last = pos
+	d.mu.Unlock()
+}
+
+// lastSent is the last position the device was given.
+func (d *dragState) lastSent() position {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.last
 }
 
 // queue stores the newest position, reporting whether the caller should send it
@@ -327,6 +271,7 @@ func (a *app) sendTouchMove(pos position) {
 	if a.ctrl == nil {
 		return
 	}
+	a.drag.sent(pos)
 	_ = a.ctrl.touchMove(pos)
 }
 

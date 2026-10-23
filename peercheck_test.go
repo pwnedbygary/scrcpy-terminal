@@ -50,6 +50,26 @@ func TestPeersListingStaysOffline(t *testing.T) {
 	}
 }
 
+// TestPeersWithoutPairingsSaysHowToPair: with nothing paired, scterm peers
+// names both ways to pair: scterm pair on its own, which finds a device
+// inviting on the same network, and scterm pair with a typed invitation.
+func TestPeersWithoutPairingsSaysHowToPair(t *testing.T) {
+	c, s, _ := checkFixture(t, 0)
+	var out bytes.Buffer
+	if err := printPeers(context.Background(), &out, c, s, nil, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	alone := false // scterm pair without an invitation after it
+	for rest, found := text, true; found; {
+		_, rest, found = strings.Cut(rest, "scterm pair")
+		alone = alone || found && !strings.HasPrefix(rest, ` "`)
+	}
+	if !alone || !strings.Contains(text, "network") || !strings.Contains(text, `scterm pair "HOST:PORT CODE"`) {
+		t.Errorf("no pairings: %q; want scterm pair on its own (same network) and with a typed invitation", text)
+	}
+}
+
 func TestPeersCheckPinsCandidatesUsesTwoWorkersAndPersistsVerifiedMetadata(t *testing.T) {
 	c, s, recs := checkFixture(t, 8)
 	var active, max atomic.Int32

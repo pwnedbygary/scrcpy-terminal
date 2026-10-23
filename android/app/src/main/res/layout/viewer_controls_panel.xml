@@ -11,7 +11,7 @@
     <ImageView
         android:id="@+id/controls_collapse"
         android:layout_width="64dp"
-        android:layout_height="24dp"
+        android:layout_height="48dp"
         android:alpha="0.8"
         android:contentDescription="@string/viewer_hide_controls"
         android:scaleType="center"

@@ -8,6 +8,7 @@
 
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { catalog } from "./page_fixture.mjs";
 
 const SRC = new URL("./player.js", import.meta.url);
 const src = readFileSync(SRC, "utf8");
@@ -23,6 +24,13 @@ if (!code.includes("class Input")) throw new Error("slice does not contain class
 // ---------------------------------------------------------------------------
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The page's clock (performance.now) is the test's own: it moves only when a
+// test says that time went by, so a slow machine cannot make a quick tap look
+// long. Timers stay real; the tests that wait for them depend only on the
+// order in which they fire.
+const clock = { ms: 0 };
+const elapse = (ms) => { clock.ms += ms; };
 
 const doc = { activeElement: null, addEventListener() {}, removeEventListener() {} };
 function fakeEl(id) {
@@ -72,22 +80,31 @@ const toolbarStub = {
   toggleSheet() { this.toggles++; this.opened = !this.opened; },
 };
 
+// The page reads the action catalog the server puts into index.html; here the
+// fixture it comes from stands in for it.
+const CATALOG = catalog();
+
 const ctx = {
   els, doc,
   toast: (m) => toasts.push(m),
   screenshot: () => shots.push(1),
-  performance: { now: () => Date.now() },
+  performance: { now: () => clock.ms },
   setTimeout, clearTimeout,
   requestAnimationFrame: (fn) => setTimeout(fn, 0),
   document: doc,
   window: winStub,
   pcm: pcmStub,
   toolbar: toolbarStub,
+  CATALOG,
   console,
 };
 vm.createContext(ctx);
 vm.runInContext(code + "\n;globalThis.__Input = Input;", ctx);
 const Input = ctx.__Input;
+// The page's key tables, as the key handler reads them (or what went wrong).
+const tables = (expr) => {
+  try { return JSON.parse(vm.runInContext("JSON.stringify(" + expr + ")", ctx)); } catch (e) { return String(e); }
+};
 
 // ---------------------------------------------------------------------------
 // harness
@@ -176,9 +193,9 @@ console.log("three-finger tap");
 {
   const h = harness();
   h.ev("down", 1, 100, 100);
-  await sleep(15);
+  elapse(15);
   h.ev("down", 2, 200, 100);
-  await sleep(15);
+  elapse(15);
   h.ev("down", 3, 300, 100);
   const mid = h.ops().slice();
   h.ev("up", 1, 100, 100);
@@ -223,7 +240,7 @@ console.log("three fingers, held");
   h.ev("down", 1, 5, 5);
   h.ev("down", 2, 6, 5);
   h.ev("down", 3, 7, 5);
-  await sleep(760);                      // longer than SOFTKEY_TAP_MS
+  elapse(760);                           // longer than SOFTKEY_TAP_MS
   h.ev("up", 1, 5, 5);
   h.ev("up", 2, 6, 5);
   h.ev("up", 3, 7, 5);
@@ -249,6 +266,70 @@ console.log("hotkeys from a phone keyboard");
   h.net.sent.length = 0;
   key({ code: "", key: "a", altKey: false, ctrlKey: false, metaKey: false, shiftKey: false });
   check("a letter is typed as text", h.net.sent[0], { op: "text", text: "a" });
+}
+
+// ---------------------------------------------------------------------------
+// 7b. one press per key: the server turns every key op into a down+up pair
+// ---------------------------------------------------------------------------
+console.log("one press per key");
+{
+  const h = harness();
+  const press = (o, down) => h.input.key(Object.assign({ preventDefault() {} }, o), down);
+  const backspace = { code: "Backspace", key: "Backspace" };
+  press(backspace, true);
+  press(backspace, false);
+  check("Backspace down and up is one key op", h.net.sent, [{ op: "key", code: 67, meta: 0 }]);
+  h.net.sent.length = 0;
+  const ctrlA = { code: "KeyA", key: "a", ctrlKey: true };
+  press(ctrlA, true);
+  press(ctrlA, false);
+  check("Ctrl+A down and up is one press with CTRL", h.net.sent, [{ op: "key", code: 29, meta: 0x1000 }]);
+  h.net.sent.length = 0;
+  press(backspace, true);
+  press(Object.assign({ repeat: true }, backspace), true);
+  press(Object.assign({ repeat: true }, backspace), true);
+  press(backspace, false);
+  const bs = { op: "key", code: 67, meta: 0 };
+  check("a held key repeats on the device", h.net.sent, [bs, bs, bs]);
+  h.net.sent.length = 0;
+  const bare = [
+    { code: "ShiftLeft", shiftKey: true }, { code: "ShiftRight", shiftKey: true },
+    { code: "ControlLeft", ctrlKey: true }, { code: "ControlRight", ctrlKey: true },
+    { code: "AltLeft", altKey: true }, { code: "AltRight", altKey: true },
+    { code: "MetaLeft", metaKey: true }, { code: "MetaRight", metaKey: true },
+    { code: "CapsLock" }, { code: "NumLock" }, { code: "ScrollLock" },
+  ];
+  let prevented = 0;
+  const counted = (o, down) => h.input.key(Object.assign({ preventDefault() { prevented++; } }, o), down);
+  for (const k of bare) {
+    counted(Object.assign({ key: k.code }, k), true);
+    counted({ code: k.code, key: k.code }, false);
+  }
+  check("bare modifier and lock keys send nothing", h.net.sent, []);
+  check("and the page still keeps both edges of each", prevented, bare.length * 2);
+  h.net.sent.length = 0;
+  const print = { code: "PrintScreen", key: "PrintScreen" };
+  press(print, false);
+  check("a PrintScreen key-up with no key-down (Windows) is one press",
+    h.net.sent, [{ op: "key", code: 120, meta: 0 }]);
+  h.net.sent.length = 0;
+  press(print, true);
+  press(print, false);
+  check("PrintScreen down and up is still one press", h.net.sent, [{ op: "key", code: 120, meta: 0 }]);
+  h.net.sent.length = 0;
+  press(print, false);
+  check("a PrintScreen key-up-only press after a full one is one press",
+    h.net.sent, [{ op: "key", code: 120, meta: 0 }]);
+  h.net.sent.length = 0;
+  press(Object.assign({ shiftKey: true, altKey: true }, print), false);
+  check("a modified PrintScreen key-up with no key-down goes without modifiers",
+    h.net.sent, [{ op: "key", code: 120, meta: 0 }]);
+  h.net.sent.length = 0;
+  const shiftPrint = Object.assign({ shiftKey: true }, print);
+  press(shiftPrint, true);
+  press(shiftPrint, false);
+  check("Shift+PrintScreen down and up is one press with SHIFT",
+    h.net.sent, [{ op: "key", code: 120, meta: 0x01 }]);
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +502,7 @@ console.log("terminal key parity");
 // ---------------------------------------------------------------------------
 console.log("mnemonic chords");
 {
-  // The same table as the terminal (appkeys.go appMnemonicOps). A phone
+  // The same table as the terminal (actions.go appMnemonicOps). A phone
   // keyboard has Ctrl and Alt but no F-row, so these are the primary bindings.
   const MNEMONICS = {
     KeyH: "home", KeyB: "back", KeyT: "appswitch", KeyP: "power",
@@ -459,7 +540,8 @@ console.log("mnemonic chords");
     check("an unmapped Alt+letter is still typed", h.net.sent, [{ op: "text", text: "z" }]);
   }
   {
-    // Mute has no chord on purpose: Alt+M is the LOCAL mute everywhere.
+    // The device's mute has no Alt+letter chord on purpose (F7 carries it):
+    // Alt+M is the LOCAL mute everywhere.
     const h = harness();
     const before = pcmStub.localGain;
     h.input.key({ code: "KeyM", key: "m", altKey: true, preventDefault() {} }, true);
@@ -505,6 +587,135 @@ console.log("mnemonic chords");
     check("the next tap raises the keyboard", doc.activeElement, els.ime);
     check("and the retry is consumed", h.input.kbRetry, false);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 11c. the key tables are the action catalog's
+// ---------------------------------------------------------------------------
+console.log("key tables from the catalog");
+{
+  // Derived here from protocol/fixtures/actions.json on its own: a mnemonic is
+  // the Alt+<key> chord, named by the key's KeyboardEvent.code (UI Events
+  // KeyboardEvent code values: "KeyA".."KeyZ", "Slash", "Minus", "Equal"), and
+  // an fkey n is the key F<n>.
+  const PUNCT = { "/": "Slash", "-": "Minus", "=": "Equal" };
+  const alt = {};
+  const fkeys = {};
+  for (const a of CATALOG.device.concat(CATALOG.local)) {
+    if (a.mnemonic) alt[/^[a-z]$/i.test(a.mnemonic) ? "Key" + a.mnemonic.toUpperCase() : PUNCT[a.mnemonic]] = a.id;
+    if (a.fkey) fkeys["F" + a.fkey] = a.id;
+  }
+  const sorted = (o) => Object.fromEntries(Object.entries(o).sort());
+  check("Alt+<key> is every catalog mnemonic", sorted(tables("MNEMONIC_ACTIONS")), sorted(alt));
+  check("F1..F12 are the catalog's F-keys", sorted(tables("APP_KEYS")), sorted(fkeys));
+  check("Alt+F1..F12 are the same actions", sorted(tables("ALT_FKEYS")), sorted(fkeys));
+  check("a catalog the page has never seen makes its own tables",
+    tables('keyTables({ device: [{ id: "x", mnemonic: "Z", fkey: 3 }], local: [{ id: "y", mnemonic: "-" }] })'),
+    { mnemonics: { KeyZ: "x", Minus: "y" }, fkeys: { F3: "x" } });
+}
+{
+  // Give grab another letter and the chords follow, Alt+G included: it is a
+  // plain letter again.
+  const moved = catalog();
+  moved.local.find((a) => a.id === "grab").mnemonic = "j";
+  const c2 = Object.assign({}, ctx, { CATALOG: moved });
+  vm.createContext(c2);
+  vm.runInContext(code + "\n;globalThis.__Input = Input;", c2);
+  const net = { sent: [], send(m) { this.sent.push(m); } };
+  const input = new c2.__Input(net, { norm: (ev) => ({ x: ev.clientX, y: ev.clientY }) });
+  input.key({ code: "KeyJ", key: "j", altKey: true, preventDefault() {} }, true);
+  check("Alt+J grabs when the catalog says J is grab", input.grab, true);
+  input.key({ code: "KeyG", key: "g", altKey: true, preventDefault() {} }, true);
+  check("and Alt+G then types a g", [input.grab, net.sent], [true, [{ op: "text", text: "g" }]]);
+}
+
+// ---------------------------------------------------------------------------
+// 11d. middle click is Home, right click is Back -- from a mouse only
+// ---------------------------------------------------------------------------
+console.log("middle and right click");
+{
+  const h = harness();
+  const c = els.canvas;
+  const at = { pointerId: 7, clientX: 5, clientY: 5 };
+  const pointer = (type, extra) => c.fire(type, Object.assign({ preventDefault() {} }, at, extra));
+  pointer("pointerdown", { button: 1, pointerType: "mouse" });
+  check("a middle click is Home, as in the terminal", h.ops(), ["home"]);
+  pointer("pointerup", { button: 1, pointerType: "mouse" });
+  pointer("lostpointercapture", { button: 1, pointerType: "mouse" });
+  check("and its release sends nothing more", h.ops(), ["home"]);
+
+  let prevented = 0;
+  const menu = (extra) => c.fire("contextmenu", Object.assign({ preventDefault() { prevented++; } }, extra));
+  h.net.sent.length = 0;
+  menu({ pointerType: "mouse" });
+  check("a right click is Back", h.ops(), ["back"]);
+  h.net.sent.length = 0;
+  menu({ pointerType: "touch" });
+  menu({ pointerType: "pen" });
+  check("a long press of a finger or a pen is not", h.ops(), []);
+  check("and the browser's own menu is kept away every time", prevented, 3);
+
+  // Browsers that send contextmenu without a pointer type: the last press on
+  // the canvas says what it was.
+  h.net.sent.length = 0;
+  pointer("pointerdown", { button: 0, pointerType: "touch" });
+  menu({});
+  pointer("pointerup", { button: 0, pointerType: "touch" });
+  pointer("lostpointercapture", { button: 0, pointerType: "touch" });
+  check("a finger's long press with no pointer type is not Back", h.ops().includes("back"), false);
+  h.net.sent.length = 0;
+  pointer("pointerdown", { button: 2, pointerType: "mouse" });
+  menu({});
+  check("a mouse's right click with no pointer type is", h.ops(), ["back"]);
+}
+
+// ---------------------------------------------------------------------------
+// 11e. the grab toast says what grab does with the browser's keys
+// ---------------------------------------------------------------------------
+console.log("grab toast");
+{
+  const h = harness();
+  const key = (o) => h.input.key(Object.assign({ preventDefault() {} }, o), true);
+  const ctrl = (letters) => letters.forEach((k) => key({ code: "Key" + k, key: k.toLowerCase(), ctrlKey: true }));
+  toasts.length = 0;
+  key({ code: "KeyG", key: "g", altKey: true });
+  check("grab on: Ctrl+W/T/N/R go to the device, Ctrl+Q ends the session", toasts,
+    ["grab on: Ctrl+W/T/N/R go to the device,\nCtrl+Q ends the session"]);
+  ctrl(["W", "T", "N", "R"]);
+  // Android KeyEvent: KEYCODE_W 51, KEYCODE_T 48, KEYCODE_N 42, KEYCODE_R 46.
+  check("they do go to the device, with CTRL", h.net.sent.map((m) => [m.op, m.code, m.meta]),
+    [["key", 51, 0x1000], ["key", 48, 0x1000], ["key", 42, 0x1000], ["key", 46, 0x1000]]);
+  h.net.sent.length = 0;
+  ctrl(["Q"]);
+  check("and Ctrl+Q does end the session", h.ops(), ["quit"]);
+  toasts.length = 0;
+  key({ code: "KeyG", key: "g", altKey: true });
+  check("grab off: all five stay with the browser", toasts, ["grab off: Ctrl+W/T/N/R/Q stay with the browser"]);
+  h.net.sent.length = 0;
+  ctrl(["W", "T", "N", "R", "Q"]);
+  check("they do", h.net.sent, []);
+}
+
+// ---------------------------------------------------------------------------
+// 11f. every way to run an action goes through act(), which the toolbar hears
+// ---------------------------------------------------------------------------
+console.log("actions go through act()");
+{
+  const h = harness();
+  const heard = [];
+  h.input.onAct = (op) => heard.push(op);
+  const key = (o) => h.input.key(Object.assign({ preventDefault() {} }, o), true);
+  key({ code: "KeyH", key: "h", altKey: true });
+  key({ code: "F2", key: "F2" });
+  key({ code: "F3", key: "F3", altKey: true });
+  key({ code: "Escape", key: "Escape" });
+  key({ code: "ArrowLeft", key: "ArrowLeft", altKey: true });
+  els.canvas.fire("contextmenu", { pointerType: "mouse", preventDefault() {} });
+  els.canvas.fire("pointerdown", { pointerId: 3, clientX: 1, clientY: 1, button: 1, pointerType: "mouse", preventDefault() {} });
+  key({ code: "KeyQ", key: "q", altKey: true });
+  const want = ["home", "menu", "appswitch", "back", "back", "back", "home", "quit"];
+  check("a chord, an F-key, Esc and the mouse buttons each run through act()", heard, want);
+  check("and Alt+Q quits at once, with no second press", h.ops(), want);
 }
 
 // ---------------------------------------------------------------------------

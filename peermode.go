@@ -8,14 +8,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"scterm/peer"
 )
@@ -52,6 +55,10 @@ func runPeerCommand(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
+	if help, ok := peerCommandHelp[args[0]]; ok && len(args) > 1 && isHelpArg(args[1]) {
+		fmt.Print(help)
+		return true
+	}
 	var err error
 	switch args[0] {
 	case "pair":
@@ -63,11 +70,53 @@ func runPeerCommand(args []string) bool {
 	default:
 		return false
 	}
+	var usage usageErr
+	if errors.As(err, &usage) {
+		usageError(string(usage))
+	}
 	if err != nil {
 		fatal(err)
 	}
 	return true
 }
+
+var peerCommandHelp = map[string]string{
+	"pair": `usage: scterm pair
+       scterm pair "HOST:PORT CODE"
+
+Without an invitation, scterm finds a device inviting on this network and
+pairs once both screens show the same six-digit code and it is accepted on
+both. With the invitation an scterm device shows, it pairs from anywhere the
+device is reachable.
+`,
+	"peers": `usage: scterm peers [--check]
+
+Lists the paired devices and what each allows this computer to do. --check
+also connects to each one, authenticated, without starting a stream, and
+says whether it is ready.
+`,
+	"forget": `usage: scterm forget NAME
+       scterm forget --damaged
+
+Forgets a paired device. NAME is its whole name, in any case, or its
+identity; anything less is confirmed first, and refused when there is no
+terminal to ask on.
+
+With --damaged, scterm forgets the pairings whose identity does not parse
+(scterm peers lists them after the others), which no NAME selects: it shows
+them and asks first, and refuses when there is no terminal to ask on.
+`,
+}
+
+// damagedArg is what scterm forget takes instead of a name to forget the
+// pairings whose identity does not parse.
+const damagedArg = "--damaged"
+
+// usageErr is a command run the wrong way; it is reported through usageError,
+// as a bad flag is.
+type usageErr string
+
+func (e usageErr) Error() string { return string(e) }
 
 func pairCommand(args []string) error {
 	if len(args) == 0 {
@@ -83,7 +132,7 @@ func pairCommand(args []string) error {
 	}
 	res, err := client.Pair(inv, 0)
 	if err != nil {
-		return fmt.Errorf("pairing with %s: %w", inv.Address(), err)
+		return fmt.Errorf("pairing with %s: %s", inv.Address(), cleanText(err.Error())) // a refusal carries the device's words
 	}
 	name := res.Device.Name
 	if name == "" {
@@ -93,20 +142,207 @@ func pairCommand(args []string) error {
 	if err := store.Put(rec); err != nil {
 		return err
 	}
-	reportPaired(client, name, res.Fingerprint, res.Grants)
+	reportPaired(client, store, name, res.Fingerprint, res.Grants)
 	return nil
 }
 
-func reportPaired(client *peer.Client, name string, fp peer.Fingerprint, grants []string) {
-	fmt.Printf("Paired with %s (%s); it allows this computer to %s.\n", name, fp.Short(), describeGrants(grants))
-	fmt.Printf("This computer is %s. Connect with: scterm --peer %q\n", client.Identity.Fingerprint.Short(), name)
+// reportPaired says what was paired. The command comes first, naming the
+// device as pasteArg writes it (when pasteArg gives none, the line says that
+// scterm cannot give one), so no text of the device's comes before it; then
+// the device, as data, and what it allows.
+func reportPaired(client *peer.Client, store *peer.Store, name string, fp peer.Fingerprint, grants []string) {
+	if arg, ok := pasteArg(store, name, fp); ok {
+		fmt.Printf("Paired. Connect with: scterm --peer %s\n", arg)
+	} else {
+		fmt.Println("Paired. scterm cannot give a command that selects only this device: scterm peers lists the pairings.")
+	}
+	fmt.Printf("The device is %s.\n", deviceData(fp, name))
+	fmt.Printf("It allows this computer (%s) to %s.\n", client.Identity.Fingerprint.Short(), describeGrants(grants))
+}
+
+// nameCells is the most of a device's name that scterm shows, in cells: room
+// for the names devices give (Galaxy S24 Ultra), and little enough that the
+// lines after a pairing fit in 80 columns, so that no part of the name can
+// start a row of its own there.
+const nameCells = 32
+
+// deviceData shows a paired device as data, never as words of scterm's: its
+// identity, then its name in quotes, as quoteText shows it.
+func deviceData(fp peer.Fingerprint, name string) string {
+	if name == "" {
+		return fp.Short() + ", with no name"
+	}
+	return fp.Short() + ", named " + quoteText(name, nameCells)
+}
+
+// identityCells is the most of an identity as stored that scterm shows, in
+// cells: all 64 hex digits of a whole one. addressCells is the most of a saved
+// address shown after a name of nameCells: what 80 columns leave on its line.
+const (
+	identityCells = 64
+	addressCells  = 29
+)
+
+// damagedPairings are the pairings in recs whose identity does not parse.
+// Matches leaves them out, so no name or identity selects them.
+func damagedPairings(recs []peer.Record) []peer.Record {
+	var damaged []peer.Record
+	for _, r := range recs {
+		if _, err := r.ID(); err != nil {
+			damaged = append(damaged, r)
+		}
+	}
+	return damaged
+}
+
+// damagedData shows pairings whose identity does not parse as data, two lines
+// each, which fit in 80 columns: the name and the saved address, then the
+// identity as stored, each in quotes, as quoteText shows it.
+func damagedData(recs []peer.Record) string {
+	var b strings.Builder
+	for _, r := range recs {
+		fmt.Fprintf(&b, "  named %s, at %s\n    identity %s\n", quoteText(r.Name, nameCells),
+			quoteText(net.JoinHostPort(r.Host, strconv.Itoa(r.Port)), addressCells), quoteText(r.Fingerprint, identityCells))
+	}
+	return b.String()
+}
+
+// damagedWords gives the words for n pairings whose identity does not parse:
+// what is wrong ("2 pairings' identities do not parse"), the pairings ("the 2
+// pairings"), and "it" or "them".
+func damagedWords(n int) (count, the, them string) {
+	if n == 1 {
+		return "1 pairing's identity does not parse", "the pairing", "it"
+	}
+	return fmt.Sprintf("%d pairings' identities do not parse", n), fmt.Sprintf("the %d pairings", n), "them"
+}
+
+// pasteArg is how a command printed for the user to paste (scterm --peer ARG,
+// scterm forget ARG) names the pairing with identity fp: by its name, in
+// single quotes, when that is plain, finds this pairing and no other, and no
+// copy of it a terminal may make finds another (everyCopyFinds), so that a
+// paste of the command does what the command does, or nothing; else by its
+// short or its whole identity, whichever finds it alone, so that the command
+// never carries text the device chose. It reports false when none does (two
+// pairings have the identity, or the pairings cannot be read), and then no
+// command should be printed.
+// The quotes are there even when the name needs none: an interactive zsh
+// expands a global alias wherever a bare word names one.
+func pasteArg(store *peer.Store, name string, fp peer.Fingerprint) (string, bool) {
+	recs, err := store.All()
+	if err != nil {
+		return "", false
+	}
+	return pasteArgFor(recs, store.Find, name, fp)
+}
+
+// pasteArgFor is pasteArg for the pairings recs, which find searches as
+// Store.Find does.
+func pasteArgFor(recs []peer.Record, find func(string) (peer.Record, error), name string, fp peer.Fingerprint) (string, bool) {
+	// finds reports whether query means this pairing: find gives it. An
+	// identity does whatever the pairings are named.
+	finds := func(query string) bool {
+		rec, err := find(query)
+		return err == nil && rec.Fingerprint == fp.Hex()
+	}
+	// findsNoOther reports whether query means no other pairing: this one, or
+	// none at all. One that means several means another.
+	findsNoOther := func(query string) bool {
+		return finds(query) || len(peer.MatchesIn(recs, query)) == 0
+	}
+	// Find gives the first of the pairings that have the name in any case.
+	namesake := slices.ContainsFunc(recs, func(r peer.Record) bool {
+		return r.Fingerprint != fp.Hex() && strings.EqualFold(r.Name, name)
+	})
+	if plainName(name) && !namesake && everyCopyFinds(name, finds, findsNoOther) {
+		return "'" + strings.ReplaceAll(name, "'", `'\''`) + "'", true
+	}
+	// Another pairing's short identity can be the same.
+	for _, id := range []string{fp.Short(), fp.Hex()} {
+		if finds(id) {
+			return id, true
+		}
+	}
+	return "", false
+}
+
+// everyCopyFinds reports whether every copy a terminal may make of name finds
+// this pairing or nothing, and none finds another: the name as written must
+// find this pairing (finds) and, when it holds one character a terminal may
+// leave out (copiedAs, which keeps the name's quotes, as a shell does inside
+// the command's), the name without it must find no other (findsNoOther). It
+// may find none: copied without its U+FE0F, Mom's ❤️ phone is Mom's ❤ phone,
+// which matches no name, word or identity, so the command, pasted so, finds
+// no pairing and does nothing. It reports false for a name that holds more
+// than one, as a terminal may leave out some of them and keep the others,
+// and those copies are not tried: a name with a keycap (1, U+FE0F, U+20E3)
+// goes by its identity.
+func everyCopyFinds(name string, finds, findsNoOther func(string) bool) bool {
+	copied := copiedAs(name)
+	return finds(name) && (copied == name || utf8.RuneCountInString(name)-utf8.RuneCountInString(copied) == 1 && findsNoOther(copied))
+}
+
+// shellChars are the characters a shell reads in a bare word: to end, chain or
+// redirect a command, to substitute, expand or glob, to start a comment or a
+// history expansion, or to escape (fish reads a backslash even inside single
+// quotes, where sh, bash and zsh do not).
+const shellChars = "\\`;&|<>()$*?[]{}~#!^%="
+
+// plainName reports whether a command can name a device by its name, in single
+// quotes: whatever part of the name is copied from inside the quotes, it is
+// only words; the name reads as cleanText shows it; and a paste of it is
+// taken as a name, whatever a terminal leaves out of it when it copies. A
+// plain name is UTF-8, takes at most nameCells cells as textCells counts them
+// and the command writes it (an apostrophe takes four there), and every
+// character of it shows as what it is and is none of shellChars. What is left
+// of a paste of it that lost the most (pastedAs), which keeps all of its
+// spaces, is not empty; has no space at either end (a query loses them) nor
+// two together; holds no "scterm" in any case, as words such as scterm forget
+// Pixel copied from it would run as they read; and is what scterm forget
+// takes as a name: not a word that asks a command for its help, nor
+// --damaged. A paste that loses less holds each of these too. Whether the
+// name finds the pairing alone, and no copy of it another, is
+// everyCopyFinds's to check.
+func plainName(name string) bool {
+	pasted := pastedAs(name)
+	return pasted != "" && utf8.ValidString(name) && textCells(name)+3*strings.Count(name, "'") <= nameCells &&
+		strings.TrimSpace(pasted) == pasted && !strings.Contains(pasted, "  ") &&
+		!strings.Contains(strings.ToLower(pasted), "scterm") && !isHelpArg(pasted) && pasted != damagedArg &&
+		!strings.ContainsFunc(name, func(r rune) bool { return !shownAsIs(r) || strings.ContainsRune(shellChars, r) })
+}
+
+// pastedAs is text without the most a paste of it can lose: what a terminal
+// gives no cell (copiedAs), and the quotes ' and ", which a shell takes out
+// of a word, so sc""term runs scterm.
+func pastedAs(text string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\'' || r == '"' {
+			return -1
+		}
+		return r
+	}, copiedAs(text))
+}
+
+// copiedAs is text as a terminal would copy it if it left out every character
+// it gives no cell: those runeCells counts as none (variation selectors,
+// combining marks), and the Hangul vowels and final consonants
+// (U+1160-U+11FF, U+D7B0-U+D7FF), to which glibc's wcwidth and GLib give no
+// cell. runeCells counts one for each of those, as counting none where a
+// terminal draws one would overflow a row.
+func copiedAs(text string) string {
+	return strings.Map(func(r rune) rune {
+		if runeCells(r) == 0 || r >= 0x1160 && r <= 0x11ff || r >= 0xd7b0 && r <= 0xd7ff {
+			return -1
+		}
+		return r
+	}, text)
 }
 
 func peersCommand(args ...string) error {
 	check := false
 	if len(args) != 0 {
 		if len(args) != 1 || args[0] != "--check" {
-			return fmt.Errorf("usage: scterm peers [--check]")
+			return usageErr("usage: scterm peers [--check]")
 		}
 		check = true
 	}
@@ -121,20 +357,115 @@ func peersCommand(args ...string) error {
 	return printPeers(context.Background(), os.Stdout, client, store, recs, check, peer.DiscoverPresence, client.Probe)
 }
 
+// forgetCommand removes a pairing. It needs a name: unlike --peer=, an empty
+// query must not mean "the only paired device". A name that only matches
+// part of one is confirmed first. The device is shown as data, on a line of
+// its own; the question and what was done name it by its identity.
 func forgetCommand(args []string) error {
+	query := strings.TrimSpace(strings.Join(args, " "))
+	if query == "" {
+		return usageErr("usage: scterm forget NAME (scterm peers lists the names)")
+	}
+	if query == damagedArg {
+		return forgetDamaged()
+	}
 	_, store, err := openPeerClient()
 	if err != nil {
 		return err
 	}
-	rec, err := store.Find(strings.Join(args, " "))
+	rec, err := findPeer(store, query)
 	if err != nil {
 		return err
+	}
+	fp, err := rec.ID()
+	if err != nil {
+		return err
+	}
+	device := fmt.Sprintf("The device is %s.\n", deviceData(fp, rec.Name))
+	exact := namesExactly(rec, query)
+	if !exact {
+		if !interactive() {
+			// No text of the device's comes before the command, where it
+			// could pose as one; the command names the device as pasteArg
+			// writes it, and ends the line.
+			if arg, ok := pasteArg(store, rec.Name, fp); ok {
+				return fmt.Errorf("%q only partly matches a paired device: to forget it, run scterm forget %s", query, arg)
+			}
+			return fmt.Errorf("%q only partly matches a paired device, and scterm cannot give a command that selects only that device: forget it from a terminal, where scterm asks first", query)
+		}
+		answer, err := ask(device + fmt.Sprintf("Forget %s? [y/N] ", fp.Short()))
+		if err != nil {
+			return err
+		}
+		if a := strings.ToLower(answer); a != "y" && a != "yes" {
+			fmt.Printf("Kept %s.\n", fp.Short())
+			return nil
+		}
 	}
 	if _, err := store.Remove(rec.Fingerprint); err != nil {
 		return err
 	}
-	fmt.Printf("Forgot %s. Its own list still names this computer until it is removed there.\n", rec.Name)
+	if exact {
+		fmt.Print(device)
+	}
+	fmt.Printf("Forgot %s. Its own list still names this computer until it is removed there.\n", fp.Short())
 	return nil
+}
+
+// forgetDamaged removes the pairings whose identity does not parse, once they
+// are shown, as data, and the user agrees; with no terminal to ask on, it
+// refuses. Each goes by its identity as stored, which Remove matches exactly,
+// so no pairing whose identity parses can go with them.
+func forgetDamaged() error {
+	home, err := peerHome()
+	if err != nil {
+		return err
+	}
+	store := peer.OpenStore(home)
+	recs, err := store.All()
+	if err != nil {
+		return err
+	}
+	damaged := damagedPairings(recs)
+	if len(damaged) == 0 {
+		fmt.Println("No pairing has an identity that does not parse: there is nothing to forget.")
+		return nil
+	}
+	count, the, them := damagedWords(len(damaged))
+	shown := count + ":\n" + damagedData(damaged)
+	if !interactive() {
+		fmt.Print(shown)
+		return fmt.Errorf("%s: forget %s from a terminal, where scterm asks first", count, them)
+	}
+	answer, err := ask(shown + "Forget " + the + "? [y/N] ")
+	if err != nil {
+		return err
+	}
+	if a := strings.ToLower(answer); a != "y" && a != "yes" {
+		fmt.Printf("Kept %s.\n", the)
+		return nil
+	}
+	for _, rec := range damaged {
+		if _, err := store.Remove(rec.Fingerprint); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("Forgot %s. A device keeps this computer in its own list until it is removed there.\n", the)
+	return nil
+}
+
+// namesExactly reports whether query is a paired device's whole name
+// (ignoring case) or its whole identity, rather than the start of either.
+func namesExactly(rec peer.Record, query string) bool {
+	if strings.EqualFold(rec.Name, query) {
+		return true
+	}
+	compact := strings.ToLower(strings.ReplaceAll(query, "-", ""))
+	if strings.EqualFold(rec.Fingerprint, compact) {
+		return true
+	}
+	fp, err := rec.ID()
+	return err == nil && strings.EqualFold(strings.ReplaceAll(fp.Short(), "-", ""), compact)
 }
 
 func describeGrants(grants []string) string {
@@ -176,9 +507,11 @@ func newPeerSession(query string, cfg config) (*session, error) {
 		VideoCodecs:  []string{"h264"},
 		AudioCodecs:  audioCodecPreference(cfg.audioCodec),
 	}
-	ps, err := client.Connect(rec.Host, rec.Port, pin, req)
+	ps, err := connectPeer(store, rec, req, func(host string, port int) (*peer.Session, error) {
+		return client.Connect(host, port, pin, req)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("connecting to %s at %s: %w", rec.Name, net.JoinHostPort(rec.Host, strconv.Itoa(rec.Port)), err)
+		return nil, err
 	}
 	s := &session{peer: ps, video: ps.Video, audio: ps.Audio, deviceName: rec.Name}
 	if d := ps.Welcome.Device; d != nil && d.Name != "" {
@@ -191,14 +524,17 @@ func newPeerSession(query string, cfg config) (*session, error) {
 	if cfg.control && canControl {
 		s.control = ps.Control()
 	}
-	name := s.deviceName
+	// The notices below carry the target's own text (its name, the holder of
+	// the lease, a refusal), which stderr and the replay at exit print as it
+	// is: their control characters are taken out.
+	name := cleanText(s.deviceName)
 	ps.Start(peer.Events{
 		Lease: func(state, holder string) {
 			switch {
 			case state == peer.LeaseHeld:
-				fmt.Fprintf(stderrWriter(), "scterm: this computer has control of %s\n", name)
+				noticef("scterm: this computer has control of %s\n", name)
 			case holder != "":
-				fmt.Fprintf(stderrWriter(), "scterm: %s took control of %s; this computer is viewing (--takeover takes it back)\n", holder, name)
+				noticef("scterm: %s took control of %s; this computer is viewing (--takeover takes it back)\n", cleanText(holder), name)
 			}
 		},
 		Error: func(code, message, controlType string) {
@@ -206,7 +542,7 @@ func newPeerSession(query string, cfg config) (*session, error) {
 				logOnce(fmt.Sprintf("scterm: input ignored: another device has control of %s (--takeover takes it)\n", name))
 				return
 			}
-			fmt.Fprintf(stderrWriter(), "scterm: %s refused %s: %s\n", name, controlType, message)
+			noticef("scterm: %s refused %s: %s\n", name, cleanText(controlType), cleanText(message))
 		},
 	})
 	switch {

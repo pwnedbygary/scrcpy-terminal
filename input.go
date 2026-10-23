@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
+
+	"scterm/peer"
 )
 
 // ---------------------------------------------------------------------------
@@ -16,49 +21,411 @@ import (
 func (a *app) inputLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: input loop panic: %v\n", r)
+			noticef("scterm: input loop panic: %v\n", r)
 		}
 	}()
 	buf := make([]byte, 4096)
 	pend := make([]byte, 0, 4096)
+	var dec inputDecoder
+	emit := func(ev []byte) {
+		a.events <- inputEvent{kind: evBytes, buf: ev}
+	}
 	for {
-		if len(pend) == 0 || len(pend) > 1 || pend[0] != 0x1b {
-			// normal path: block until readable
-			if !waitReadable(500 * 1000) {
-				continue
-			}
-			n, err := os.Stdin.Read(buf)
-			if err != nil {
-				return
-			}
-			pend = append(pend, buf[:n]...)
-		} else {
-			// pend == [ESC]: short window to catch a following sequence byte
-			if !waitReadable(25 * 1000) {
-				a.events <- inputEvent{kind: evBytes, buf: []byte{0x1b}}
-				pend = pend[:0]
-				continue
-			}
-			n, err := os.Stdin.Read(buf)
-			if err != nil {
-				return
-			}
-			pend = append(pend, buf[:n]...)
+		if !waitReadable(dec.wait(pend).Microseconds()) {
+			pend = dec.expire(a, pend, emit)
+			continue
 		}
-		for len(pend) > 0 {
-			if dbgControl != "" {
-				fmt.Fprintf(os.Stderr, "scterm: raw % x\n", pend)
-			}
-			ev, consumed := a.decodeInput(pend)
-			if consumed == 0 {
-				break
-			}
-			pend = pend[consumed:]
-			if ev != nil {
-				a.events <- inputEvent{kind: evBytes, buf: ev}
-			}
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			return
+		}
+		pend = dec.feed(a, append(pend, buf[:n]...), emit)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// bracketed paste: while the terminal UI runs, the terminal sends a paste
+// between pasteStart and pasteEnd (shellInit turns the mode on), so a paste is
+// one event. It goes to the device as one paste, and nothing in it is read as
+// a key or a shortcut, except Ctrl+C (raw mode reads it as a byte), which
+// cancels it: the way out of a paste whose end marker never comes. What
+// follows the Ctrl+C is dropped up to the paste's end marker, however late
+// that comes; where it never comes, Ctrl+C pressed again ends the dropping
+// (see feed).
+// ---------------------------------------------------------------------------
+
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+	ctrlC      = 0x03
+)
+
+// maxPasteBytes is the longest paste sent: what one set-clipboard message
+// carries. A longer one is dropped, and a notice says so.
+const maxPasteBytes = clipboardTextMaxBytes
+
+// maxTypedPasteBytes is the longest paste sent as injected text, where the
+// device clipboard cannot take it: a peer's helper backend then types it key
+// by key, pressing Enter at each line break, and nothing stops it once it is
+// sent. 4096 bytes holds a long URL, an SSH public key or a page of text, in
+// at most 14 messages. A longer paste is not sent, and a notice says so.
+const maxTypedPasteBytes = 4096
+
+// What the input loop waits for (inputDecoder.wait) besides input.
+const (
+	// escWait is how long an Esc waits for what follows it before it is
+	// the Esc key; the rest of an escape sequence comes in the same write.
+	escWait = 25 * time.Millisecond
+	// pasteHintAfter is how long a paste can stay unfinished before a
+	// notice says that Ctrl+C cancels it, and how long after a cancel what
+	// follows can be dropped before one says that Ctrl+C stops that. Each
+	// comes back every pasteHintEvery, so it stays up for as long as that
+	// lasts.
+	pasteHintAfter = 2 * time.Second
+	pasteHintEvery = noticeShowFor / 2
+	// inputPoll is the longest wait for input.
+	inputPoll = 500 * time.Millisecond
+)
+
+// inputDecoder decodes what the terminal sends into input events. From one
+// read to the next it keeps the state of a paste (dropped as too long to send,
+// with how many bytes of it so far; or cancelled), when the next notice on how
+// Ctrl+C gets out of it is due, and when the last read came and how much was
+// left over after it.
+type inputDecoder struct {
+	dropping   bool
+	dropped    int
+	discarding bool         // what follows a cancelled paste's Ctrl+C is dropped
+	warned     bool         // since the cancel, a notice has said that keys are dropped
+	hintAt     int64        // while a paste is unfinished or discarded, when the next Ctrl+C notice is due; else 0
+	lastRead   int64        // when the last read came (see clock)
+	left       int          // how many bytes the last feed or expire left over; the next read comes after them
+	now        func() int64 // the clock; nil is the real one
+}
+
+// inputClockStart is where the decoder's real clock starts. It holds a reading
+// of the monotonic clock, so the time since then goes on as time does whatever
+// the system time is set to, and setting it moves none of the deadlines.
+var inputClockStart = time.Now()
+
+// clock is the time now, in nanoseconds since inputClockStart.
+func (d *inputDecoder) clock() int64 {
+	if d.now != nil {
+		return d.now()
+	}
+	return int64(time.Since(inputClockStart))
+}
+
+// feed decodes the events at the front of pend, hands each to emit, and
+// returns what is left: the start of an event that a later read completes.
+// The input loop calls it with each read, added to what the one before left.
+// While a cancelled paste is discarded, a read of nothing but Ctrl+C, as a key
+// press is, ends that at once: the way out where the paste's end marker never
+// comes. A Ctrl+C read with other bytes, or in a run of more than 4, is more
+// of the paste, since a terminal writes a paste in large pieces and a key
+// typed after it comes after its end marker.
+func (d *inputDecoder) feed(a *app, pend []byte, emit func([]byte)) []byte {
+	d.lastRead = d.clock()
+	if d.discarding && onlyCtrlC(pend[min(d.left, len(pend)):]) {
+		d.discarding, d.hintAt = false, 0
+		pasteNoticef("scterm: keys no longer dropped\n")
+		pend = pend[:0]
+	}
+	for len(pend) > 0 {
+		if dbgControl != "" {
+			fmt.Fprintf(os.Stderr, "scterm: raw %s\n", d.logged(pend))
+		}
+		ev, n := d.decode(a, pend)
+		if n == 0 {
+			break
+		}
+		pend = pend[n:]
+		if ev != nil {
+			emit(ev)
 		}
 	}
+	d.left = len(pend)
+	return pend
+}
+
+// onlyCtrlC reports whether read is nothing but Ctrl+C, 1 to 4 times, as key
+// presses are: a read holds more than one only when they come faster than the
+// input loop reads, and a longer run is more of a paste.
+func onlyCtrlC(read []byte) bool {
+	for _, c := range read {
+		if c != ctrlC {
+			return false
+		}
+	}
+	return len(read) > 0 && len(read) <= 4
+}
+
+// decode is decodeInput, except that a bracketed paste is one event, its
+// markers included, however many reads it spans, and that an Esc just before
+// one is the Esc key. A paste longer than maxPasteBytes is not kept: it is
+// dropped as it comes in. A paste with a Ctrl+C in it is cancelled.
+func (d *inputDecoder) decode(a *app, pend []byte) ([]byte, int) {
+	switch {
+	case d.discarding:
+		return nil, d.discard(pend)
+	case d.dropping:
+		return nil, d.drop(a, pend)
+	}
+	body, ok := bytes.CutPrefix(pend, []byte(pasteStart))
+	if !ok {
+		return d.decodeKey(a, pend)
+	}
+	end := bytes.Index(body, []byte(pasteEnd))
+	if c := ctrlCBefore(body, end); c >= 0 {
+		return nil, len(pasteStart) + d.cancel(c)
+	}
+	if end >= 0 && end <= maxPasteBytes {
+		d.hintAt = 0
+		n := len(pasteStart) + end + len(pasteEnd)
+		return pend[:n], n
+	}
+	if d.hintAt == 0 {
+		d.hintAt = d.lastRead + int64(pasteHintAfter)
+	}
+	if len(body) < maxPasteBytes+len(pasteEnd) {
+		return nil, 0 // the rest of the paste is still to come
+	}
+	d.dropping, d.dropped = true, 0
+	return nil, len(pasteStart) + d.drop(a, body)
+}
+
+// decodeKey is decodeInput, but an Esc followed by a paste's start marker is
+// the Esc key, not an Alt chord with the marker's Esc, and while what follows
+// an Esc could still be the start of that marker, it waits for the rest
+// (for escWait at most: see expire).
+func (d *inputDecoder) decodeKey(a *app, pend []byte) ([]byte, int) {
+	if pend[0] == 0x1b && len(pend) > 1 {
+		if bytes.HasPrefix(pend[1:], []byte(pasteStart)) {
+			return pend[:1], 1
+		}
+		if escWaiting(pend) {
+			return nil, 0
+		}
+	}
+	return a.decodeInput(pend)
+}
+
+// escWaiting reports whether pend is an Esc that waits for what follows it:
+// alone, or with what could still become a paste's start marker.
+func escWaiting(pend []byte) bool {
+	return len(pend) > 0 && len(pend) <= len(pasteStart) && pend[0] == 0x1b &&
+		bytes.HasPrefix([]byte(pasteStart), pend[1:])
+}
+
+// ctrlCBefore is where the first Ctrl+C in b is, before the end marker at end
+// (-1: not in b), or -1 when there is none.
+func ctrlCBefore(b []byte, end int) int {
+	if end >= 0 {
+		b = b[:end]
+	}
+	return bytes.IndexByte(b, ctrlC)
+}
+
+// cancel drops the paste whose Ctrl+C is at c in what is left of it: what
+// comes before, and the Ctrl+C, are taken now, and what comes after is
+// dropped up to the paste's end marker, however late that comes (or until
+// Ctrl+C is pressed again: see feed). A paste that holds a Ctrl+C character
+// is so dropped whole, not typed.
+func (d *inputDecoder) cancel(c int) int {
+	d.dropping, d.discarding, d.warned, d.hintAt = false, true, false, d.lastRead+int64(pasteHintAfter)
+	pasteNoticef("scterm: paste cancelled by Ctrl+C\n")
+	return c + 1
+}
+
+// discard takes what follows a cancelled paste's Ctrl+C, up to and including
+// its end marker. As in drop, the last bytes stay in case they begin the
+// marker. Once a notice has said that keys are dropped, the end marker
+// replaces it with one saying that the paste ended, since a Ctrl+C pressed on
+// its advice would now reach the device.
+func (d *inputDecoder) discard(pend []byte) int {
+	end := bytes.Index(pend, []byte(pasteEnd))
+	if end < 0 {
+		return max(len(pend)-(len(pasteEnd)-1), 0)
+	}
+	if d.warned {
+		pasteNoticef("scterm: paste ended: keys no longer dropped\n")
+	}
+	d.discarding, d.hintAt = false, 0
+	return end + len(pasteEnd)
+}
+
+// drop takes the bytes of a paste too long to send, up to and including its
+// end marker. Until the marker comes, the last bytes stay in case they are its
+// beginning; so while dropping, at least that many are left over, never a
+// lone Esc that the input loop would time out as a key.
+func (d *inputDecoder) drop(a *app, pend []byte) int {
+	end := bytes.Index(pend, []byte(pasteEnd))
+	if c := ctrlCBefore(pend, end); c >= 0 {
+		return d.cancel(c)
+	}
+	if end < 0 {
+		n := max(len(pend)-(len(pasteEnd)-1), 0)
+		d.dropped += n
+		return n
+	}
+	d.dropped += end
+	d.dropping, d.hintAt = false, 0
+	if a.ctrl != nil { // without control no paste is sent, so none is missed
+		pasteNoticef("scterm: paste not sent: %d bytes, more than the %d one paste can carry\n", d.dropped, maxPasteBytes)
+	}
+	return end + len(pasteEnd)
+}
+
+// wait is how long the input loop waits for its next read before it calls
+// expire: until the next deadline, and inputPoll at most.
+func (d *inputDecoder) wait(pend []byte) time.Duration {
+	at, ok := d.deadline(pend)
+	if !ok {
+		return inputPoll
+	}
+	return min(max(time.Duration(at-d.clock()), 0), inputPoll)
+}
+
+// deadline is when expire next has something to do, if it has: say that
+// Ctrl+C cancels an unfinished paste, or that it stops the dropping after a
+// cancelled one, or send an Esc that nothing followed.
+func (d *inputDecoder) deadline(pend []byte) (int64, bool) {
+	switch {
+	case d.hintAt != 0:
+		return d.hintAt, true
+	case escWaiting(pend):
+		return d.lastRead + int64(escWait), true
+	}
+	return 0, false
+}
+
+// expire does what is due when no read came by the deadline, and returns what
+// is left of pend. A notice says (again) that Ctrl+C cancels an unfinished
+// paste, or that it stops the dropping after a cancelled one; an Esc that
+// nothing followed is the Esc key, and with the start of a sequence after it,
+// decodes as decodeInput decodes it.
+func (d *inputDecoder) expire(a *app, pend []byte, emit func([]byte)) []byte {
+	at, ok := d.deadline(pend)
+	now := d.clock()
+	if !ok || now < at {
+		return pend
+	}
+	switch {
+	case d.hintAt != 0:
+		d.hintAt = now + int64(pasteHintEvery)
+		if d.discarding {
+			d.warned = true
+			pasteNoticef("scterm: Ctrl+C stops it: keys dropped until the paste ends\n")
+		} else {
+			pasteNoticef("scterm: Ctrl+C cancels the unfinished paste\n")
+		}
+		return pend
+	case len(pend) == 1:
+		emit([]byte{0x1b})
+		d.left = 0
+		return pend[:0]
+	}
+	for len(pend) > 0 {
+		ev, n := a.decodeInput(pend)
+		if n == 0 {
+			break
+		}
+		pend = pend[n:]
+		if ev != nil {
+			emit(ev)
+		}
+	}
+	d.left = len(pend)
+	return pend
+}
+
+// logged is pend as the debug log shows it: its bytes in hex, but of a paste
+// only how long it is, never its text.
+func (d *inputDecoder) logged(pend []byte) string {
+	if d.dropping || d.discarding {
+		return fmt.Sprintf("(%d bytes of a paste)", len(pend))
+	}
+	if i := bytes.Index(pend, []byte(pasteStart)); i >= 0 {
+		return fmt.Sprintf("% x (then %d bytes from a paste)", pend[:i], len(pend)-i)
+	}
+	return fmt.Sprintf("% x", pend)
+}
+
+// isPaste reports whether b is a paste as inputDecoder hands it on. No other
+// event is that long and bracketed by both markers.
+func isPaste(b []byte) bool {
+	return len(b) >= len(pasteStart)+len(pasteEnd) &&
+		bytes.HasPrefix(b, []byte(pasteStart)) && bytes.HasSuffix(b, []byte(pasteEnd))
+}
+
+// pasteText is the text of a paste as the device should get it. Terminals
+// send each line break in a paste as CR (some as CR LF), and Android text
+// breaks lines at LF. Tabs stay; the other C0 control characters and DEL, and
+// bytes that are not UTF-8, are left out: in a text field they are noise, and
+// typed as text they would press keys. C1 characters (U+0080 to U+009F) are
+// kept.
+func pasteText(b []byte) string {
+	s := string(b[len(pasteStart) : len(b)-len(pasteEnd)])
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.ToValidUTF8(s, "")
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\n' && r != '\t' || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// paste sends a paste to the device as one paste: onto the device clipboard
+// and pasted from it where the device takes clipboard text from this computer,
+// and as injected text (in as many messages as that takes) where it does not.
+// A peer takes it only from the holder of its input lease (and says so only
+// once per run), so without the lease it is not sent, and the notice says why.
+func (a *app) paste(b []byte) {
+	if a.ctrl == nil {
+		return
+	}
+	text := pasteText(b)
+	if text == "" {
+		return
+	}
+	if a.sess != nil && a.sess.peer != nil && a.sess.peer.Lease() != peer.LeaseHeld {
+		pasteNoticef("scterm: paste not sent: no control (--takeover takes it)\n")
+		return
+	}
+	clip := a.clipboardPaste()
+	if !clip && len(text) > maxTypedPasteBytes {
+		pasteNoticef("scterm: paste not sent: %d bytes, at most %d typed\n", len(text), maxTypedPasteBytes)
+		return
+	}
+	var err error
+	if clip {
+		err = a.ctrl.setClipboard(text, true)
+	} else {
+		err = a.ctrl.injectText(text)
+	}
+	if err != nil {
+		noticef("scterm: paste: %v\n", err)
+		return
+	}
+	if n := utf8.RuneCountInString(text); n == 1 {
+		pasteNoticef("scterm: pasted 1 character\n")
+	} else {
+		pasteNoticef("scterm: pasted %d characters\n", n)
+	}
+}
+
+// clipboardPaste reports whether a paste can go through the device clipboard:
+// always with the scrcpy server, and with a peer whose pairing grants the
+// clipboard and whose backend can set it (the target refuses it otherwise).
+func (a *app) clipboardPaste() bool {
+	if a.sess == nil || a.sess.peer == nil {
+		return true
+	}
+	w := a.sess.peer.Welcome
+	return slices.Contains(w.Grants, peer.GrantClipboard) &&
+		w.Caps != nil && slices.Contains(w.Caps.Control, "set_clipboard")
 }
 
 // waitReadable waits (up to usec microseconds) for stdin to become readable.
@@ -93,11 +460,26 @@ func (a *app) decodeInput(pend []byte) ([]byte, int) {
 			return pend[:want], want
 		}
 		return nil, 0
+	case c == 0x0d && len(pend) > 1 && pend[1] == 0x0a:
+		// One Enter from a terminal that sends CR LF: one press, not a press
+		// on CR and another on LF (which the device gets as Ctrl+J).
+		return []byte{c}, 2
 	case c == 0x0d || c == 0x0a:
 		return []byte{c}, 1
 	case c == 0x7f:
 		return []byte{0x7f}, 1
 	case c < 0x20:
+		return []byte{c}, 1
+	case c >= 0x80:
+		// A character beyond ASCII is its whole UTF-8 sequence, which the
+		// next read may complete. A byte that is not UTF-8 goes on alone, as
+		// before, and nothing types it.
+		if !utf8.FullRune(pend) {
+			return nil, 0
+		}
+		if _, n := utf8.DecodeRune(pend); n > 1 {
+			return pend[:n], n
+		}
 		return []byte{c}, 1
 	default:
 		return []byte{c}, 1
@@ -128,12 +510,24 @@ func escSeqLen(b []byte) int {
 		}
 		return 0
 	case 'O': // SS3
-		if len(b) >= 3 {
-			return 3
+		if len(b) < 3 {
+			return 0
 		}
-		return 0
+		if b[2] == 0x1b {
+			return 2 // Alt+O: an Esc does not end SS3, it starts what follows
+		}
+		return 3
 	default:
-		// Alt+key: ESC + char
+		// Alt+key: ESC + char, all of a character beyond ASCII, so none of
+		// its bytes is left over to be read as a key of its own
+		if b[1] >= 0x80 {
+			if !utf8.FullRune(b[1:]) {
+				return 0
+			}
+			if _, n := utf8.DecodeRune(b[1:]); n > 1 {
+				return 1 + n
+			}
+		}
 		return 2
 	}
 }
@@ -143,11 +537,20 @@ func escSeqLen(b []byte) int {
 func (a *app) handleInput(b []byte) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: input ignored: %v (bytes % x)\n", r, b)
+			if isPaste(b) { // neither its text nor its length: a paste can hold a password
+				noticef("scterm: input ignored: %v (a paste)\n", r)
+				return
+			}
+			noticef("scterm: input ignored: %v (bytes % x)\n", r, b)
 		}
 	}()
 	if len(b) == 0 {
 		return
+	}
+	// An armed overlay Quit is for the press right after it; any other press
+	// drops it.
+	if isPress(b) {
+		defer a.dropQuitArm(a.pendingQuit())
 	}
 	// global keys (work even when grabbed, before the keyboard consumes input).
 	// NOTE: no Ctrl-Q! Zellij owns it (quits the session) — use Alt+Q.
@@ -163,6 +566,12 @@ func (a *app) handleInput(b []byte) {
 			a.toggleKeyboard()
 			return
 		}
+	}
+	// A paste, or a typed character beyond ASCII, is text the menu has no row
+	// for: it closes the menu, as such a key does, and is not typed.
+	if a.menuOpen && (isPaste(b) || isTypedRune(b)) {
+		a.closeMenu()
+		return
 	}
 	// menu open: consume keys for its rows (modal, like the software keyboard)
 	if a.menuOpen && a.menuKeyInput(b) {
@@ -183,7 +592,7 @@ func (a *app) handleInput(b []byte) {
 		a.toggleGrab()
 		return
 	}
-	// Alt+letter: the mnemonic device actions (appkeys.go appMnemonicOps).
+	// Alt+letter: the mnemonic device actions (actions.go appMnemonicOps).
 	// These are the primary bindings on a phone keyboard, which has Alt but no
 	// F-row. They run before the case-sensitive locals below so that each
 	// chord has exactly one meaning: Alt+M is LOCAL mute, not device mute, and
@@ -196,13 +605,13 @@ func (a *app) handleInput(b []byte) {
 			case "toolbar":
 				a.toggleMenu()
 			case "screenshot":
-				a.screenshot()
+				a.screenshotKey(time.Now())
 			case "resetvideo":
 				// Keyframe requests are the one action that silently does
 				// nothing without a control socket; say so, as the old
 				// dedicated handler did.
 				if a.ctrl == nil {
-					fmt.Fprintf(stderrWriter(), "scterm: control disabled (no -control)\n")
+					noticef("scterm: Refresh video needs control, and this session is view only\n")
 					return
 				}
 				a.applyAppOp(op)
@@ -250,6 +659,16 @@ func (a *app) handleInput(b []byte) {
 		a.handleByte(b[0])
 		return
 	}
+	// Text: a paste goes as one paste, and a typed character beyond ASCII,
+	// which no Android key types, as text.
+	if isPaste(b) {
+		a.paste(b)
+		return
+	}
+	if isTypedRune(b) {
+		a.injectRune(b)
+		return
+	}
 	// Sequences: arrows, home/end, etc.
 	if code, meta, ok := seqKeyMap(b); ok {
 		a.sendAndroidKeyMeta(code, meta)
@@ -259,59 +678,204 @@ func (a *app) handleInput(b []byte) {
 
 func (a *app) toggleGrab() {
 	a.setMouse(!a.grabbed)
+	if !a.grabbed {
+		// With mouse reporting off no click can reach the bar, and no motion
+		// will say the pointer has left it.
+		a.hideBar()
+	}
 	a.refreshStatus()
 }
 
-// toggleLocalMute mutes/unmutes the local audio stream (Alt+M).
+// toggleLocalMute mutes the local audio stream, or brings back the volume it
+// had before the mute (Alt+M).
 func (a *app) toggleLocalMute() {
-	if a.audio == nil || a.audio.err != nil {
-		return // no sink to mute
+	if !a.localVolumeWorks() {
+		return
 	}
-	if a.audio.gainPercent() == 0 {
-		a.audio.setGain(100)
-	} else {
-		a.audio.setGain(0)
-	}
+	a.audio.toggleMute()
 	a.refreshStatus()
 }
 
 // adjustLocalVolume changes local playback volume (Alt+- / Alt+=).
 func (a *app) adjustLocalVolume(delta int) {
-	if a.audio == nil || a.audio.err != nil {
-		return // no sink to adjust
+	if !a.localVolumeWorks() {
+		return
 	}
 	a.audio.setGain(a.audio.gainPercent() + delta)
 	a.refreshStatus()
 }
 
-// screenshot saves the most recent rendered canvas as PPM (Alt+S).
-func (a *app) screenshot() {
-	if a.tui == nil || !a.tui.running {
-		return // headless mode or before shell init: nothing to capture
+// localVolumeWorks reports whether the volume keys may change the local
+// volume: the session's sound has not stopped, and there is a sink that has
+// not failed. Once the sound has stopped, the sink is closed (playAudio), and
+// the first key pressed says why nothing changed; the status row says audio
+// off from then on.
+func (a *app) localVolumeWorks() bool {
+	if a.stream.soundStopped() != nil {
+		if !a.soundOffSaid {
+			a.soundOffSaid = true
+			notice("scterm: the sound is off, so its volume stays as it is\n")
+		}
+		return false
+	}
+	return a.audio != nil && a.audio.failure() == nil // a sink to change
+}
+
+// shotWait bounds how long a screenshot waits for the video goroutine before
+// it saves the terminal's picture instead. The answer normally comes at once,
+// from the frame the decoder holds. Where a read cannot be cut short, it
+// comes with the next frame: the server's encoder repeats a frame 100 ms
+// after it (ten times at most, so a still screen soon sends none), and ten
+// such intervals leave room for a slow link.
+var shotWait = time.Second
+
+// screenshot saves the device's picture at the stream's resolution as a PNG
+// (Alt+S). The video goroutine scales the frame; the PNG is encoded and written
+// on a goroutine of its own, so neither the decoder nor the run loop waits.
+func (a *app) screenshot() { a.takeShot(time.Now()) }
+
+// shotKeyRepeat is how soon after an Alt+S key press the next one is taken for
+// the key's repeat. A terminal sends a held key as more presses: at the usual
+// rates, the first repeat comes about 250 to 600 ms after the press, the rest
+// 25 to 50 ms apart. 200 ms is four times the longest of those gaps, room for
+// a slow link, and shorter than the first repeat's delay. So a held Alt+S
+// usually takes one shot or two: the press's, and the first repeat's unless
+// the press's is still in flight then. With repeats 200 ms or more apart, each
+// one takes a shot of its own, unless one is still in flight then. Of two
+// presses less than 200 ms apart, the second takes none.
+var shotKeyRepeat = 200 * time.Millisecond
+
+// screenshotKey is an Alt+S key press at now. One within shotKeyRepeat of the
+// Alt+S key press before it is the key's repeat, and takes no screenshot.
+// Presses from the action bar and the menu are never repeats (screenshot).
+func (a *app) screenshotKey(now time.Time) {
+	repeat := now.Sub(a.shotKeyAt) < shotKeyRepeat
+	a.shotKeyAt = now
+	if !repeat {
+		a.takeShot(now)
+	}
+}
+
+// takeShot is screenshot, with the time that names the file. The channel is
+// closed once the shot is saved or dropped. One shot is taken at a time: a
+// press while one is in flight, from its press until it is saved or dropped,
+// takes none of its own and gets that shot's channel. So Alt+S held down
+// (the terminal repeats the key) holds the memory of one shot, not of one
+// per repeat, and the shot's own notice is the only one. Called on the run
+// loop.
+func (a *app) takeShot(at time.Time) <-chan struct{} {
+	done := make(chan struct{})
+	if a.tui == nil {
+		close(done)
+		return done // headless mode: nothing to capture
+	}
+	if a.stream != nil && a.stream.shotDone != nil {
+		select {
+		case <-a.stream.shotDone:
+		default:
+			return a.stream.shotDone // the shot in flight answers this press
+		}
 	}
 	a.tui.mu.Lock()
-	pw, ph := a.tui.cols, a.tui.rows*2
-	n := pw * ph * 4
-	var rgb []byte
-	// The length check alone is not enough: a resize can keep the same cell
-	// count, and a differently-shaped snapshot would be written as a sheared
-	// PPM. lastW/lastH record the geometry the snapshot was taken at.
-	if n > 0 && len(a.tui.lastRGB) == n && a.tui.lastW == pw && a.tui.lastH == ph {
-		rgb = make([]byte, n)
-		copy(rgb, a.tui.lastRGB[:n])
+	if !a.tui.running {
+		a.tui.mu.Unlock()
+		close(done)
+		return done // before shell init, or after the terminal was given back
 	}
+	canvas := a.canvasShot()
 	a.tui.mu.Unlock()
-	if rgb == nil {
-		fmt.Fprintf(stderrWriter(), "scterm: screenshot: no frame yet\n")
-		return
+	switch {
+	case a.sess != nil && a.sess.video == nil:
+		// As the placeholder says (placeholderText): video turned off, or a
+		// session that has none, as with a peer that grants no view.
+		if a.cfg.video {
+			noticef("scterm: screenshot: no video from %s\n", a.deviceName())
+		} else {
+			noticef("scterm: screenshot: the video is off\n")
+		}
+		close(done)
+		return done
+	case a.stream == nil || a.stream.frameCount.Load() == 0:
+		noticef("scterm: screenshot: no frame yet\n")
+		close(done)
+		return done
 	}
-	fn := fmt.Sprintf("scterm-%s.ppm", time.Now().Format("20060102-150405"))
-	if err := writePPMFile(fn, rgb, pw, ph); err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: screenshot: %v\n", err)
-		return
+	reply := a.stream.requestShot()
+	if reply == nil {
+		close(done)
+		return done // the video stream has ended, and with it the session
 	}
-	fmt.Fprintf(os.Stderr, "scterm: saved %s (%dx%d)\n", fn, pw, ph)
-	a.refreshStatus()
+	a.stream.shotDone = done
+	go func() {
+		defer close(done)
+		a.saveShot(at, reply, canvas)
+	}()
+	return done
+}
+
+// canvasShot copies the picture out of the terminal's canvas, without the
+// letterbox bars, or returns nil when there is no canvas of the current size.
+// Called with a.tui.mu held.
+func (a *app) canvasShot() *videoShot {
+	t := a.tui
+	cw, ch := t.cols, t.rows*2
+	// The length check alone is not enough: a resize can keep the same cell
+	// count, and a differently-shaped canvas would come out sheared. lastW and
+	// lastH record the geometry the canvas was drawn at.
+	if cw <= 0 || ch <= 0 || len(t.lastRGB) != cw*ch*4 || t.lastW != cw || t.lastH != ch {
+		return nil
+	}
+	w, h, x, y := fitPicture(cw, ch, a.frameW, a.frameH)
+	rgb := make([]byte, 0, w*h*4)
+	for row := y; row < y+h; row++ {
+		i := (row*cw + x) * 4
+		rgb = append(rgb, t.lastRGB[i:i+w*4]...)
+	}
+	return &videoShot{rgb: rgb, w: w, h: h}
+}
+
+// saveShot waits for the picture on reply and saves it, or after shotWait the
+// terminal's canvas. It saves nothing once the session is over: when the video
+// stream ends first, or the terminal UI has ended by the time it would save.
+func (a *app) saveShot(at time.Time, reply chan videoShot, canvas *videoShot) {
+	timer := time.NewTimer(shotWait)
+	defer timer.Stop()
+	var shot videoShot
+	late := false
+	select {
+	case got, ok := <-reply:
+		if !ok {
+			return
+		}
+		shot = got
+	case <-timer.C:
+		a.stream.cancelShot(reply)
+		late = true
+	}
+	a.tui.mu.Lock()
+	running := a.tui.running
+	a.tui.mu.Unlock()
+	switch {
+	case !running:
+		return
+	case shot.err != nil:
+		noticef("scterm: screenshot: %v\n", shot.err)
+		return
+	case late && canvas == nil:
+		noticef("scterm: screenshot: no frame yet\n")
+		return
+	case late:
+		shot = *canvas
+	}
+	name, err := writeShotPNG(at, shot.rgb, shot.w, shot.h)
+	switch {
+	case err != nil:
+		noticef("scterm: screenshot: %v\n", err)
+	case late:
+		noticef("scterm: saved %s (%dx%d) at the terminal's size, because no frame came from the device in time\n", name, shot.w, shot.h)
+	default:
+		noticef("scterm: saved %s (%dx%d)\n", name, shot.w, shot.h)
+	}
 }
 
 func (a *app) sendAndroidKey(code uint32) {
@@ -323,7 +887,7 @@ func (a *app) sendAndroidKeyMeta(code uint32, meta uint32) {
 		return
 	}
 	if err := a.ctrl.injectKey(code, meta); err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: inject key: %v\n", err)
+		noticef("scterm: inject key: %v\n", err)
 	}
 }
 
@@ -378,7 +942,28 @@ func (a *app) injectChar(c byte) {
 	}
 	// Other printable: text injection.
 	if err := a.ctrl.injectText(string(c)); err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: inject text: %v\n", err)
+		noticef("scterm: inject text: %v\n", err)
+	}
+}
+
+// isTypedRune reports whether b is one typed character beyond ASCII, as
+// decodeInput hands it on: one whole UTF-8 sequence and nothing else.
+func isTypedRune(b []byte) bool {
+	if len(b) < 2 || b[0] < 0x80 {
+		return false
+	}
+	_, n := utf8.DecodeRune(b)
+	return n == len(b)
+}
+
+// injectRune sends a typed character beyond ASCII as text, as the browser's
+// typing does.
+func (a *app) injectRune(b []byte) {
+	if a.ctrl == nil {
+		return
+	}
+	if err := a.ctrl.injectText(string(b)); err != nil {
+		noticef("scterm: inject text: %v\n", err)
 	}
 }
 
@@ -559,52 +1144,81 @@ func seqKeyMap(b []byte) (uint32, uint32, bool) {
 // mouse: SGR escape sequences ESC[<b;x;yM / m
 // ---------------------------------------------------------------------------
 
-func (a *app) mouseEvent(b []byte) bool {
+// leftPress reports whether an SGR mouse event is the left button going down.
+// Drag motion (bit 32), wheel-up (64; wheel-down is 65) and buttons 8 to 11
+// (128 to 131) also arrive as "M", and must not press an overlay button.
+func leftPress(pressed bool, btnRaw int) bool {
+	return pressed && btnRaw&(0x07|32|64|128) == 0
+}
+
+// sgrMouse parses an SGR mouse report, ESC[<b;x;y ending in M for a press or
+// motion and in m for a release. The cell is 1-based.
+func sgrMouse(b []byte) (btnRaw, cellX, cellY int, pressed, ok bool) {
 	s := string(b)
 	if !strings.HasPrefix(s, "\x1b[<") {
-		return false
+		return 0, 0, 0, false, false
 	}
-	// parse b;x;y (M = press/motion, m = release)
-	var parts []string
 	end := strings.IndexByte(s, 'M')
-	pressed := true
+	pressed = true
 	if end < 0 {
 		end = strings.IndexByte(s, 'm')
 		pressed = false
 	}
 	if end < 0 {
-		return false
+		return 0, 0, 0, false, false
 	}
-	parts = strings.Split(s[3:end], ";")
+	parts := strings.Split(s[3:end], ";")
 	if len(parts) != 3 {
+		return 0, 0, 0, false, false
+	}
+	btnRaw, _ = strconv.Atoi(parts[0])
+	cellX, _ = strconv.Atoi(parts[1])
+	cellY, _ = strconv.Atoi(parts[2])
+	return btnRaw, max(cellX, 1), max(cellY, 1), pressed, true
+}
+
+// isPress reports whether decoded input presses something: any key, or a mouse
+// button or the wheel going down. Motion and releases do not.
+func isPress(b []byte) bool {
+	btnRaw, _, _, pressed, ok := sgrMouse(b)
+	return !ok || pressed && btnRaw&32 == 0
+}
+
+func (a *app) mouseEvent(b []byte) bool {
+	btnRaw, cellX, cellY, pressed, ok := sgrMouse(b)
+	if !ok {
 		return false
 	}
-	btnRaw, _ := strconv.Atoi(parts[0])
-	cellX, _ := strconv.Atoi(parts[1]) // 1-based
-	cellY, _ := strconv.Atoi(parts[2])
-	if cellX <= 0 {
-		cellX = 1
-	}
-	if cellY <= 0 {
-		cellY = 1
+
+	// A press while a drag is still down means the drag's release never
+	// arrived (let go outside the window, or dropped by a multiplexer). Lift
+	// the device finger first, so it is not left down and this press is
+	// handled as the new click it is rather than as part of that drag. It is
+	// lifted where the device last saw it: lifted here, it would be dragged
+	// across the screen on the way up.
+	if leftPress(pressed, btnRaw) && a.drag.isDown() {
+		at := a.drag.lastSent()
+		a.drag.setDown(false)
+		a.ctrl.touchRelease(at)
 	}
 
 	// Menu open: clicks on a row run it; clicks elsewhere are swallowed, so a
 	// stray click never reaches the device through the overlay.
 	if a.menuOpen {
-		if pressed && btnRaw&0x07 == 0 { // left button only
+		if leftPress(pressed, btnRaw) {
 			_, rows := termSize()
 			if item, ok := a.menuHitTest(cellX, cellY, rows); ok {
-				a.closeMenu()
-				a.menuAction(item.Op)
+				a.runMenuRow(item)
 			}
 		}
 		return true
 	}
 
 	// Keyboard open: clicks inside the keyboard area press keys, clicks
-	// above it pass through to the device (tap-through).
-	if a.kb != nil && a.kb.open {
+	// above it pass through to the device (tap-through). A drag that started
+	// on the video keeps going to the device until it is released, wherever
+	// the pointer is, or the device would be left with a finger down.
+	if a.kb != nil && a.kb.open && !a.drag.isDown() {
 		_, rows := termSize()
 		if dbgControl != "" {
 			fmt.Fprintf(stderrWriter(), "scterm: kb hit-test click (%d,%d) rows=%d open=%v\n", cellX, cellY, rows, a.kb.open)
@@ -614,7 +1228,7 @@ func (a *app) mouseEvent(b []byte) bool {
 			fmt.Fprintf(stderrWriter(), "scterm: kb hit-test (%d,%d) -> key=%v ok=%v\n", cellX, cellY, key.label, ok)
 		}
 		if ok {
-			if pressed && btnRaw&0x07 == 0 { // left button only
+			if leftPress(pressed, btnRaw) {
 				// flash the pressed key (we need its grid position: re-hit)
 				if kc, ok2 := a.kb.hitTestKeyCell(cellX, cellY, rows); ok2 {
 					a.kb.flash(kc.row, kc.col)
@@ -622,6 +1236,11 @@ func (a *app) mouseEvent(b []byte) bool {
 				a.kb.act(a, key)
 				a.refreshKeyboard()
 			}
+			return true
+		}
+		// The gap between two keys is still the keyboard: a near miss must
+		// not tap the device behind it.
+		if a.kb.coversRow(cellY, rows) {
 			return true
 		}
 	}
@@ -636,14 +1255,18 @@ func (a *app) mouseEvent(b []byte) bool {
 	// forwards it (1003), and otherwise a click or wheel, so the strip is
 	// discoverable even through a multiplexer that drops pure motion. A LEFT
 	// click on either of its rows runs a button (or is swallowed) before it
-	// can reach the device as a tap. Other buttons and the wheel keep their
-	// normal meaning -- right is Back, wheel scrolls -- even when they land on
-	// the strip, so the bar cannot hijack them.
+	// can reach the device as a tap, but only if the bar was on screen before
+	// the click: the click that wakes it is handled as if it were not there,
+	// so without hover reporting nothing runs a button nobody has seen. Other
+	// buttons and the wheel keep their normal meaning -- right is Back, wheel
+	// scrolls -- even when they land on the strip, so the bar cannot hijack
+	// them.
+	shown := a.barVisible()
 	if btnRaw&32 != 0 {
 		a.barPointerY = cellY
 	}
 	a.wakeBar()
-	if btn == 0 && a.barVisible() {
+	if btn == 0 && shown {
 		if a.barClick(cellX, cellY, pressed) {
 			return true
 		}
@@ -672,8 +1295,10 @@ func (a *app) mouseEvent(b []byte) bool {
 	switch btn {
 	case 0: // left
 		if pressed {
+			pos := a.posAt(cellX, cellY)
 			a.drag.setDown(true)
-			a.ctrl.touch(true, a.posAt(cellX, cellY))
+			a.drag.sent(pos)
+			a.ctrl.touch(true, pos)
 		} else {
 			a.drag.setDown(false)
 			a.ctrl.touchRelease(a.posAt(cellX, cellY))

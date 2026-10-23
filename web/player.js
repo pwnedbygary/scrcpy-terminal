@@ -20,6 +20,13 @@ const els = {
   state: document.getElementById("state"),
   toast: document.getElementById("toast"),
   ime: document.getElementById("ime"),
+  conn: document.getElementById("conn"),
+  connText: document.getElementById("conn-text"),
+  connDetail: document.getElementById("conn-detail"),
+  connRetry: document.getElementById("conn-retry"),
+  sound: document.getElementById("sound"),
+  soundChip: document.getElementById("sound-chip"),
+  barBtn: document.getElementById("bar-btn"),
 };
 
 const MSG_VIDEO = 0x01;
@@ -30,17 +37,49 @@ const VIDEO_HEADER = 16;
 const FMT_JPEG = 0;
 const FMT_RAW = 1;
 
+// TOAST_FADE_MS is the toast's fade-out in player.css. Once it has faded the
+// toast is emptied: it is a status region, and a line left in it would still
+// be there for a screen reader to come across.
+const TOAST_FADE_MS = 200;
+
 let toastTimer = 0;
 function toast(msg, ms) {
   els.toast.textContent = msg;
   els.toast.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => els.toast.classList.remove("show"), ms || 1600);
+  toastTimer = setTimeout(() => {
+    els.toast.classList.remove("show");
+    toastTimer = setTimeout(() => { els.toast.textContent = ""; }, TOAST_FADE_MS);
+  }, ms || 1600);
 }
 
 function setState(text, cls) {
   els.state.textContent = text;
   els.state.className = cls || "";
+}
+
+// ---------------------------------------------------------------------------
+// the action catalog
+//
+// protocol/fixtures/actions.json, the one definition of the app-level actions
+// (actions.go). The server puts it into index.html as a JSON block, and this
+// page builds its Alt+letter and F-key tables, its action bar and its controls
+// sheet from it, so none of them is a copy that could disagree with the
+// terminal's.
+// ---------------------------------------------------------------------------
+
+const CATALOG = readCatalog(document.getElementById("actions"));
+
+// readCatalog parses the catalog block. A page without one (index.html opened
+// as a file rather than served) gets an empty catalog: it still shows the
+// device and takes pointer and typed input, with no action bar or chords.
+function readCatalog(el) {
+  try {
+    const c = JSON.parse(el.textContent);
+    if (Array.isArray(c.device) && Array.isArray(c.local) && Array.isArray(c.views.webBar)) return c;
+  } catch (e) { /* missing or malformed: the empty catalog below */ }
+  console.warn("scterm: the page has no action catalog");
+  return { device: [], local: [], views: { webBar: [] } };
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +99,10 @@ class Net {
     // which is why the browser never got audio (the server only feeds PCM to a
     // client that asked for it with caps:"audio").
     this.onOpen = null;
+    this.onClose = null;
+    // ended: the server said "bye", so the session is over and a closed socket
+    // stays closed until reconnect() -- retrying would only find it gone.
+    this.ended = false;
     this.queue = [];
   }
 
@@ -92,6 +135,11 @@ class Net {
     ws.onmessage = (ev) => this.dispatch(ev);
     ws.onclose = () => {
       this.connected = false;
+      if (this.onClose) this.onClose();
+      if (this.ended) {
+        setState("session ended", "warn");
+        return;
+      }
       setState("reconnecting…", "warn");
       const wait = this.backoff;
       this.backoff = Math.min(this.backoff * 2, 4000);
@@ -104,6 +152,7 @@ class Net {
     if (typeof ev.data === "string") {
       let msg;
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.op === "bye") this.ended = true;
       const fn = this.handlers[msg.op];
       if (fn) fn(msg);
       return;
@@ -144,6 +193,14 @@ class Net {
     ws.send(JSON.stringify(obj));
     return true;
   }
+
+  // reconnect restarts the retry loop that a bye stopped. A socket that is
+  // still closing reconnects from its own onclose.
+  reconnect() {
+    this.ended = false;
+    this.backoff = 250;
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) this.connect();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +218,7 @@ class View {
     this.lastDraw = 0;
     this.fps = 0;
     this.errors = 0;   // frames that could not be decoded
+    this.errorAt = -Infinity; // when the last of them failed
     this.fitW = 0;     // element size last applied by fit()
     this.fitH = 0;
   }
@@ -169,9 +227,22 @@ class View {
   // displays with devicePixelRatio > 1
   viewport() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = Math.max(2, Math.min(Math.floor(window.innerWidth * dpr), 4096));
-    const h = Math.max(2, Math.min(Math.floor(window.innerHeight * dpr), 4096));
+    const box = this.layout();
+    const w = Math.max(2, Math.min(Math.floor(box.w * dpr), 4096));
+    const h = Math.max(2, Math.min(Math.floor(box.h * dpr), 4096));
     return { w, h };
+  }
+
+  // layout is the window's size in CSS pixels: the layout viewport, which the
+  // page's own content cannot change. On a page that can be zoomed a phone's
+  // innerWidth and innerHeight grow to take in whatever overflows it, and a
+  // canvas sized from them grew with them, without end.
+  layout() {
+    const root = typeof document !== "undefined" ? document.documentElement : null;
+    return {
+      w: (root && root.clientWidth) || window.innerWidth,
+      h: (root && root.clientHeight) || window.innerHeight,
+    };
   }
 
   // Size the canvas ELEMENT to the largest box that fits the window at the
@@ -186,7 +257,7 @@ class View {
   // size of the bars.
   fit() {
     const iw = this.canvas.width, ih = this.canvas.height;
-    const vw = window.innerWidth, vh = window.innerHeight;
+    const { w: vw, h: vh } = this.room();
     if (!iw || !ih || vw <= 0 || vh <= 0) return;
     const scale = Math.min(vw / iw, vh / ih);
     const w = Math.max(1, Math.round(iw * scale));
@@ -196,6 +267,22 @@ class View {
     this.fitH = h;
     this.canvas.style.width = w + "px";
     this.canvas.style.height = h + "px";
+  }
+
+  // room is the window less the safe-area insets (a notch, a home indicator):
+  // the page runs under them (viewport-fit=cover), and player.css keeps the
+  // canvas clear of them with its offsets, which this reads back.
+  room() {
+    const box = this.layout();
+    let t = 0, r = 0, b = 0, l = 0;
+    if (typeof getComputedStyle === "function") {
+      const s = getComputedStyle(this.canvas);
+      t = parseFloat(s.top) || 0;
+      r = parseFloat(s.right) || 0;
+      b = parseFloat(s.bottom) || 0;
+      l = parseFloat(s.left) || 0;
+    }
+    return { w: box.w - l - r, h: box.h - t - b };
   }
 
   push(frame) {
@@ -250,6 +337,7 @@ class View {
       })
       .catch(() => {
         this.errors++;
+        this.errorAt = performance.now();
         done();
       });
   }
@@ -294,7 +382,10 @@ class View {
 }
 
 // ---------------------------------------------------------------------------
-// audio: raw PCM into an AudioWorklet ring buffer
+// audio: raw PCM into the ring buffer of web/pcm-worklet.js, played by an
+// AudioWorklet or, on a page without one, a ScriptProcessorNode; and what the
+// sound chip says about it. web/audio_test.mjs lifts this section, up to the
+// input section, and runs it on its own.
 // ---------------------------------------------------------------------------
 
 class Pcm {
@@ -302,8 +393,22 @@ class Pcm {
     this.ctx = null;
     this.node = null;
     this.gain = null;
+    this.ring = null;     // the compatibility path's ring (a worklet holds its own)
     this.ready = false;
+    this.starting = null; // the start in flight, shared by every caller
+    // The last start failed. It is not retried by the packets or by every tap
+    // and key: the chip offers a retry, as does Alt+M (unlock).
     this.failed = false;
+    this.ended = false;   // the session is over (a bye): nothing to play until Reconnect
+    this.rate = 0;        // the context's sample rate
+    // How the sound plays: "worklet", "compat" (no AudioWorklet, so a
+    // ScriptProcessorNode drains the same ring, with a little more delay) or
+    // "none" (no Web Audio at all); "" until the first start.
+    this.mode = "";
+    this.heard = false;   // PCM has arrived from the server
+    this.armed = false;   // the gestures that can start the sound are listened for
+    this.unlocker = (ev) => this.unlock(ev);
+    this.onchange = null; // the page redraws the sound chip
     // Local playback gain (Alt+M / Alt+- / Alt+=). Kept here rather than only on
     // the node because the node is created asynchronously, on the first audio
     // packet -- muting before any sound has arrived still has to stick.
@@ -314,48 +419,214 @@ class Pcm {
   setLocalGain(v) {
     this.localGain = Math.max(0, Math.min(2, v));
     if (this.gain) this.gain.gain.value = this.localGain;
+    this.changed();
   }
 
-  async start() {
-    if (this.ready || this.failed) return;
+  get running() {
+    return !!this.ctx && this.ctx.state === "running";
+  }
+
+  // play takes one packet of PCM from the server. start() goes first so that
+  // the chip, redrawn when the first packet arrives, already knows the mode.
+  play(buf) {
+    this.start().then(() => this.push(buf));
+    if (!this.heard) {
+      this.heard = true;
+      this.changed();
+    }
+  }
+
+  // start builds the audio graph once. Every caller shares the attempt in
+  // flight, so the packets that each call it cannot build two contexts, and
+  // after a failure only a retry from the chip or Alt+M (unlock) tries again.
+  start(retry) {
+    if (!this.ready && !this.starting && this.mode !== "none" && (retry || !this.failed)) {
+      const done = () => {
+        this.starting = null;
+        this.changed();
+      };
+      this.starting = this.build();
+      this.starting.then(done, done);
+    }
+    return this.starting || Promise.resolve();
+  }
+
+  async build() {
     const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) { this.failed = true; return; }
+    if (!AC) {
+      this.mode = "none";
+      return;
+    }
+    let ctx = null;
     try {
-      const ctx = new AC({ sampleRate: 48000, latencyHint: "interactive" });
-      await ctx.audioWorklet.addModule("/pcm-worklet.js");
-      const node = new AudioWorkletNode(ctx, "scterm-pcm", {
-        numberOfInputs: 0,
-        numberOfOutputs: 1,
-        outputChannelCount: [2],
-        processorOptions: { targetFrames: 4608, maxFrames: 11520 },
-      });
+      ctx = new AC({ sampleRate: STREAM_RATE, latencyHint: "interactive" });
+      this.ctx = ctx;
+      this.failed = false;
+      // A context that does not run at the stream's rate, whatever was asked
+      // for, gets the stream resampled to its own rate by the ring.
+      this.rate = ctx.sampleRate || STREAM_RATE;
+      const opts = Object.assign({ ratio: STREAM_RATE / this.rate }, PCM_RING);
+      ctx.onstatechange = () => this.changed();
+      // Before the first await: a gesture that called this is still being
+      // handled here, and some browsers start sound only inside one.
+      this.resume();
       const gain = ctx.createGain();
       gain.gain.value = this.localGain;
-      node.connect(gain).connect(ctx.destination);
-      node.port.onmessage = (e) => {
-        if (e.data && e.data.stats) this.stats = e.data.stats;
-      };
-      this.ctx = ctx;
+      let node;
+      if (ctx.audioWorklet && typeof AudioWorkletNode === "function") {
+        this.mode = "worklet";
+        await ctx.audioWorklet.addModule("/pcm-worklet.js");
+        node = new AudioWorkletNode(ctx, "scterm-pcm", {
+          numberOfInputs: 0,
+          numberOfOutputs: 1,
+          outputChannelCount: [2],
+          processorOptions: opts,
+        });
+        node.port.onmessage = (e) => {
+          if (e.data && e.data.stats) this.stats = e.data.stats;
+        };
+      } else {
+        // The same ring, which index.html loads as a classic script, drained
+        // on the main thread one COMPAT_FRAMES block at a time.
+        this.mode = "compat";
+        const ring = new SctermPCM({ processorOptions: opts });
+        node = ctx.createScriptProcessor(COMPAT_FRAMES, 0, 2);
+        node.onaudioprocess = (e) => {
+          const out = e.outputBuffer;
+          ring.pull(out.getChannelData(0), out.getChannelData(1));
+          this.stats = ring.stats();
+        };
+        this.ring = ring;
+      }
+      node.connect(gain);
+      gain.connect(ctx.destination);
       this.node = node;
       this.gain = gain;
       this.ready = true;
-      this.resume();
     } catch (e) {
+      // Close what was built: a later gesture starts again from nothing, and
+      // no context is ever left open beside the next one.
       this.failed = true;
+      this.ctx = null;
+      this.node = null;
+      this.gain = null;
+      this.ring = null;
+      if (ctx) {
+        ctx.onstatechange = null;
+        try { ctx.close().catch(() => {}); } catch (err) { /* already closed */ }
+      }
     }
   }
 
+  // resume asks a context that is not running to run, unless the session has
+  // ended: a press on the picture asks too, and until Reconnect there is
+  // nothing to hear.
   resume() {
-    if (this.ctx && this.ctx.state === "suspended") {
-      this.ctx.resume().catch(() => {});
+    const ctx = this.ctx;
+    if (ctx && !this.ended && ctx.state !== "running" && ctx.state !== "closed") {
+      ctx.resume().catch(() => {});
     }
+  }
+
+  // unlock is a gesture's chance to start the sound: it resumes the context,
+  // or builds the graph if there is none (yet, or since a failed attempt: the
+  // chip's retry and Alt+M come here too). A touch's pointerdown is skipped,
+  // because the browser counts only the end of a touch as the gesture, and so
+  // is a key repeating while held down.
+  unlock(ev) {
+    if (ev && ev.type === "pointerdown" && ev.pointerType !== "mouse") return;
+    if (ev && ev.repeat) return;
+    if (this.ctx) this.resume();
+    else this.start(true);
+  }
+
+  // armUnlock starts or stops listening for the gestures that can start the
+  // sound. Capture phase on the window, so a toolbar button or a key counts as
+  // much as the canvas, whatever handles the event after.
+  armUnlock(on) {
+    if (on === this.armed) return;
+    this.armed = on;
+    for (const type of UNLOCK_EVENTS) {
+      if (on) window.addEventListener(type, this.unlocker, true);
+      else window.removeEventListener(type, this.unlocker, true);
+    }
+  }
+
+  // changed runs after anything that can change the sound's state. The gesture
+  // listeners stay only while the sound waits for one: not while it plays (a
+  // browser can suspend it again later, and then they come back), after a
+  // failed start, which every tap and key would only repeat, or once the
+  // session has ended. The page redraws the sound chip.
+  changed() {
+    this.armUnlock(!this.running && this.mode !== "none" && !this.failed && !this.ended);
+    if (this.onchange) this.onchange();
+  }
+
+  // setEnded is a bye (on) or Reconnect (off). While the session is over
+  // there is nothing to hear: the chip says nothing, no gesture is listened
+  // for, and the context is suspended until Reconnect, a click, resumes it.
+  setEnded(on) {
+    this.ended = on;
+    const ctx = this.ctx;
+    if (on && ctx && ctx.state === "running" && ctx.suspend) ctx.suspend().catch(() => {});
+    this.changed();
   }
 
   push(buf) {
-    if (!this.ready) return;
+    // A context that is not running plays nothing, and audio queued meanwhile
+    // would only come out late, ahead of everything after it.
+    if (!this.ready || !this.running) return;
+    if (this.ring) {
+      this.ring.feed({ pcm: buf });
+      return;
+    }
     // Transfer the underlying buffer: no copy on the main thread.
     this.node.port.postMessage({ pcm: buf }, [buf]);
   }
+}
+
+// STREAM_RATE is the server's PCM rate (web.go), which the context is asked
+// to run at.
+const STREAM_RATE = 48000;
+
+// PCM_RING sizes the ring both paths play from, in frames at 48 kHz: playback
+// starts once it holds 96 ms, and it never holds more than 240 ms.
+const PCM_RING = { targetFrames: 4608, maxFrames: 11520 };
+
+// COMPAT_FRAMES is the ScriptProcessorNode's block: ~43 ms at 48 kHz, small
+// enough that the 96 ms the ring starts with still covers a late burst
+// between two blocks.
+const COMPAT_FRAMES = 2048;
+
+// UNLOCK_EVENTS are the gestures that let a page start sound. Per the HTML
+// spec that is a key press, a mouse press or the end of a touch; a touch's
+// pointerdown is not one, so a phone needs the pointerup or touchend. A click
+// comes after one of them and covers a toolbar button.
+const UNLOCK_EVENTS = ["pointerdown", "pointerup", "touchend", "click", "keydown"];
+
+// COMPAT_NOTE explains the compatibility path: the chip's tooltip, and a toast
+// when the chip is tapped (a phone shows no tooltips).
+const COMPAT_NOTE = "Plain http uses an older audio path,\n" +
+  "with a little more delay. localhost\n" +
+  "or https gives the low-delay path.";
+
+// soundChip is what the sound chip says about this browser's own sound, or
+// null when there is nothing to act on. `s` has Pcm's mode, heard, running,
+// failed and ended, plus muted (the local gain is 0), note (the compatibility
+// note is still due) and dismissed (the viewer closed the no-sound note).
+// `act` is what tapping the chip does, and `keys` the chord that does it too.
+function soundChip(s) {
+  if (s.ended) return null;
+  if (s.mode === "none") {
+    return s.heard && !s.dismissed ? { text: "No sound in this browser", act: "dismiss" } : null;
+  }
+  if (s.muted) return { text: "Sound off · Alt+M", act: "unmute", keys: "Alt+M" };
+  if (s.heard && s.failed) return { text: "Sound failed · Alt+M", act: "retry", keys: "Alt+M" };
+  if (s.heard && !s.running) return { text: "Tap for sound", act: "unlock" };
+  if (s.mode === "compat" && s.heard && s.running && s.note) {
+    return { text: "Sound: compatibility mode", title: COMPAT_NOTE, act: "explain" };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,21 +654,15 @@ const KEYCODES = {
   Power: 26, WakeUp: 224, Sleep: 223,
 };
 
-// The app-level keys, identical to the terminal's (input.go fKeyMap +
-// appkeys.go mapAppFKey): F1 home, F2 menu, F3 recents, F4 power, F5 vol-,
-// F6 vol+, F7 mute, F8 rotate, F9 notifications, F10 settings, F11 collapse,
-// F12 grab. The values are the same op names the server already understands,
-// and the server turns them into the same Android keycodes for both modes.
-const APP_KEYS = {
-  F1: "home", F2: "menu", F3: "appswitch", F4: "power",
-  F5: "voldown", F6: "volup", F7: "mute",
-  F8: "rotate", F9: "notif", F10: "settings", F11: "collapse",
-  F12: "grab",
-};
-
-// Alt+F1..F12: the same actions. A bare F-key is the terminal's binding, but an
-// OS, a window manager or a phone keyboard may never deliver one.
-const ALT_FKEYS = APP_KEYS;
+// Keys that never travel on their own. Modifiers reach the device as the meta
+// state of the key they modify, so a bare Shift, Ctrl, Alt or Meta tap sends
+// nothing. Lock keys are not forwarded at all: browsers report a tap as one
+// event on macOS and two elsewhere, so the device's lock state is left alone.
+const BARE_MODIFIER_KEYS = new Set([
+  "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight",
+  "AltLeft", "AltRight", "MetaLeft", "MetaRight",
+  "CapsLock", "NumLock", "ScrollLock",
+]);
 
 // Ctrl+A..Z -> Android letter keycodes 29..54, as handleByte() sends them.
 const LETTER_KEYCODES = {};
@@ -409,26 +674,6 @@ for (let i = 0; i < 26; i++) {
 // left alone, because closing the window ends a --window session. Grab (F12,
 // the terminal's own key) hands them to the device instead.
 const CTRL_BROWSER_KEYS = new Set(["KeyW", "KeyT", "KeyN", "KeyR", "KeyQ"]);
-
-// Alt+<letter> mnemonic device actions. This is the primary binding on a phone
-// keyboard (Unexpected Keyboard has Ctrl and Alt, but no F-key row), and the
-// TUI uses exactly the same table (appkeys.go appMnemonicOps) — so Alt+H is
-// Home whether you are in a terminal, a browser tab or --window. Keep the two
-// tables in step: web_keymap_test.go parses this one and compares.
-//
-// Alt+M is deliberately NOT here: it stays the LOCAL mute. The device's own
-// mute has no chord (F7 and the action bar carry it).
-//
-// Slash is a punctuation chord: a phone keyboard reports it by character and
-// codeOf() normalises it (PUNCT_CODES) before this lookup, so Alt+/ opens the
-// controls sheet there too. The ☰ button remains the always-available path.
-const MNEMONIC_ACTIONS = {
-  KeyB: "back", KeyC: "collapse", KeyD: "voldown", KeyE: "settings",
-  KeyG: "grab", KeyH: "home", KeyI: "keyboard", KeyK: "resetvideo",
-  KeyN: "notif", KeyP: "power", KeyQ: "quit", KeyR: "rotate",
-  KeyS: "screenshot", KeyT: "appswitch", KeyU: "volup",
-  Slash: "toolbar",
-};
 
 // Alt+<key> local controls (Alt is what the TUI uses, so both modes agree).
 // F-keys are handled through KEYCODES below, except F4: Alt+F4 is the browser's
@@ -470,6 +715,57 @@ function codeOf(ev) {
   return k; // "Enter", "Backspace", "ArrowLeft", ...
 }
 
+// The app-level keys come from the action catalog, as the terminal's do
+// (actions.go appMnemonicOps and appFKeyOps), so a key does the same thing in
+// a terminal, a browser tab and --window. The values are catalog action ids:
+// the server performs the device actions from the same catalog.
+//
+// MNEMONIC_ACTIONS: Alt+<key> runs the action whose mnemonic that key is. It is
+// the primary binding on a phone keyboard (Unexpected Keyboard has Ctrl and
+// Alt, but no F-key row). Keys are code names made the way codeOf() makes them
+// from a phone keyboard's bare character, so Alt+/ opens the controls sheet
+// there too; the ☰ button remains the always-available path. Alt+M is not a
+// mnemonic: it stays the LOCAL mute, and the device's own mute has no
+// Alt+letter chord (F7, the action bar and the controls sheet carry it).
+//
+// APP_KEYS: F1..F12 run the action with that F-key, as in the terminal
+// (input.go fKeyMap + appkeys.go mapAppFKey). ALT_FKEYS: Alt+F1..F12 are the
+// same actions, because a bare F-key is the terminal's binding but an OS, a
+// window manager or a phone keyboard may never deliver one.
+//
+// web_keymap_test.go runs this derivation against the catalog the binary
+// embeds and compares the result with the terminal's tables.
+function catalogActions(catalog) {
+  return catalog.device.concat(catalog.local);
+}
+
+function keyTables(catalog) {
+  const mnemonics = {};
+  const fkeys = {};
+  for (const a of catalogActions(catalog)) {
+    const code = a.mnemonic ? codeOf({ key: a.mnemonic }) : "";
+    if (code) mnemonics[code] = a.id;
+    if (a.fkey) fkeys["F" + a.fkey] = a.id;
+  }
+  return { mnemonics, fkeys };
+}
+
+const KEY_TABLES = keyTables(CATALOG);
+const MNEMONIC_ACTIONS = KEY_TABLES.mnemonics;
+const APP_KEYS = KEY_TABLES.fkeys;
+const ALT_FKEYS = APP_KEYS;
+
+// ONCE_ACTIONS are the actions Input.act runs in the page rather than on the
+// device. A chord held down runs them once, so a toggle does not flip on
+// every auto-repeat (and a held Alt+S saves one screenshot); device actions
+// repeat like any key held on the device. Alt+M, the local mute, is the same.
+const ONCE_ACTIONS = new Set(["grab", "keyboard", "toolbar", "screenshot"]);
+
+// ENDED_ACTIONS are the ones that still work once the session has ended, from
+// their buttons and their chords alike: the controls sheet, and a screenshot of
+// the last frame. Everything else needs the device.
+const ENDED_ACTIONS = new Set(["toolbar", "screenshot"]);
+
 // Three-finger tap tuning. A finger that stays put is held back from the device
 // for SOFTKEY_GRACE_MS (or until it moves past SOFTKEY_HOLD_SLOP_PX, or lifts),
 // so that a three-finger tap cannot also land on the device as a stray tap.
@@ -508,6 +804,26 @@ class Input {
     this.tapAt = 0;
     this.softKeys = false;
     this.kbRetry = false; // a pointerdown retry is armed for the IME
+    this.printScreenDown = false;
+    // The pointer type of the last press on the canvas: older browsers send
+    // contextmenu without one.
+    this.pointerType = "";
+    // onAct, when set, hears every action before it runs: the toolbar drops a
+    // Quit that is waiting for its second press. onPress hears every press of
+    // a key or of the picture (pressed), which drops it too.
+    this.onAct = null;
+    this.onPress = null;
+    // consumed is the keys, still held down, whose press closed the sheet or
+    // pressed one of the page's buttons: key() drops their auto-repeats.
+    this.consumed = new Set();
+  }
+
+  // pressed tells onPress of a press: any key but a bare modifier, a press of
+  // the picture or a notch of the wheel over it, typed or pasted text. As any
+  // press but the Quit's own does in the terminal, it drops a Quit waiting for
+  // its second.
+  pressed() {
+    if (this.onPress) this.onPress();
   }
 
   sendPos(op, extra) {
@@ -595,6 +911,8 @@ class Input {
       c.setPointerCapture(ev.pointerId);
       // Audio can only start from a gesture; the first tap is the gesture.
       pcm.resume();
+      this.pointerType = ev.pointerType;
+      this.pressed();
 
       if (this.pointers.size === 0) {
         // First finger of a new gesture.
@@ -614,6 +932,11 @@ class Input {
         // send nothing, so extra fingers never reach the device as a stray
         // touch (they used to send a second "down" at the new position).
         this.dropHeld();
+        return;
+      }
+      // Middle click = Home, like the TUI.
+      if (ev.button === 1) {
+        this.act("home");
         return;
       }
       if (ev.button !== 0) return;
@@ -692,8 +1015,10 @@ class Input {
 
     c.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
-      // Right click = Android back, like the TUI.
-      this.net.send({ op: "back" });
+      // Right click = Android back, like the TUI. A long press of a finger or
+      // a pen raises contextmenu too, and must not press Back.
+      if ((ev.pointerType || this.pointerType) !== "mouse") return;
+      this.act("back");
     });
 
     c.addEventListener("wheel", (ev) => {
@@ -704,17 +1029,20 @@ class Input {
       if (Math.abs(this.wheelAcc) >= notch) {
         const notches = Math.trunc(this.wheelAcc / notch);
         this.wheelAcc -= notches * notch;
+        this.pressed();
         this.sendPos("wheel", { delta: notches });
       }
     }, { passive: false });
 
+    // A paste goes to the device as text. Once the session has ended it is
+    // left to the browser, and a paste the socket could not take says so.
     document.addEventListener("paste", (ev) => {
       const text = (ev.clipboardData || window.clipboardData).getData("text");
-      if (text) {
-        ev.preventDefault();
-        this.net.send({ op: "text", text: text });
-        toast("pasted " + text.length + " chars");
-      }
+      if (!text || this.net.ended) return;
+      ev.preventDefault();
+      this.pressed();
+      if (this.net.send({ op: "text", text: text }) === false) toast("not connected: nothing pasted");
+      else toast("pasted " + text.length + " chars");
     });
 
     // Text produced by the phone's own keyboard. A soft keyboard rarely emits
@@ -727,6 +1055,7 @@ class Input {
       const text = els.ime.value;
       if (!text) return;
       els.ime.value = "";
+      this.pressed();
       this.net.send({ op: "text", text: text });
     };
     els.ime.addEventListener("input", drain);
@@ -741,17 +1070,70 @@ class Input {
   }
 
   key(ev, down) {
-    // The controls sheet is documentation, not a mode: Esc closes it, and it
-    // never swallows input aimed at the device.
-    if (down && ev.key === "Escape" && toolbar.sheetOpen) {
-      ev.preventDefault();
-      toolbar.hideSheet();
-      return;
-    }
     // `name` is the physical key, or the nearest equivalent a phone keyboard
     // offers: soft keyboards routinely leave `code` empty, which used to make
     // every hotkey below unreachable from one.
     const name = codeOf(ev);
+    // A key whose press closed the sheet (Esc) or pressed one of the page's
+    // buttons (Enter, Space) has done its work: its auto-repeats are dropped,
+    // or they would reach the device once the sheet has closed or the session
+    // is back. Its key-up ends that, and so does a fresh press, in case the
+    // key-up went elsewhere.
+    if (ev.repeat && this.consumed.has(name)) {
+      ev.preventDefault();
+      return;
+    }
+    this.consumed.delete(name);
+    // While the controls sheet is open it takes the keys that work a dialog:
+    // Esc closes it, Tab and Shift+Tab go round its buttons (so the focus stays
+    // inside; and they are presses, which drop a Quit waiting for its second),
+    // and Enter or Space on one of them is left to the browser, which presses
+    // it once: a held key's repeats would press it again, and a held Enter
+    // would arm Quit and then confirm it. Other keys are handled below.
+    const press = ev.key === "Enter" || ev.key === " ";
+    if (toolbar.sheetOpen) {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        if (down) {
+          this.consumed.add(name);
+          toolbar.hideSheet();
+        }
+        return;
+      }
+      if (ev.key === "Tab" && !ev.altKey && !ev.ctrlKey && !ev.metaKey) {
+        ev.preventDefault();
+        if (down) {
+          this.pressed();
+          toolbar.cycle(ev.shiftKey ? -1 : 1);
+        }
+        return;
+      }
+      if (press && toolbar.owns(ev.target)) {
+        if (ev.repeat) ev.preventDefault();
+        else if (down) this.consumed.add(name);
+        return;
+      }
+    }
+    // After a bye there is no device to send keys to, so the browser keeps them
+    // all: Tab moves between the page's buttons, Enter or Space presses the
+    // focused one, once, and F5 reloads. Only the chords of the actions that
+    // need no device still run, as their buttons do (ENDED_ACTIONS).
+    if (this.net.ended) {
+      const own = ev.altKey && !ev.ctrlKey && !ev.metaKey ? MNEMONIC_ACTIONS[name] : null;
+      if (own && ENDED_ACTIONS.has(own)) {
+        ev.preventDefault();
+        if (down) this.chord(own, ev);
+        return;
+      }
+      if (press && ev.repeat) ev.preventDefault();
+      else if (press && down) this.consumed.add(name);
+      return;
+    }
+    if (BARE_MODIFIER_KEYS.has(name)) {
+      ev.preventDefault();
+      return;
+    }
+    if (down) this.pressed();
 
     // F1..F12 mean exactly what they mean in the terminal (input.go's fKeyMap +
     // mapAppFKey). They used to be sent to Android as the F1..F12 keycodes
@@ -762,31 +1144,26 @@ class Input {
       // preventDefault on both edges: F5/F11 would otherwise reload the page
       // and toggle fullscreen while also being volume-down and collapse.
       ev.preventDefault();
-      if (down) this.act(appOp);
+      if (down) this.chord(appOp, ev);
       return;
     }
     if (ev.altKey && !ev.ctrlKey && ALT_FKEYS[name]) {
       // Alt+F1..F12: the same actions, for keyboards/browsers where a bare F-key
       // never arrives (or the WM owns it).
       ev.preventDefault();
-      if (down) this.act(ALT_FKEYS[name]);
+      if (down) this.chord(ALT_FKEYS[name], ev);
       return;
     }
 
     // Alt combos are local controls: they mirror the TUI keys exactly.
     if (ev.altKey && !ev.ctrlKey) {
-      if (name === "KeyG") {
-        if (down) this.toggleGrab();
-        ev.preventDefault();
-        return;
-      }
       // The mnemonic table is consulted FIRST, so the aliases in ALT_ACTIONS
       // (Alt+H home, Alt+B back, Alt+R rotate...) can never disagree with it:
       // both tables name the same action and the shared one wins.
       const mnemonic = MNEMONIC_ACTIONS[name];
       if (mnemonic) {
         ev.preventDefault();
-        if (down) this.act(mnemonic);
+        if (down) this.chord(mnemonic, ev);
         return;
       }
       // Alt+M is the one letter chord the mnemonic table does not carry (it is
@@ -794,7 +1171,7 @@ class Input {
       // keyboard's bare "m" to KeyM, so both desk and phone reach it here.
       if (name === "KeyM" && down) {
         ev.preventDefault();
-        this.localMute();
+        if (!ev.repeat) this.localMute();
         return;
       }
       // ALT_ACTIONS is the fallback for the keys MNEMONIC_ACTIONS does not
@@ -811,7 +1188,7 @@ class Input {
         if (action === "louder") { this.localVolume(+10); return; }
         if (action === "quieter") { this.localVolume(-10); return; }
         if (action === "localmute") { this.localMute(); return; }
-        this.net.send({ op: action });
+        this.act(action);
         return;
       }
       const altCode = KEYCODES[name];
@@ -860,7 +1237,7 @@ class Input {
     // Esc alone is Back, exactly as in the terminal (input.go: "\x1b" -> back).
     if (name === "Escape") {
       ev.preventDefault();
-      if (down) this.net.send({ op: "back" });
+      if (down) this.act("back");
       return;
     }
 
@@ -884,12 +1261,24 @@ class Input {
     }
   }
 
+  // sendKey presses `code` once per keydown. The server turns every key op into
+  // a full down+up pair, so the key-up sends nothing, and a held key's
+  // auto-repeats are forwarded as further presses: the device has already seen
+  // the key released and cannot repeat it itself. PrintScreen is the
+  // exception: Windows delivers only its key-up, so a key-up that no key-down
+  // preceded is the press. It goes without modifiers, so a host chord such as
+  // Alt+PrintScreen reaches the device as a plain PrintScreen.
   sendKey(code, down, ev) {
-    if (!down) {
-      this.net.send({ op: "key", code: code, meta: 0 });
+    if (code === KEYCODES.PrintScreen) {
+      const sawDown = this.printScreenDown;
+      this.printScreenDown = down;
+      if (!down) {
+        if (!sawDown) this.net.send({ op: "key", code: code, meta: 0 });
+        return;
+      }
+    } else if (!down) {
       return;
     }
-    if (ev.repeat) return; // the device handles repeats itself
     let meta = 0;
     if (ev.shiftKey) meta |= 0x01;
     if (ev.altKey) meta |= 0x02;
@@ -898,34 +1287,50 @@ class Input {
     this.net.send({ op: "key", code: code, meta: meta });
   }
 
-  // act runs one app-level action. Device ops are just an op for the server,
-  // which maps them to the same Android keycode the terminal would send; the
-  // few local ones (grab, keyboard, toolbar, screenshot) are handled here.
-  // Toolbar button presses call this too, so button and chord are the same call.
+  // chord runs the action of a chord's keydown: on every press and repeat for
+  // a device action, once per press for the page's own (ONCE_ACTIONS).
+  chord(op, ev) {
+    if (!ev.repeat || !ONCE_ACTIONS.has(op)) this.act(op);
+  }
+
+  // act runs one catalog action. Device actions are just an op for the server,
+  // which performs them from the same catalog as the terminal, and so is quit
+  // (it ends the session); the few local ones (grab, keyboard, toolbar,
+  // screenshot) are handled here. The action bar and the controls sheet call
+  // this too, so a button, a row and a chord are the same call. Once the
+  // session has ended only ENDED_ACTIONS run, and act says whether it ran.
   act(op) {
+    if (this.onAct) this.onAct(op);
+    if (this.net.ended && !ENDED_ACTIONS.has(op)) {
+      toast("the session has ended");
+      return false;
+    }
     switch (op) {
     case "grab":
       this.toggleGrab();
-      return;
+      break;
     case "keyboard":
       this.toggleSoftKeys();
-      return;
+      break;
     case "toolbar":
       // The controls sheet. NOT "menu": that op is the device's Menu key (F2).
       toolbar.toggleSheet();
-      return;
+      break;
     case "screenshot":
       screenshot();
-      return;
+      break;
+    default:
+      this.net.send({ op: op });
     }
-    this.net.send({ op: op });
+    return true;
   }
 
+  // The toast must say what key() does with CTRL_BROWSER_KEYS in each state.
   toggleGrab() {
     this.grab = !this.grab;
     toast(this.grab
-      ? "grab: browser keys go to the device"
-      : "grab off: Ctrl+W/T/N/R/Q stay in the browser");
+      ? "grab on: Ctrl+W/T/N/R go to the device,\nCtrl+Q ends the session"
+      : "grab off: Ctrl+W/T/N/R/Q stay with the browser");
   }
 
   // localVolume / localMute are the terminal's Alt+- Alt+= Alt+M: they change
@@ -938,6 +1343,12 @@ class Input {
   }
 
   localMute() {
+    // Sound that failed to start has nothing to mute: Alt+M tries it again,
+    // as a tap on the chip does ("Sound failed · Alt+M").
+    if (pcm.failed && pcm.localGain > 0) {
+      pcm.unlock();
+      return;
+    }
     if (pcm.localGain > 0) {
       this.lastLocalGain = pcm.localGain;
       pcm.setLocalGain(0);
@@ -975,27 +1386,202 @@ function screenshot() {
 // ---------------------------------------------------------------------------
 // action bar + controls sheet
 //
-// The bar is the no-F-key, no-chord path to every action: one button per op,
-// wired through Input.act so a click and its keyboard chord are literally the
-// same call. The sheet is documentation only -- it runs nothing, so it cannot
-// disagree with the bindings it lists.
+// Both are built from the action catalog and run actions through Input.act, so
+// a click and its keyboard chord are literally the same call. The bar is the
+// no-F-key, no-chord path to every action: one button per webBar entry. The
+// sheet lists every action as a row that runs it, beside its chords.
 // ---------------------------------------------------------------------------
 
+// BAR_GROUPS are the webBar ids that start a new group of buttons in the bar.
+const BAR_GROUPS = ["volup", "rotate", "power"];
+
+// QUIT_CONFIRM_MS is how long a pressed Quit button or row waits for the
+// second press that quits.
+const QUIT_CONFIRM_MS = 2000;
+
+// chords lists the keys that run an action: Alt+<mnemonic>, then its F-key.
+function chords(a) {
+  const keys = [];
+  if (a.mnemonic) keys.push("Alt+" + a.mnemonic.toUpperCase());
+  if (a.fkey) keys.push("F" + a.fkey);
+  return keys;
+}
+
+// describe is an action's tooltip: its label, then its chords, as in
+// "Volume up (Alt+U, F6)".
+function describe(a) {
+  const keys = chords(a);
+  return keys.length ? a.label + " (" + keys.join(", ") + ")" : a.label;
+}
+
+// shortcuts gives el the action's chords as its aria-keyshortcuts, written
+// the way that attribute wants them, as in "Alt+U F6".
+function shortcuts(el, a) {
+  const keys = chords(a);
+  if (keys.length) el.setAttribute("aria-keyshortcuts", keys.join(" "));
+}
+
+function kbd(text) {
+  const k = document.createElement("kbd");
+  k.textContent = text;
+  return k;
+}
+
+// Full screen is this browser's own, with a button in the bar and one in the
+// sheet: F11 is the device's Collapse here. It fills the screen with the whole
+// page, and there is no button where the page cannot have it (an iPhone, or a
+// frame that does not allow it).
+function fullscreenSupported() {
+  return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+}
+
+function fullscreenActive() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+
+function toggleFullscreen() {
+  const root = document.documentElement;
+  let done;
+  try {
+    if (fullscreenActive()) {
+      done = document.exitFullscreen ? document.exitFullscreen() : document.webkitExitFullscreen();
+    } else {
+      done = root.requestFullscreen ? root.requestFullscreen({ navigationUI: "hide" }) : root.webkitRequestFullscreen();
+    }
+  } catch (e) {
+    done = Promise.reject(e);
+  }
+  if (done && done.catch) done.catch(() => toast("full screen is not available here"));
+}
+
 class Toolbar {
-  constructor(input) {
+  constructor(input, catalog) {
     this.input = input;
     this.bar = document.getElementById("bar");
     this.sheet = document.getElementById("sheet");
+    this.close = document.getElementById("sheet-close");
+    this.menuBtn = document.getElementById("menu-btn");
     this.timers = new WeakMap();
-    this.buttons = Array.prototype.slice.call(
-      document.querySelectorAll("#bar button[data-act]"));
-    for (const btn of this.buttons) {
-      btn.addEventListener("click", () => this.press(btn));
+    this.actions = new Map(); // bar button or sheet row -> its catalog action
+    this.labels = new Map();  // bar button or sheet row -> the element with its text
+    this.buttons = [];        // the bar, in webBar order
+    this.rows = [];           // the sheet's action rows
+    this.toggles = [];        // ☰ and the bar's Controls button, which open the sheet
+    this.full = document.getElementById("sheet-full");
+    this.fulls = [];          // the Full screen buttons, in the bar and the sheet
+    this.onclose = null;      // the page hears the sheet close
+    this.opener = null;       // what had the focus before the sheet opened
+    this.quitArmed = null;    // the Quit button or row waiting for its second press
+    this.quitText = "";
+    this.quitTitle = "";
+    this.quitUntil = 0;
+    this.quitTimer = 0;
+    input.onAct = input.onPress = () => this.disarmQuit();
+
+    const byId = new Map(catalogActions(catalog).map((a) => [a.id, a]));
+    const barIds = catalog.views.webBar.filter((id) => byId.has(id));
+    if (this.bar) {
+      for (const id of barIds) {
+        if (BAR_GROUPS.includes(id) && this.buttons.length) {
+          const sep = document.createElement("span");
+          sep.className = "bar-sep";
+          this.bar.appendChild(sep);
+        }
+        const btn = this.control(byId.get(id));
+        btn.textContent = byId.get(id).short;
+        btn.title = describe(byId.get(id));
+        if (id === "toolbar") {
+          // Like ☰, it opens the sheet, a dialog, and says whether it is open.
+          btn.setAttribute("aria-haspopup", "dialog");
+          btn.setAttribute("aria-controls", "sheet");
+          btn.setAttribute("aria-expanded", "false");
+          this.toggles.push(btn);
+        }
+        this.labels.set(btn, btn);
+        btn.addEventListener("click", () => this.press(btn));
+        this.bar.appendChild(btn);
+        this.buttons.push(btn);
+      }
     }
-    const close = document.getElementById("sheet-close");
-    if (close) close.addEventListener("click", () => this.hideSheet());
-    const menuBtn = document.getElementById("menu-btn");
-    if (menuBtn) menuBtn.addEventListener("click", () => this.toggleSheet());
+    if (fullscreenSupported()) {
+      if (this.bar && this.buttons.length) {
+        const sep = document.createElement("span");
+        sep.className = "bar-sep";
+        this.bar.appendChild(sep);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = "Full screen";
+        this.bar.appendChild(btn);
+        this.fulls.push(btn);
+      }
+      if (this.full) {
+        this.full.hidden = false;
+        this.fulls.push(this.full);
+      }
+    }
+    for (const btn of this.fulls) {
+      btn.addEventListener("click", () => {
+        if (btn === this.full) this.hideSheet();
+        toggleFullscreen();
+      });
+    }
+    this.showFullscreen();
+    if (this.bar) {
+      // The bar is one row that scrolls sideways where it does not fit, and
+      // a mouse wheel turned over its buttons scrolls it.
+      this.bar.addEventListener("wheel", (ev) => {
+        const dx = ev.deltaX, dy = ev.deltaY;
+        const bar = this.bar;
+        if (bar.scrollWidth <= bar.clientWidth || Math.abs(dx) >= Math.abs(dy)) return;
+        bar.scrollLeft += dy * (ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? bar.clientWidth : 1);
+        ev.preventDefault();
+      }, { passive: false });
+    }
+
+    // The sheet's rows: the bar's order, then any action the bar leaves out,
+    // except the sheet's own (its chord is shown beside the title instead). A
+    // row shows the label and the chords, so it has no tooltip repeating them,
+    // and the chords are hidden from assistive technology, which has them as
+    // the row's keyshortcuts: the row's name is its label.
+    const box = document.getElementById("sheet-actions");
+    const ids = barIds.concat([...byId.keys()].filter((id) => !barIds.includes(id)));
+    for (const id of ids) {
+      if (!box || id === "toolbar") continue;
+      const a = byId.get(id);
+      const row = this.control(a);
+      row.className = "sheet-row";
+      const label = document.createElement("span");
+      label.className = "sheet-label";
+      label.textContent = a.label;
+      const keys = document.createElement("span");
+      keys.className = "sheet-keys";
+      keys.setAttribute("aria-hidden", "true");
+      for (const k of chords(a)) keys.appendChild(kbd(k));
+      row.appendChild(label);
+      row.appendChild(keys);
+      this.labels.set(row, label);
+      row.addEventListener("click", () => this.run(row));
+      box.appendChild(row);
+      this.rows.push(row);
+    }
+
+    const self = byId.get("toolbar");
+    if (self) {
+      const title = document.getElementById("sheet-title");
+      const keys = document.getElementById("sheet-keys");
+      if (title) title.textContent = self.label;
+      if (keys) for (const k of chords(self)) keys.appendChild(kbd(k));
+      if (this.menuBtn) {
+        this.menuBtn.title = describe(self);
+        this.menuBtn.setAttribute("aria-label", self.label);
+        shortcuts(this.menuBtn, self);
+      }
+    }
+    if (this.menuBtn) {
+      this.toggles.push(this.menuBtn);
+      this.menuBtn.addEventListener("click", () => this.input.act("toolbar"));
+    }
+    if (this.close) this.close.addEventListener("click", () => this.hideSheet());
     if (this.sheet) {
       // The sheet starts faded; keep it out of the tab order until opened.
       this.sheet.inert = true;
@@ -1005,36 +1591,264 @@ class Toolbar {
     }
   }
 
-  // press runs the button's action and flashes it, so a tap has visible
+  // control is the button for one action, in the bar or the sheet: named by
+  // the text it shows, with the action's chords as its keyshortcuts.
+  control(a) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.act = a.id;
+    shortcuts(b, a);
+    this.actions.set(b, a);
+    return b;
+  }
+
+  // press runs a bar button's action and flashes it, so a tap has visible
   // feedback even when the device response is off-screen.
   press(btn) {
-    const act = btn.dataset.act;
-    if (act === "toolbar") { this.toggleSheet(); return; }
-    this.input.act(act);
+    const a = this.actions.get(btn);
+    if (!this.confirm(btn, a)) return;
+    if (!this.input.act(a.id)) return;
     btn.classList.add("done");
     clearTimeout(this.timers.get(btn));
     this.timers.set(btn, setTimeout(() => btn.classList.remove("done"), 350));
   }
 
+  // run runs a sheet row's action. The sheet closes first, as the terminal's
+  // action menu does, so what the action did is in view.
+  run(row) {
+    const a = this.actions.get(row);
+    if (!this.confirm(row, a)) return;
+    this.hideSheet();
+    this.input.act(a.id);
+  }
+
+  // confirm is the two-press Quit: the first press of a Quit button or row
+  // only arms it, and a second press of it within QUIT_CONFIRM_MS quits. Alt+Q
+  // goes straight to Input.act and quits at once. Once the session has ended
+  // there is nothing to quit, and Input.act says so.
+  confirm(el, a) {
+    if (a.id !== "quit" || this.input.net.ended) return true;
+    if (this.quitArmed === el && performance.now() < this.quitUntil) {
+      this.disarmQuit();
+      return true;
+    }
+    this.armQuit(el, a);
+    return false;
+  }
+
+  // armQuit asks "Quit?" in place. The control keeps the width it had, so the
+  // longer text moves nothing beside it.
+  armQuit(el, a) {
+    this.disarmQuit();
+    const width = el.getBoundingClientRect().width;
+    el.style.boxSizing = "border-box";
+    el.style.width = width + "px";
+    const label = this.labels.get(el);
+    this.quitText = label.textContent;
+    label.textContent = this.quitText + "?";
+    this.quitTitle = el.title;
+    el.title = a.label + "? Press again to end the session";
+    el.classList.add("armed");
+    this.quitArmed = el;
+    this.quitUntil = performance.now() + QUIT_CONFIRM_MS;
+    const timer = setTimeout(() => { if (this.quitTimer === timer) this.disarmQuit(); }, QUIT_CONFIRM_MS);
+    this.quitTimer = timer;
+    toast("press " + a.short + " again to end the session", QUIT_CONFIRM_MS);
+  }
+
+  disarmQuit() {
+    const el = this.quitArmed;
+    if (!el) return;
+    this.quitArmed = null;
+    clearTimeout(this.quitTimer);
+    this.quitTimer = 0;
+    this.labels.get(el).textContent = this.quitText;
+    el.title = this.quitTitle;
+    el.classList.remove("armed");
+    el.style.width = "";
+    el.style.boxSizing = "";
+  }
+
   toggleSheet() {
+    if (this.sheetOpen) this.hideSheet();
+    else this.showSheet();
+  }
+
+  // showSheet opens the sheet and moves the focus to its first row.
+  showSheet() {
     if (!this.sheet) return;
-    const hide = !this.sheet.classList.contains("idle");
-    if (hide) { this.hideSheet(); return; }
+    this.opener = document.activeElement;
     this.sheet.classList.remove("idle");
     this.sheet.inert = false;
     if (this.bar) this.bar.classList.add("idle");
+    this.expanded(true);
+    const first = this.controls()[0];
+    if (first) first.focus();
   }
 
+  // hideSheet closes the sheet and gives the focus back to what had it, if
+  // the focus is still in the sheet (or nowhere): a bye moves it to the
+  // Reconnect button, and there it stays. onclose then lets the page show
+  // the bar again, if it is due.
   hideSheet() {
-    if (!this.sheet) return;
+    if (!this.sheetOpen) return;
+    this.disarmQuit();
+    const focus = document.activeElement;
     this.sheet.classList.add("idle");
     this.sheet.inert = true; // a faded sheet must not be tabbable
+    this.expanded(false);
+    const back = this.opener;
+    this.opener = null;
+    const inSheet = !focus || focus === document.body || this.owns(focus);
+    if (inSheet && back && typeof back.focus === "function") back.focus();
+    if (this.onclose) this.onclose();
   }
 
   get sheetOpen() {
     return !!this.sheet && !this.sheet.classList.contains("idle");
   }
+
+  // expanded says on ☰ and on the bar's Controls button whether the sheet is open.
+  expanded(open) {
+    for (const b of this.toggles) b.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  // showFullscreen says on the Full screen buttons whether the page fills the
+  // screen, however it got there or left (Esc is the browser's).
+  showFullscreen() {
+    const on = fullscreenActive();
+    for (const b of this.fulls) {
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+      b.title = on ? "Leave full screen (Esc)" : "Full screen";
+    }
+  }
+
+  // controls are the sheet's buttons, in the order Tab visits them.
+  controls() {
+    const list = this.rows.slice();
+    if (this.full && !this.full.hidden) list.push(this.full);
+    if (this.close) list.push(this.close);
+    return list;
+  }
+
+  owns(el) {
+    return this.controls().includes(el);
+  }
+
+  // cycle moves the focus to the sheet's next (dir 1) or previous (-1)
+  // button, from the last round to the first, so Tab never leaves the sheet.
+  cycle(dir) {
+    const list = this.controls();
+    if (!list.length) return;
+    const at = list.indexOf(document.activeElement);
+    const next = at < 0 ? (dir > 0 ? 0 : list.length - 1) : (at + dir + list.length) % list.length;
+    list[next].focus();
+  }
 }
+
+// ---------------------------------------------------------------------------
+// connection status: the card over the canvas, the page title and the HUD
+// readouts. Pure rules with no DOM access: web/conn_test.mjs lifts this
+// section, up to "end of connection status", and runs it on its own.
+// ---------------------------------------------------------------------------
+
+const IDLE_MS = 2000;   // no frame painted for this long: the fps readout says "idle"
+const GLITCH_MS = 5000; // a decode error or lost frame keeps the state red this long
+
+class ConnState {
+  constructor() {
+    this.opened = false;    // a hello arrived on some socket: the page was connected once
+    this.connected = false; // a hello arrived on the current socket
+    this.bye = null;        // the server's reason for ending the session
+    this.frame = false;     // a video frame arrived on the current socket
+    this.device = "";       // device name from the last hello that had one
+    this.retry = false;     // Reconnect was pressed and no hello has come since
+  }
+
+  hello(device) {
+    this.opened = true;
+    this.connected = true;
+    this.retry = false;
+    if (device) this.device = device;
+  }
+
+  video() { this.frame = true; }
+
+  closed() {
+    this.connected = false;
+    this.frame = false;
+  }
+
+  ended(reason) { this.bye = reason || ""; }
+
+  // reconnect is the Reconnect button. The ended session's socket can still be
+  // open or closing, and nothing that arrives on it counts any more.
+  reconnect() {
+    this.bye = null;
+    this.connected = false;
+    this.retry = true;
+  }
+
+  // card is what the status card says, or null while live video is showing.
+  // A bye outranks the rest: frames still in flight must not hide it.
+  card() {
+    if (this.bye !== null) return { text: "Session ended", detail: this.bye, button: "Reconnect" };
+    if (!this.connected) {
+      if (this.retry) return { text: "Reconnecting…" };
+      return { text: this.opened ? "Connection lost. Reconnecting…" : "Connecting…" };
+    }
+    if (!this.frame) return { text: "Waiting for video from " + (this.device || "the device") + "…" };
+    return null;
+  }
+
+  title() {
+    return this.device ? this.device + " · scterm" : "scterm";
+  }
+}
+
+// fpsLabel is the HUD's frame rate, or "idle" once no frame has been painted
+// for IDLE_MS (msSinceFrame is Infinity before the first one).
+function fpsLabel(fps, msSinceFrame) {
+  return msSinceFrame >= IDLE_MS ? "idle" : fps.toFixed(1) + " fps";
+}
+
+// stateLabel is the HUD's state text and colour. Decode errors and lost
+// frames turn it red only while recent, so one glitch does not stay red until
+// a reload (the ms values are Infinity when it never happened).
+function stateLabel(control, msSinceError, msSinceLost) {
+  if (!control) return { text: "control disabled", cls: "warn" };
+  if (msSinceError < GLITCH_MS) return { text: "connected · decode errors", cls: "bad" };
+  if (msSinceLost < GLITCH_MS) return { text: "connected · frames lost", cls: "bad" };
+  return { text: "connected", cls: "ok" };
+}
+
+// geomLabel is the HUD's resolution: the canvas, plus the device video size
+// when the two differ, or the video size alone before the first frame.
+function geomLabel(st) {
+  if (st.canvasW) {
+    return st.canvasW + "×" + st.canvasH +
+      (st.videoW && st.canvasW !== st.videoW ? " ← " + st.videoW + "×" + st.videoH : "");
+  }
+  return st.videoW ? st.videoW + "×" + st.videoH : "—";
+}
+
+// audioLabel is the HUD's sound readout: while the session's sound is on
+// (st.audio "on", whether or not the computer running scterm plays it too),
+// the DEVICE's media volume -- what the volume keys change, as a percentage of
+// the device's own scale, "—" until the first reading -- and otherwise "audio
+// off": the session has no sound, or its sound has stopped. It is not this
+// browser's volume (the sound chip reports that), hence "device vol". The
+// underruns are this page's.
+function audioLabel(st, underruns) {
+  let text;
+  if (st.audio !== "on") text = "audio off";
+  else if (!st.devVolOk) text = "device vol —";
+  else if (st.devVol === 0) text = "device vol muted";
+  else text = "device vol " + st.devVol + "%";
+  return text + (underruns ? " · u" + underruns : "");
+}
+
+// end of connection status
 
 // ---------------------------------------------------------------------------
 // wiring
@@ -1044,7 +1858,7 @@ const net = new Net();
 const view = new View(els.canvas);
 const pcm = new Pcm();
 const input = new Input(net, view);
-const toolbar = new Toolbar(input);
+const toolbar = new Toolbar(input, CATALOG);
 // Without this call no listener is ever registered and the page is a picture of
 // the device rather than a way to drive it: no pointer, wheel, key or clipboard
 // events at all, in both --web and --window. Easy to lose, because the player
@@ -1055,9 +1869,42 @@ input.attach();
 // socket, and a throw here would leave a black page with no reconnect path.
 if (typeof Pointer !== "undefined") Pointer.attach();
 
+const conn = new ConnState();
 let helloDone = false;
 let lastStatus = { videoW: 0, videoH: 0 };
-let stats = { seq: 0, lastSeq: 0, lost: 0, bytes: 0, lastBytes: 0, drawn: 0, at: performance.now() };
+let stats = { seq: 0, lastSeq: 0, lost: 0, lostAt: -Infinity, bytes: 0, lastBytes: 0, drawn: 0, at: performance.now() };
+
+// showConn puts the connection state on the page: the card, and the dimmed
+// canvas while the picture is not live. The card is a live region, so it is
+// only rewritten when its content changes.
+let connShown;
+function showConn() {
+  const card = conn.card();
+  const key = JSON.stringify(card);
+  if (key === connShown) return;
+  connShown = key;
+  els.canvas.classList.toggle("dim", card !== null);
+  els.conn.classList.toggle("off", card === null);
+  els.connText.textContent = card ? card.text : "";
+  els.connDetail.textContent = (card && card.detail) || "";
+  els.connRetry.hidden = !(card && card.button);
+  if (card && card.button) {
+    els.connRetry.textContent = card.button;
+    // Focused, so Enter or Space presses it (Input leaves keys to the browser
+    // once the session has ended).
+    els.connRetry.focus();
+  }
+}
+
+// showFps runs from the status messages, and from the telemetry tick while
+// none arrive, so a dead socket reads "idle" instead of the last rate.
+function showFps() {
+  const since = view.lastDraw ? performance.now() - view.lastDraw : Infinity;
+  els.fps.textContent = fpsLabel(view.fps || 0, since) +
+    (view.decodeMs ? " · " + view.decodeMs.toFixed(1) + "ms decode" : "") +
+    (view.errors ? " · " + view.errors + " errors" : "") +
+    (stats.lost ? " · " + stats.lost + " lost" : "");
+}
 
 function sendHello() {
   const vp = view.viewport();
@@ -1071,43 +1918,25 @@ function sendResize() {
 
 net.on("hello", (msg) => {
   helloDone = true;
-  els.device.textContent = msg.device || "device";
+  conn.hello(msg.device);
+  els.device.textContent = conn.device || "device";
+  document.title = conn.title();
   setState(msg.raw ? "connected (raw)" : "connected", "ok");
+  showConn();
 });
 
 net.on("status", (msg) => {
   lastStatus = msg;
-  els.device.textContent = (msg.videoW && msg.videoH) ? (msg.videoW + "×" + msg.videoH) : (msg.device || "device");
-  els.geom.textContent = msg.canvasW + "×" + msg.canvasH +
-    (msg.videoW && msg.canvasW !== msg.videoW ? " ← " + msg.videoW + "×" + msg.videoH : "");
-  els.fps.textContent = (view.fps || 0).toFixed(1) + " fps" +
-    (view.decodeMs ? " · " + view.decodeMs.toFixed(1) + "ms decode" : "") +
-    (view.errors ? " · " + view.errors + " errors" : "") +
-    (stats.lost ? " · " + stats.lost + " lost" : "");
-  // Show the DEVICE's media volume. The old display used msg.gain, but that gain
-  // is applied in writePCM16 for the PulseAudio sink while the browser is fed
-  // raw PCM by pushPCM -- so it was reporting a control that could not change
-  // what you hear. devVol is the volume the volume keys actually change, as a
-  // percentage of the device's own scale (index 0 = muted).
-  let level;
-  if (!msg.devVolOk) {
-    level = "—";
-  } else if (msg.devVol === 0) {
-    level = "muted";
-  } else {
-    level = msg.devVol + "%";
-  }
-  els.audio.textContent = "audio " + (msg.audio === "on" ? level : msg.audio) +
-    (pcm.stats.underruns ? " · u" + pcm.stats.underruns : "");
-  if (!msg.control) {
-    setState("control disabled", "warn");
-  } else if (view.errors) {
-    setState("connected · decode errors", "bad");
-  } else if (stats.lost > 30) {
-    setState("connected · " + stats.lost + " dropped", "warn");
-  } else {
-    setState("connected", "ok");
-  }
+  els.geom.textContent = geomLabel(msg);
+  showFps();
+  // The DEVICE's media volume. The old display used msg.gain, but that gain is
+  // applied in writePCM16 for the PulseAudio sink while the browser is fed raw
+  // PCM by pushPCM -- so it was reporting a control that could not change what
+  // you hear.
+  els.audio.textContent = audioLabel(msg, pcm.stats.underruns);
+  const now = performance.now();
+  const st = stateLabel(msg.control, now - view.errorAt, now - stats.lostAt);
+  setState(st.text, st.cls);
 });
 
 net.on("video", (frame) => {
@@ -1119,23 +1948,123 @@ net.on("video", (frame) => {
       stats.lost = 0;
     } else {
       stats.lost += frame.seq - stats.lastSeq - 1;
+      stats.lostAt = performance.now();
     }
   }
   stats.lastSeq = frame.seq;
   stats.bytes += frame.body.byteLength;
   view.push(frame);
+  if (!conn.frame) {
+    conn.video();
+    showConn();
+  }
 });
 
-net.on("audio", (buf) => {
-  pcm.start().then(() => pcm.push(buf));
+// The server is ending the session; Net has already stopped retrying.
+net.on("bye", (msg) => {
+  conn.ended(msg.reason);
+  pcm.setEnded(true);
+  showConn();
 });
+
+net.onClose = () => {
+  conn.closed();
+  showConn();
+};
+
+// Reconnect is a click, so the sound can start, or resume, inside it.
+els.connRetry.addEventListener("click", () => {
+  conn.reconnect();
+  showConn();
+  pcm.setEnded(false);
+  pcm.unlock();
+  net.reconnect();
+});
+
+net.on("audio", (buf) => pcm.play(buf));
+
+// showSound puts this browser's own sound state on the sound chip. The
+// compatibility note shows for NOTE_MS, the first time sound plays that way.
+// Any other chip but "Tap for sound" (which the first tap anywhere takes
+// away) is shown for NOTE_MS when it starts saying something, and after that
+// only along with the HUD and the bar ("quiet"), so a chip that stays, such as
+// "Sound off · Alt+M", does not sit over the picture's corner taking taps
+// meant for the device.
+const NOTE_MS = 6000;
+let soundShown;
+let soundAct = "";
+let soundFresh = false; // the chip's words are new: it shows without the HUD
+let soundTimer = 0;     // ends soundFresh NOTE_MS after the words last changed
+let compatNote = "due"; // "due", then "shown" for NOTE_MS, then "done"
+let soundDismissed = false;
+function showSound() {
+  if (compatNote === "due" && pcm.mode === "compat" && pcm.heard && pcm.running) {
+    compatNote = "shown";
+    setTimeout(() => {
+      compatNote = "done";
+      showSound();
+    }, NOTE_MS);
+  }
+  const chip = soundChip({
+    mode: pcm.mode,
+    heard: pcm.heard,
+    running: pcm.running,
+    failed: pcm.failed,
+    ended: pcm.ended,
+    muted: pcm.localGain === 0,
+    note: compatNote === "shown",
+    dismissed: soundDismissed,
+  });
+  soundAct = chip ? chip.act : "";
+  const key = JSON.stringify(chip);
+  if (key !== soundShown) {
+    soundShown = key;
+    soundFresh = !!chip;
+    clearTimeout(soundTimer);
+    if (chip && chip.act !== "unlock") {
+      soundTimer = setTimeout(() => {
+        soundFresh = false;
+        showSound();
+      }, NOTE_MS);
+    }
+    if (chip) { // the words stay while it fades out
+      els.soundChip.textContent = chip.text;
+      els.soundChip.title = chip.title || "";
+      if (chip.keys) els.soundChip.setAttribute("aria-keyshortcuts", chip.keys);
+      else els.soundChip.removeAttribute("aria-keyshortcuts");
+    }
+  }
+  els.soundChip.classList.toggle("off", chip === null);
+  els.soundChip.classList.toggle("quiet", !!chip && chip.act !== "unlock" && !soundFresh);
+}
+
+els.soundChip.addEventListener("click", () => {
+  if (soundAct === "unlock" || soundAct === "retry") {
+    pcm.unlock();
+  } else if (soundAct === "unmute") {
+    input.localMute();
+  } else if (soundAct === "explain") {
+    toast(COMPAT_NOTE, NOTE_MS);
+    compatNote = "done";
+  } else if (soundAct === "dismiss") {
+    soundDismissed = true;
+  }
+  showSound();
+});
+
+// Arms the gestures that start the sound (Pcm.unlock) and draws the chip.
+pcm.onchange = showSound;
+pcm.changed();
 
 // Client-side telemetry: proves the page is really painting (and lets
 // SCT_DEBUG_WEB=1 on the host log it). Cheap: one small JSON per second.
 // The data is also published to window.sctermPlayer so an automated browser
 // check can assert on it instead of guessing from pixels.
 setInterval(() => {
-  if (!net.connected) return;
+  if (!net.connected) {
+    showFps();
+    return;
+  }
   const now = performance.now();
   const dts = now - stats.at;
   stats.at = now;
@@ -1174,6 +2103,7 @@ window.sctermPlayer = player;
 // OPEN -- and again after every reconnect, because the server builds a fresh
 // client (audio off, default viewport) for each new socket.
 net.onOpen = () => sendHello();
+showConn();
 net.connect();
 
 window.addEventListener("resize", () => {
@@ -1183,25 +2113,42 @@ window.addEventListener("resize", () => {
   window.__sctResize = setTimeout(sendResize, 120);
 });
 
-// The HUD and the action bar fade out while the user is not touching
-// anything. The floating menu button fades with them (the same .idle class),
-// so all chrome appears and disappears as one layer. Hidden chrome is also
-// made inert, so a faded bar cannot be tabbed into.
+// The chrome: the HUD, the action bar and a quiet sound chip. With a mouse,
+// keys or the wheel it shows and fades out CHROME_IDLE_MS after the last of
+// them, but not while the pointer rests on the bar or, once the session has
+// ended, one of the bar's controls has the keyboard focus. A finger does
+// not bring it up, nor, while the page is used by touch, does a key (a soft
+// keyboard sends them too): a tap or a drag on the picture is for the device,
+// and a bar that came up under it would take the next tap. On a touch screen
+// the ⋯ button beside ☰ shows it until ⋯ is pressed again or the picture is
+// touched. ☰ is always shown and never inert. The bar is inert while faded,
+// so it cannot be tabbed into, but not while the controls sheet is open:
+// closing the sheet can give the focus back to the bar's Controls button, and
+// an inert button cannot take it. The bar stays hidden behind the sheet,
+// however the sheet was opened.
+const CHROME_IDLE_MS = 2500;
+let chromeOn = false;
+let chromePinned = false; // ⋯ showed it, and no timer puts it away
 let hudTimer = 0;
+// touchMode: the page is being used by touch, so ⋯ is shown. A phone starts in
+// it; then the last pointer to press or move decides.
+let touchMode = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
 function chrome(on) {
+  if (!on && toolbar.sheetOpen) return;
+  chromeOn = on;
   els.hud.classList.toggle("idle", !on);
+  if (els.sound) els.sound.classList.toggle("idle", !on);
   const bar = document.getElementById("bar");
-  const mb = document.getElementById("menu-btn");
   if (bar) {
-    bar.classList.toggle("idle", !on);
-    bar.inert = !on;
+    bar.classList.toggle("idle", !on || toolbar.sheetOpen);
+    bar.inert = !on && !toolbar.sheetOpen;
   }
-  if (mb) mb.inert = !on;
+  if (els.barBtn) els.barBtn.setAttribute("aria-expanded", on ? "true" : "false");
 }
-// The action bar wraps to more rows on narrow screens, so the HUD's offset
-// above it is measured rather than guessed: a fixed offset that clears two
-// rows still gets covered by four on a phone. Re-measured whenever the bar
-// changes size (ResizeObserver, where available).
+// The action bar is one row that scrolls sideways, but its height still
+// differs between a mouse and a finger, so the HUD's offset above it is
+// measured rather than guessed. Re-measured whenever the bar changes size
+// (ResizeObserver, where available).
 function fitHud() {
   const bar = document.getElementById("bar");
   if (!bar || !els.hud) return;
@@ -1210,29 +2157,97 @@ function fitHud() {
 function pokeHud() {
   chrome(true);
   clearTimeout(hudTimer);
-  hudTimer = setTimeout(() => chrome(false), 2500);
+  hudTimer = setTimeout(fadeChrome, CHROME_IDLE_MS);
 }
-window.addEventListener("pointermove", pokeHud);
-window.addEventListener("pointerdown", pokeHud);
-window.addEventListener("keydown", pokeHud);
+// fadeChrome hides the chrome unless something holds it, and then looks again
+// CHROME_IDLE_MS later.
+function fadeChrome() {
+  clearTimeout(hudTimer);
+  if (chromePinned || toolbar.sheetOpen || chromeHeld()) {
+    hudTimer = setTimeout(fadeChrome, CHROME_IDLE_MS);
+    return;
+  }
+  chrome(false);
+}
+// chromeHeld: a mouse rests on the bar (a finger leaves :hover behind it), or
+// the session has ended and a control of the bar has the keyboard focus,
+// which an inert bar would drop to the page. During a session Tab, Enter and
+// Space go to the device, so a focused button cannot be worked from the
+// keyboard, and the focus goes with the bar when it fades.
+function chromeHeld() {
+  const bar = document.getElementById("bar");
+  if (bar && !touchMode && matches(bar, ":hover")) return true;
+  const a = document.activeElement;
+  if (!net.ended || !a || a === document.body) return false;
+  if (!(bar && bar.contains(a))) return false;
+  try {
+    return a.matches(":focus-visible");
+  } catch (e) {
+    return true; // no :focus-visible: any focus may be the keyboard's
+  }
+}
+function matches(el, selector) {
+  try {
+    return el.matches(selector);
+  } catch (e) {
+    return false;
+  }
+}
+function setTouchMode(on) {
+  touchMode = on;
+  if (!on) chromePinned = false;
+  if (els.barBtn) els.barBtn.hidden = !on || !toolbar.buttons.length;
+}
+// A press of the picture is for the device. During a session it takes the
+// keyboard focus off the page's buttons (the canvas takes none), so that no
+// focus ring is left on one; once the session has ended the keys are the
+// browser's, and the focus stays where it is (on Reconnect, at first). A
+// finger also puts away the chrome ⋯ brought up.
+function pictureDown(touch) {
+  const a = document.activeElement;
+  if (a && a !== document.body && a !== els.ime && !net.ended && a.blur) a.blur();
+  chromePinned = false;
+  if (touch && chromeOn) fadeChrome();
+}
+function onPointer(ev) {
+  const touch = ev.pointerType === "touch";
+  if (ev.type === "pointerdown" || !touch) setTouchMode(touch);
+  if (ev.type === "pointerdown" && ev.target === els.canvas) pictureDown(touch);
+  if (!touch) pokeHud();
+}
+window.addEventListener("pointermove", onPointer);
+window.addEventListener("pointerdown", onPointer);
+window.addEventListener("keydown", () => { if (!touchMode) pokeHud(); });
 window.addEventListener("wheel", pokeHud);
+if (els.barBtn) {
+  els.barBtn.addEventListener("click", () => {
+    clearTimeout(hudTimer);
+    chromePinned = !chromeOn;
+    chrome(chromePinned);
+  });
+}
+// Closing the sheet shows the bar again if the chrome is still up.
+toolbar.onclose = () => chrome(chromeOn);
+document.addEventListener("fullscreenchange", () => toolbar.showFullscreen());
+document.addEventListener("webkitfullscreenchange", () => toolbar.showFullscreen());
 fitHud();
 if (typeof ResizeObserver !== "undefined") {
   const bar = document.getElementById("bar");
   if (bar) new ResizeObserver(fitHud).observe(bar);
 }
-pokeHud();
+setTouchMode(touchMode);
+if (touchMode) chrome(false);
+else pokeHud();
 
-// A tap on the page is the user gesture audio needs.
-window.addEventListener("pointerdown", () => pcm.start(), { once: true });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
-    pokeHud();
+    if (!touchMode) pokeHud();
     sendResize();
     net.send({ op: "ping" });
   }
 });
 // NOTE: closing a tab must NOT end the session -- a second viewer, or a reload,
-// would lose the mirror. --window ends when the last client disconnects, and
-// closing the window disconnects.
+// would lose the mirror. --window ends 3 s after the last client disconnects
+// (webLeaveGrace in web.go), unless a page connects again first, as a reload
+// does; closing the window disconnects.
 

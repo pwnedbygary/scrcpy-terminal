@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -72,37 +75,65 @@ type app struct {
 
 	lastFrameNano int64
 
+	// streamFPS is the stream's frame rate as the last frame drawn carried it
+	// (videoFrame.fps): the rate --no-tui prints and the browser display's
+	// status messages carry (the page shows the rate it paints at). The
+	// status row shows it rather than the mean of ftHist, which counts the
+	// pauses of a still screen, where the device repeats a frame at most ten
+	// times, 100 ms apart, and then sends none until something changes.
+	streamFPS float64
+
 	// keyboard auto-grabbed the mouse on open (Zellij); restore on close
 	kbAutoGrabbed bool
+
+	// shotKeyAt is when the last Alt+S key press came (screenshotKey).
+	shotKeyAt time.Time
+
+	// soundOffSaid is whether a volume key has said that the sound is off,
+	// which it says once (localVolumeWorks). Only the run loop reads or sets
+	// it.
+	soundOffSaid bool
 
 	// quitting is set once shutdown has begun, so teardown-time socket errors
 	// ("stream ended: use of closed network connection") are not reported as
 	// failures on the way out.
 	quitting atomic.Bool
+
+	// restoreTerm gives the terminal back (normal screen, no mouse reporting,
+	// cooked mode) once, whichever of the run loop's exit and a panic on
+	// another goroutine gets there first. Nil outside the terminal UI.
+	restoreTerm func()
 }
 
 type inputEvent struct {
-	kind int // evBytes, evResize, evQuit, evTick
+	kind int // evBytes, evResize, evQuit, evTick, evTickFast, evZellijRegrab
 	buf  []byte
 }
 
 const (
-	evBytes    = 0
-	evResize   = 1
-	evQuit     = 2
-	evTick     = 3
-	evTickFast = 4 // ~16ms: flushes coalesced drag moves without waiting for evTick
+	evBytes        = 0
+	evResize       = 1
+	evQuit         = 2
+	evTick         = 3
+	evTickFast     = 4 // ~16ms: flushes coalesced drag moves without waiting for evTick
+	evZellijRegrab = 5 // openKeyboard's delayed mouse re-grab, done on the run loop
 )
 
 func newApp(sess *session, cfg config) *app {
 	a := &app{
 		sess:        sess,
 		cfg:         cfg,
-		audio:       newAudioSink(),
+		audio:       noAudioSink(),
 		events:      make(chan inputEvent, 256),
 		frames:      make(chan *videoFrame, 1), // drop-old display mailbox
 		grabbed:     true,
 		barFlashIdx: -1, // no button flashed until one is clicked
+	}
+	switch {
+	case playsHere(cfg, sess):
+		a.audio = newAudioSink()
+	case sessionHasSound(cfg, sess):
+		a.audio = browserOnlySink()
 	}
 	_, a.inZellij = os.LookupEnv("ZELLIJ")
 	if a.inZellij {
@@ -115,6 +146,7 @@ func newApp(sess *session, cfg config) *app {
 	// The demux loops live for as long as the app; they must exist before the
 	// web server (which sinks decoded frames) is built.
 	a.stream = newStreamState(sess, cfg, a.ctrl)
+	a.stream.quitting = &a.quitting
 	if !cfg.noTUI {
 		a.tui = newTUI()
 		a.tui.repaintInterval = cfg.repaintInterval
@@ -174,24 +206,25 @@ func (a *app) run() error {
 	if err != nil {
 		return fmt.Errorf("raw mode: %w", err)
 	}
-	defer restoreMode(ttyReadFD(), oldMode)
+	a.restoreTerm = a.terminalRestorer(oldMode)
+	defer a.restoreTerm()
 
 	// Print warnings before entering the alternate screen so they don't
 	// corrupt the TUI.
-	if a.cfg.audio && a.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
-	}
+	a.sayAudioDisabled()
 
+	// From here until the terminal is restored, messages are notices.
+	wake := notices.start()
 	a.tui.shellInit()
-	defer a.tui.shellClose()
 
 	a.setMouse(a.grabbed)
 	a.tui.setStatus(a.statusLine())
+	a.paintPlaceholder()
 
-	go a.inputLoop()
+	a.goTUI(a.inputLoop)
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGWINCH, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
+	a.goTUI(func() {
 		for s := range sigCh {
 			switch s {
 			case syscall.SIGWINCH:
@@ -200,35 +233,35 @@ func (a *app) run() error {
 				a.events <- inputEvent{kind: evQuit}
 			}
 		}
-	}()
+	})
 
-	go func() {
-		if err := a.stream.runVideo(); err != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: video: %v\n", err)
-			a.events <- inputEvent{kind: evQuit}
-		}
-	}()
-	go func() {
-		if err := a.stream.runAudio(a.audio); err != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
-		}
-	}()
+	lost := a.watchStreams()
 
-	go func() {
+	a.goTUI(func() {
 		for {
 			time.Sleep(500 * time.Millisecond)
 			a.events <- inputEvent{kind: evTick}
 		}
-	}()
-	go func() {
+	})
+	a.goTUI(func() {
 		fast := time.NewTicker(16 * time.Millisecond)
 		defer fast.Stop()
 		for range fast.C {
 			a.events <- inputEvent{kind: evTickFast}
 		}
-	}()
-	go a.followAudioSink()
+	})
+	if pactl, ok := a.audioFollower(); ok {
+		stopFollow, every := make(chan struct{}), audioFollowEvery
+		defer close(stopFollow)
+		a.goTUI(func() { followAudioSink(pactl, a.audio, stopFollow, every) })
+	}
 
+	return a.loop(wake, lost)
+}
+
+// loop is the terminal UI's run loop. It ends with nil on a quit, or with the
+// error of the stream the terminal UI shows when that stream ends.
+func (a *app) loop(wake <-chan struct{}, lost <-chan error) error {
 	for {
 		select {
 		case ev := <-a.events:
@@ -242,9 +275,12 @@ func (a *app) run() error {
 			case evTick:
 				a.flushPendingMove()
 				a.barTick()
+				a.kbTick(timeNowUnixNano())
 				a.tui.setStatus(a.statusLine())
 			case evBytes:
 				a.handleInput(ev.buf)
+			case evZellijRegrab:
+				a.zellijRegrab()
 			}
 		case f := <-a.frames:
 			// Draw here, in the run loop, not in the sink: see app.frame. This
@@ -255,17 +291,163 @@ func (a *app) run() error {
 				a.recordFrameTime(float64(now-a.lastFrameNano) / 1e6)
 			}
 			a.lastFrameNano = now
+			a.streamFPS = f.fps
 			a.frameW, a.frameH = f.w, f.h
 			a.tui.draw(f.rgb)
 			a.stream.returnPooled(f.rgb)
+		case <-wake:
+			a.refreshStatus()
+		case err := <-lost:
+			return err
 		}
 	}
 }
 
-// hostAudioSilent reports whether the host audio sink must stay silent.
+// terminalRestorer gives the terminal back (normal screen, no mouse
+// reporting, cooked mode) once, whichever of the run loop's exit and a panic
+// on another goroutine gets there first, then prints the notices the terminal
+// UI showed. From then on the app is quitting.
+func (a *app) terminalRestorer(oldMode *syscall.Termios) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			a.quitting.Store(true)
+			a.tui.shellClose()
+			restoreMode(ttyReadFD(), oldMode)
+			notices.stop(stderrWriter())
+		})
+	}
+}
+
+// watchStreams starts the demuxers. The video stream, or the audio stream when
+// there is no video, is what the terminal UI shows: when it ends, the session
+// is over, and the error naming the device comes back on the channel for the
+// run loop to return. The channel has room for both, so a demuxer never waits
+// on a run loop that has already gone.
+func (a *app) watchStreams() <-chan error {
+	lost := make(chan error, 2)
+	a.goTUI(func() {
+		if err := a.stream.runVideo(); err != nil {
+			lost <- a.lostStream("video", err)
+		}
+	})
+	a.goTUI(func() {
+		err := a.playAudio()
+		switch {
+		case err == nil:
+		case a.sess.video == nil:
+			lost <- a.lostStream("audio", err)
+		case a.quitting.Load() && isClosedConnErr(err):
+			// sess.stop closed the socket on the way out. (Not before: the
+			// device ending the audio stream, EOF, is worth a notice.)
+		default:
+			noticef("scterm: audio: %v\n", err)
+		}
+	})
+	return lost
+}
+
+// playAudio runs the audio demuxer and returns how the audio stream ended.
+// Once the session's sound has stopped, nothing more comes to play on this
+// computer, so playAudio closes the sink: its stream would stay in the
+// desktop's mixer, silent, until scterm quits, and the follower would go on
+// moving it. When the device turns the stream off, the session goes on
+// without sound, as in scrcpy: playAudio says so, with the server's reason,
+// and returns nil. The reason is the device's text, and the line also goes to
+// stderr and to the replay at exit, which print it as it is: its control
+// characters are taken out here.
+func (a *app) playAudio() error {
+	err := a.stream.runAudio(a.audio)
+	if a.stream.soundStopped() != nil && a.audio != nil {
+		a.audio.close()
+	}
+	if !errors.Is(err, errAudioOff) {
+		return err
+	}
+	line := "scterm: no sound from " + a.deviceName()
+	if reason := cleanText(a.sess.audioOffReason(audioOffWait)); reason != "" {
+		line += ": " + reason
+	}
+	if a.cfg.audioDup && a.cfg.audioSource == "" && !a.cfg.usePeer {
+		// serverParams asked for the playback source.
+		line += " (--audio-dup implies --audio-source playback, which needs Android 13 or later)"
+	}
+	notice(line + "\n")
+	return nil
+}
+
+// lostStream is the error the terminal UI ends with when the stream it shows
+// ends without a quit.
+func (a *app) lostStream(stream string, err error) error {
+	return fmt.Errorf("lost the %s stream from %s: %w", stream, a.deviceName(), err)
+}
+
+// deviceName is the device's name for a sentence: "the device" when its name
+// is not known.
+func (a *app) deviceName() string {
+	if name := a.knownDeviceName(); name != "" {
+		return name
+	}
+	return "the device"
+}
+
+// knownDeviceName is the device's name fit for the screen, or "" when it is
+// not known. The device or the pairing sets it, so control characters are
+// taken out.
+func (a *app) knownDeviceName() string {
+	if a.sess == nil {
+		return ""
+	}
+	return cleanText(a.sess.deviceName)
+}
+
+// paintPlaceholder says what the empty picture is waiting for. The first frame
+// paints over it.
+func (a *app) paintPlaceholder() {
+	a.tui.setPlaceholder(a.placeholderText())
+	a.tui.repaint()
+}
+
+// placeholderText is the line shown where the picture will be. The terminal UI
+// starts once the session is connected, so before the first frame it is
+// waiting for video, not for the connection. A peer session has no video
+// socket unless the pairing grants view and the device offers video.
+func (a *app) placeholderText() string {
+	switch {
+	case !a.cfg.video:
+		return "Video is off (--video=false)"
+	case a.sess != nil && a.sess.video == nil:
+		return "No video from " + a.deviceName()
+	}
+	return "Waiting for video from " + a.deviceName() + "…"
+}
+
+// goTUI runs fn on its own goroutine while the terminal UI owns the screen. A
+// panic there would end the process without run's deferred restore, leaving
+// the shell in raw mode on the alternate screen with mouse reporting on.
+func (a *app) goTUI(fn func()) {
+	go func() {
+		defer a.restoreTerminalOnPanic()
+		fn()
+	}()
+}
+
+// restoreTerminalOnPanic gives the terminal back, then lets the panic go on
+// to print its stack trace and end the process.
+func (a *app) restoreTerminalOnPanic() {
+	if r := recover(); r != nil {
+		if a.restoreTerm != nil {
+			a.restoreTerm()
+		}
+		panic(r)
+	}
+}
+
+// hostAudioSilent reports whether this computer must play none of the sound.
 //
 // In web/window mode the browser plays the device audio (fed by the PCM tap),
-// so the stream is the sole source of sound and the host sink is muted.
+// so the stream is the sole source of sound, and the session opens no host
+// sink (browserOnlySink).
 // --audio-dup asks for the sound in both places: the host device and the
 // window each play it, which is a deliberate duplicate rather than the
 // accidental doubling that used to happen unconditionally.
@@ -277,13 +459,42 @@ func hostAudioSilent(cfg config) bool {
 	return cfg.web && !cfg.audioDup
 }
 
+// sessionHasSound reports whether the session has a sound stream: not with
+// --no-audio. In peer mode cfg.audio is only the request: the session has an
+// audio socket only when the target grants sound.
+func sessionHasSound(cfg config, sess *session) bool {
+	return cfg.audio && sess != nil && sess.audio != nil
+}
+
+// playsHere reports whether the session plays its sound on this computer: it
+// has a sound stream, and the browser is not its only output. Only such a
+// session opens a sink here (newApp) and silences the leftover streams of
+// other scterms (main). Whether the device keeps the stream on, and whether
+// the sink opens, is not known yet.
+func playsHere(cfg config, sess *session) bool {
+	return sessionHasSound(cfg, sess) && !hostAudioSilent(cfg)
+}
+
+// soundless reports whether the session has no sound at all, so there is
+// nothing to say about where it plays: with --no-audio, or with the sink a
+// session without a sound stream gets (noAudioSink).
+func (a *app) soundless() bool {
+	return !a.cfg.audio || errors.Is(a.audio.failure(), errNoSound)
+}
+
+// sayAudioDisabled prints why this computer plays none of the session's
+// sound: the session has sound, and its sink did not open. run and
+// runHeadless print it before they start.
+func (a *app) sayAudioDisabled() {
+	if !a.soundless() && a.audio.failure() != nil {
+		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
+	}
+}
+
 // runWeb is the --web / --window main loop. There is no terminal UI: the
 // browser is the display, so this loop only owns the stream goroutines, the
 // shutdown signal path and the shutdown sequence.
 func (a *app) runWeb() error {
-	if a.cfg.audio && a.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
-	}
 	if a.web == nil {
 		return fmt.Errorf("web display not configured")
 	}
@@ -297,18 +508,25 @@ func (a *app) runWeb() error {
 	// the demux goroutine always sees it.
 	a.stream.webMode = true
 	// Audio routing: in web/window mode the browser plays the device audio, so
-	// the stream is the sole source of sound and the host sink stays silent.
-	// --audio-dup asks for the sound in both places (host device and window),
-	// which is the only way to get it played twice.
+	// the stream is the sole source of sound: the session has no host sink
+	// (browserOnlySink), and any sink it is given stays silent. --audio-dup
+	// asks for the sound in both places (host device and window), which is the
+	// only way to get it played twice.
 	if a.audio != nil {
 		a.audio.silent.Store(hostAudioSilent(a.cfg))
 		switch {
-		case a.audio.silent.Load():
-			// "muted" here is the POLICY, not a reading of the host mixer: the
-			// browser is the audio output, so the host sink is deliberately
-			// left silent to avoid playing every sound twice, slightly offset.
+		case a.soundless():
+			// No sound, so nowhere for it to play.
+		case a.audio.failure() != nil:
+			// --audio-dup, and the sink did not open. The PCM tap does not go
+			// through the sink: the browser still plays.
 			fmt.Fprintf(stderrWriter(),
-				"scterm: audio: browser only (the host sink stays silent; pass --audio-dup to play on both)\n")
+				"scterm: audio: browser only; no sound on this computer: %v\n", a.audio.errString())
+		case a.audio.silent.Load():
+			// The browser is the audio output: playing here as well would
+			// play every sound twice, slightly offset.
+			fmt.Fprintf(stderrWriter(),
+				"scterm: audio: browser only (pass --audio-dup to play it on this computer too)\n")
 		case a.cfg.audioDup:
 			fmt.Fprintf(stderrWriter(),
 				"scterm: audio: duplicated (host sink and browser both play)\n")
@@ -336,11 +554,16 @@ func (a *app) runWeb() error {
 		}
 	}()
 	go func() {
-		if err := a.stream.runAudio(a.audio); err != nil && !a.quitting.Load() && !isClosedConnErr(err) {
-			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
+		// Nothing once quitting: sess.stop closes the socket on the way out.
+		// Before that, the device ending the audio stream, EOF, is worth a
+		// line, as in the other displays.
+		if err := a.playAudio(); err != nil && !a.quitting.Load() {
+			fmt.Fprintf(stderrWriter(), "scterm: audio: %s\n", cleanText(err.Error()))
 		}
 	}()
-	go a.followAudioSink()
+	if pactl, ok := a.audioFollower(); ok {
+		go followAudioSink(pactl, a.audio, a.web.done, audioFollowEvery)
+	}
 
 	// A 500ms tick keeps the mouse-drag coalescer fed even when no browser is
 	// connected, and lets the status line (TUI-attached runs) stay live.
@@ -395,16 +618,14 @@ func (a *app) runWeb() error {
 			return err
 		case err := <-videoErr:
 			a.quitting.Store(true)
-			a.web.stop()
+			a.web.stopWith(webByeStreamEnded)
 			return err
 		}
 	}
 }
 
 func (a *app) runHeadless() error {
-	if a.cfg.audio && a.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: audio disabled: %v\n", a.audio.errString())
-	}
+	a.sayAudioDisabled()
 	// Same signal handling as the TUI path: SIGTERM/SIGINT must exit and
 	// run shutdown so the PulseAudio stream is closed.
 	sigCh := make(chan os.Signal, 4)
@@ -419,25 +640,37 @@ func (a *app) runHeadless() error {
 			}
 		}
 	}()
+	// The end of the video stream ends the run with its error, which main
+	// prints ("scterm: video: ...") before it exits.
+	videoErr := make(chan error, 1)
 	go func() {
 		if err := a.stream.runVideo(); err != nil {
-			fmt.Fprintf(stderrWriter(), "scterm: video: %v\n", err)
-			a.events <- inputEvent{kind: evQuit}
+			videoErr <- err
 		}
 	}()
 	go func() {
-		if err := a.stream.runAudio(a.audio); err != nil {
+		switch err := a.playAudio(); {
+		case err == nil:
+		case a.quitting.Load() && isClosedConnErr(err):
+			// sess.stop closed the socket on the way out. (Not before: the
+			// device ending the audio stream, EOF, is worth a line.)
+		default:
 			fmt.Fprintf(stderrWriter(), "scterm: audio: %v\n", err)
 		}
 	}()
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(statisticsEvery)
 	defer ticker.Stop()
 	var dumped int
+	width := 0 // of the longest statistics line printed
 
 	for {
 		select {
 		case <-a.events:
+			a.quitting.Store(true)
 			return nil
+		case err := <-videoErr:
+			a.quitting.Store(true)
+			return fmt.Errorf("video: %w", err)
 		case f := <-a.frames:
 			// Same mailbox as the TUI: the run loop owns the frame and the
 			// demux goroutine never waits on disk I/O either. At most three
@@ -454,16 +687,44 @@ func (a *app) runHeadless() error {
 			}
 			a.stream.returnPooled(f.rgb)
 		case <-ticker.C:
-			lag := (a.stream.lastVideoPts.Load() - a.stream.lastAudioPts.Load()) / 1000
-			fmt.Fprintf(os.Stdout, "\r[%dx%d fps=%.0f audio=%s pcm=%dKB peak=%d avlag=%dms]   ",
-				a.frameW, a.frameH, a.stream.currentFPS, audioState(a),
-				a.stream.audioBytesSeen()/1024, a.stream.peakAudio(), lag)
+			// Padded to the longest line printed, so that a shorter one,
+			// once the sound stops, hides all of it.
+			line := "[" + a.statistics() + "]"
+			width = max(width, len(line))
+			fmt.Fprintf(os.Stdout, "\r%-*s   ", width, line)
 		}
 	}
 }
 
+// statisticsEvery is how often --no-tui prints its statistics line.
+var statisticsEvery = 2 * time.Second
+
+// statistics is the statistics line of --no-tui: the picture's size, the
+// stream's frame rate and the sound (audioState). While sound plays, which
+// takes a sound stream that is not off and has sent a packet, it adds the
+// PCM decoded and its peak, and once a video packet has come too, how far
+// the audio lags the video. The server stamps packets with the device's
+// monotonic clock, so a timestamp of 0 means that none has come yet.
+func (a *app) statistics() string {
+	audio := audioState(a)
+	line := fmt.Sprintf("%dx%d fps=%.0f audio=%s", a.frameW, a.frameH, a.stream.currentFPS, audio)
+	audioPts := a.stream.lastAudioPts.Load()
+	if audio == "off" || audioPts == 0 {
+		return line
+	}
+	line += fmt.Sprintf(" pcm=%dKB peak=%d", a.stream.audioBytesSeen()/1024, a.stream.peakAudio())
+	if videoPts := a.stream.lastVideoPts.Load(); videoPts != 0 {
+		line += fmt.Sprintf(" avlag=%dms", (videoPts-audioPts)/1000)
+	}
+	return line
+}
+
+// audioState is the sound for the statistics line of --no-tui, where this
+// computer's sink is what plays: off with --no-audio, once the sound has
+// stopped (soundStopped), and when the sink did not open; muted or the volume
+// otherwise.
 func audioState(a *app) string {
-	if a.audio.err != nil {
+	if !a.cfg.audio || a.audio.failure() != nil || a.stream.soundStopped() != nil {
 		return "off"
 	}
 	if a.audio.gainPercent() == 0 {
@@ -504,6 +765,7 @@ func (a *app) setMouse(on bool) {
 // is size-dependent. The menu in particular must re-record its click rows
 // (refreshMenu does that) or a click would be matched against the old
 // geometry, up to and including the status row that runs Quit on a small pane.
+// The keyboard is laid out from the bottom of the pane, so it moves with it.
 func (a *app) onResize() {
 	a.tui.resize()
 	if a.stream != nil {
@@ -512,8 +774,12 @@ func (a *app) onResize() {
 	switch {
 	case a.menuOpen:
 		a.refreshMenu()
+	case a.kb != nil && a.kb.open:
+		a.refreshKeyboard()
 	case a.barVisible():
 		a.refreshOverlays()
+	case !a.tui.hasFrame():
+		a.tui.repaint() // the placeholder moves to the middle of the new size
 	}
 	a.tui.setStatus(a.statusLine())
 }
@@ -548,19 +814,29 @@ func (a *app) openKeyboard() {
 	}
 	// Zellij sometimes needs the pane to be focused/clicked before mouse
 	// events flow; the first click after opening may be consumed by the
-	// frontend. Re-assert grab briefly after 300ms as a handshake nudge.
+	// frontend. Re-assert grab briefly after 300ms as a handshake nudge. The
+	// timer's goroutine only asks the run loop, which owns the app's state and
+	// the screen; a full queue drops the nudge.
 	if a.inZellij {
 		time.AfterFunc(300*time.Millisecond, func() {
-			if a.kb == nil || !a.kb.open {
-				return
-			}
-			if !a.grabbed {
-				a.setMouse(true)
-				a.kbAutoGrabbed = true
-				a.refreshKeyboard()
+			select {
+			case a.events <- inputEvent{kind: evZellijRegrab}:
+			default:
 			}
 		})
 	}
+	a.refreshKeyboard()
+}
+
+// zellijRegrab is openKeyboard's delayed re-grab, run by the run loop. Once
+// the terminal has been given back it does nothing: mouse reporting turned on
+// then would pour escape sequences into the shell.
+func (a *app) zellijRegrab() {
+	if a.quitting.Load() || a.kb == nil || !a.kb.open || a.grabbed {
+		return
+	}
+	a.setMouse(true)
+	a.kbAutoGrabbed = true
 	a.refreshKeyboard()
 }
 
@@ -636,14 +912,15 @@ func (a *app) sparkline(width int) string {
 	maxMs := 100.0
 	// NOTE: blocks is a []rune. Indexing a string by byte would slice INSIDE
 	// a 3-byte UTF-8 sequence and emit garbage (the garbled-characters bug).
-	blocks := []rune("  ▁▂▃▄▅▆▇█")
+	blocks := []rune("▁▂▃▄▅▆▇")
 	out := make([]rune, 0, n)
 	for i := 0; i < n; i++ {
 		v := a.ftHist[(start+i)%len(a.ftHist)]
 		if v > maxMs {
 			v = maxMs
 		}
-		// 0..100ms -> 1..7 (lowest bar = after the leading space)
+		// 0..100ms -> bars 1..7. The lowest is a visible bar, so a steady
+		// rate draws a flat line rather than blank cells.
 		h := int(v / maxMs * 7.0)
 		if h < 1 {
 			h = 1
@@ -651,60 +928,130 @@ func (a *app) sparkline(width int) string {
 		if h > 7 {
 			h = 7
 		}
-		out = append(out, blocks[h])
+		out = append(out, blocks[h-1])
 	}
 	return string(out)
 }
+
+// The status row hints come first and stay whole whenever the pane is as wide
+// as them: Ctrl+C goes to the device (raw mode), so how to quit must always be
+// readable. They are deliberately short: the full control list is one chord
+// away in the Controls menu (and in the README), and spelling out every key
+// here ate two lines of a phone-sized terminal.
+const (
+	statusHints    = "Alt+Q quit · Alt+/ controls"
+	statusQuitHint = "Alt+Q quit" // all a pane narrower than the hints keeps
+)
+
+// statusPart is one piece of the status row after the hints.
+type statusPart struct {
+	text   string
+	join   string // what goes before it, " · " when empty
+	shrink bool   // cut short with "…" instead of dropped when it does not fit
+}
+
+// statusMinShrink is the fewest cells a part is cut to before it is dropped.
+const statusMinShrink = 6
+
+// statusQuitPrompt leads the parts while an overlay's Quit waits for its
+// second press. The menu says so in its Quit row too, but on a pane of 18
+// rows or fewer that row is cut off.
+const statusQuitPrompt = "press Quit again to quit"
 
 func (a *app) statusLine() string {
 	if a.tui == nil || a.audio == nil {
 		return ""
 	}
-	vol := "-"
-	if a.audio != nil && a.cfg.audio {
-		if a.audio.err == nil {
-			vol = strconv.Itoa(a.audio.gainPercent()) + "%"
-		} else {
-			vol = "off"
-		}
+	now := timeNowUnixNano()
+	parts := a.statusParts()
+	if n := notices.current(now); n != "" {
+		// A notice stands in for the state and the stats for a few seconds.
+		parts = []statusPart{{text: n, shrink: true}}
 	}
-	g := "grab"
-	if !a.grabbed {
-		g = "UNGRAB"
+	if a.kb != nil && a.kb.quit.from != 0 && a.kb.quitArmed(a.kb.quit.from, now) {
+		parts = append([]statusPart{{text: statusQuitPrompt, shrink: true}}, parts...)
 	}
-	name := "device"
-	if a.sess != nil {
-		name = a.sess.deviceName
+	return fitStatus(a.tui.cols, parts)
+}
+
+// statusParts is what follows the hints, most important first: where input
+// goes, the software keyboard, the volume and the device's name if it is
+// known, then the frame size, the stream's frame rate and the sparkline of the
+// times between the frames drawn, which are the first to go on a narrow pane.
+func (a *app) statusParts() []statusPart {
+	var mode string
+	switch {
+	case a.grabbed:
+	case a.inZellij:
+		// handleInput drops typing while ungrabbed under Zellij; F1-F11,
+		// Alt+letters and Esc still reach the device.
+		mode = "typing goes to Zellij · F12 gives control"
+	default:
+		mode = "mouse free (F12)"
 	}
-	kb := ""
+	var kb string
 	if a.kb != nil && a.kb.open {
-		kb = "  [KB]"
+		kb = "[KB]"
 	}
-	var ft string
-	if a.ftCnt > 0 {
-		avg := 0.0
-		n := a.ftCnt
-		if n > 32 {
-			n = 32
+	var vol string
+	if a.cfg.audio {
+		vol = "audio off"
+		if a.audio.failure() == nil && a.stream.soundStopped() == nil {
+			vol = "vol " + strconv.Itoa(a.audio.gainPercent()) + "%"
 		}
-		for i := 0; i < n; i++ {
-			idx := (a.ftIdx - 1 - i + len(a.ftHist)) % len(a.ftHist)
-			avg += a.ftHist[idx]
-		}
-		avg /= float64(n)
-		fps := 0.0
-		if avg > 0.01 {
-			fps = 1000.0 / avg
-		}
-		ft = fmt.Sprintf("  %s %4.1fms %4.1ffps ", a.sparkline(20), avg, fps)
 	}
-	// The hint is intentionally short: the full control list lives in the
-	// action menu (Alt+/) and in the README. Spelling out every F-key here ate
-	// two lines of a phone-sized terminal and still needed the menu to explain
-	// it, so the menu is now the discoverable path and this is the pointer to
-	// it. "Alt+/ menu" is the only thing a new user has to learn.
-	return fmt.Sprintf("scterm %s %dx%d %s vol %s%s%s| Alt+/ actions · Alt+I keys · Alt+Q quit",
-		name, a.frameW, a.frameH, g, vol, kb, ft)
+	var stats []string
+	if a.frameW > 0 && a.frameH > 0 {
+		stats = append(stats, fmt.Sprintf("%dx%d", a.frameW, a.frameH))
+	}
+	if a.streamFPS > 0 { // 0 until the stream has measured its first half second
+		stats = append(stats, fmt.Sprintf("%4.1fms %4.1ffps", 1000/a.streamFPS, a.streamFPS))
+	}
+	return []statusPart{
+		{text: mode, shrink: true},
+		{text: kb},
+		{text: vol},
+		{text: a.knownDeviceName(), shrink: true},
+		{text: strings.Join(stats, " ")},
+		{text: a.sparkline(20), join: " "},
+	}
+}
+
+// fitStatus lays the status row out in width cells: the hints, then " | " and
+// the parts while they fit. The first part that does not fit ends the row, so
+// the least important ones are the first to go.
+func fitStatus(width int, parts []statusPart) string {
+	used := cellWidth(statusHints)
+	if used > width {
+		return truncateCells(statusQuitHint, width)
+	}
+	var b strings.Builder
+	b.WriteString(statusHints)
+	first := true
+	for _, p := range parts {
+		if p.text == "" {
+			continue
+		}
+		join := " · "
+		switch {
+		case first:
+			join = " | "
+		case p.join != "":
+			join = p.join
+		}
+		room := width - used - cellWidth(join)
+		w := cellWidth(p.text)
+		if w > room {
+			if p.shrink && room >= statusMinShrink {
+				b.WriteString(join + ellipsize(p.text, room))
+			}
+			break
+		}
+		b.WriteString(join + p.text)
+		used += cellWidth(join) + w
+		first = false
+	}
+	return b.String()
 }
 
 func (a *app) shutdown() {

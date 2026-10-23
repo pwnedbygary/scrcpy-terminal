@@ -94,18 +94,26 @@ func (s *Store) Remove(fingerprint string) (bool, error) {
 	return false, nil
 }
 
-// Matches lists the targets a query could mean: the one whose name it is
-// (case-insensitive), else those whose name, or any word in it, starts with
-// the query, or whose fingerprint starts with it (at least four characters,
-// hex or short form). An empty query matches every target.
+// Matches lists the targets a query could mean: the one whose fingerprint it
+// is (hex or short form; two can share a short one), whatever the others are
+// named; else the first whose name it is (case-insensitive); else those whose
+// name, or any word in it, starts with the query, or whose fingerprint starts
+// with it (at least four characters, hex or short form). An empty query
+// matches every target.
 func (s *Store) Matches(query string) ([]Record, error) {
 	recs, err := s.All()
 	if err != nil {
 		return nil, err
 	}
+	return MatchesIn(recs, query), nil
+}
+
+// MatchesIn is Matches for the records recs, read once by a caller that asks
+// many queries of them.
+func MatchesIn(recs []Record, query string) []Record {
 	q := strings.ToLower(strings.TrimSpace(query))
 	compact := strings.ReplaceAll(q, "-", "")
-	var hits []Record
+	var exact, named, hits []Record
 	for _, r := range recs {
 		fp, err := r.ID()
 		if err != nil {
@@ -115,14 +123,22 @@ func (s *Store) Matches(query string) ([]Record, error) {
 		switch {
 		case q == "":
 			hits = append(hits, r)
+		case compact == fp.Hex() || compact == short:
+			exact = append(exact, r)
 		case strings.EqualFold(r.Name, q):
-			return []Record{r}, nil
+			named = append(named, r)
 		case startsNameOrWord(r.Name, q),
 			len(compact) >= 4 && (strings.HasPrefix(r.Fingerprint, compact) || strings.HasPrefix(short, compact)):
 			hits = append(hits, r)
 		}
 	}
-	return hits, nil
+	switch {
+	case len(exact) > 0:
+		return exact
+	case len(named) > 0:
+		return named[:1]
+	}
+	return hits
 }
 
 func startsNameOrWord(name, q string) bool {
@@ -138,25 +154,45 @@ func startsNameOrWord(name, q string) bool {
 	return false
 }
 
-// Find is Matches narrowed to exactly one target.
+// Find is Matches narrowed to exactly one target; when the query means
+// several, the error is an *AmbiguousError.
 func (s *Store) Find(query string) (Record, error) {
-	hits, err := s.Matches(query)
+	recs, err := s.All()
 	if err != nil {
 		return Record{}, err
 	}
+	return FindIn(recs, query)
+}
+
+// FindIn is Find for the records recs, read once by a caller that asks many
+// queries of them.
+func FindIn(recs []Record, query string) (Record, error) {
+	hits := MatchesIn(recs, query)
 	q := strings.TrimSpace(query)
 	switch {
 	case len(hits) == 1:
 		return hits[0], nil
-	case len(hits) > 1 && q == "":
-		return Record{}, fmt.Errorf("%d devices are paired (%s); name one", len(hits), Names(hits))
 	case len(hits) > 1:
-		return Record{}, fmt.Errorf("%q matches %s; give more of the name", query, Names(hits))
+		return Record{}, &AmbiguousError{Query: query, Matches: hits}
 	case q == "":
 		return Record{}, errors.New("no paired devices yet: pair one first")
 	default:
 		return Record{}, fmt.Errorf("no paired device matches %q", query)
 	}
+}
+
+// AmbiguousError is Find's error when the query means more than one target:
+// Matches holds them, and the message lists their names as stored.
+type AmbiguousError struct {
+	Query   string
+	Matches []Record
+}
+
+func (e *AmbiguousError) Error() string {
+	if strings.TrimSpace(e.Query) == "" {
+		return fmt.Sprintf("%d devices are paired (%s); name one", len(e.Matches), Names(e.Matches))
+	}
+	return fmt.Sprintf("%q matches %s; give more of the name", e.Query, Names(e.Matches))
 }
 
 // Names lists records' names for messages: "Pixel, Tablet".

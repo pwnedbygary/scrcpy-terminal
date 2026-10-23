@@ -1,9 +1,11 @@
 package release
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewer(t *testing.T) {
@@ -82,7 +85,7 @@ func TestLatestAndDownload(t *testing.T) {
 		t.Fatalf("binary asset %+v", a)
 	}
 	dir := t.TempDir()
-	path, err := Download(context.Background(), srv.Client(), a, dir, "scterm-test")
+	path, err := Download(context.Background(), srv.Client(), a, dir, "scterm-test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +109,7 @@ func TestDownloadRefusesWhatWasNotPublished(t *testing.T) {
 			t.Fatal(err)
 		}
 		dir := t.TempDir()
-		if _, err := Download(context.Background(), srv.Client(), r.Asset("scterm"), dir, "scterm-test"); err == nil {
+		if _, err := Download(context.Background(), srv.Client(), r.Asset("scterm"), dir, "scterm-test", nil); err == nil {
 			t.Errorf("%s: downloaded anyway", name)
 		}
 		if left, _ := filepath.Glob(filepath.Join(dir, "*")); len(left) != 0 {
@@ -116,5 +119,61 @@ func TestDownloadRefusesWhatWasNotPublished(t *testing.T) {
 	srv := server(t, body, 0, "")
 	if _, err := Latest(context.Background(), srv.Client(), srv.URL+"/missing", "scterm-test"); err == nil {
 		t.Error("a 404 read as a release")
+	}
+}
+
+// TestDownloadCancelledLeavesNothing: a download whose context ends, before
+// it starts or part way, leaves no file behind.
+func TestDownloadCancelledLeavesNothing(t *testing.T) {
+	body := bytes.Repeat([]byte("scterm "), 40000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body[:len(body)/2])
+		w.(http.Flusher).Flush()
+		select { // the rest never comes
+		case <-r.Context().Done():
+		case <-time.After(30 * time.Second):
+		}
+	}))
+	t.Cleanup(srv.Close)
+	a := &Asset{Name: "scterm", URL: srv.URL + "/scterm", Size: int64(len(body)), SHA256: sha(body)}
+	for _, partWay := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		if !partWay {
+			cancel()
+		}
+		dir := t.TempDir()
+		_, err := Download(ctx, srv.Client(), a, dir, "scterm-test", func(int64) { cancel() })
+		cancel()
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("part way %v: %v, want the download cancelled", partWay, err)
+		}
+		if left, _ := filepath.Glob(filepath.Join(dir, "*")); len(left) != 0 {
+			t.Errorf("part way %v: left %v behind", partWay, left)
+		}
+	}
+}
+
+func TestDownloadReportsProgress(t *testing.T) {
+	body := bytes.Repeat([]byte("scterm "), 40000) // 280 kB: several reads
+	for name, size := range map[string]int64{"stated size": int64(len(body)), "no stated size": 0} {
+		srv := server(t, body, size, "sha256:"+sha(body))
+		r, err := Latest(context.Background(), srv.Client(), srv.URL+"/latest", "scterm-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var seen []int64
+		if _, err := Download(context.Background(), srv.Client(), r.Asset("scterm"), t.TempDir(), "scterm-test", func(done int64) {
+			seen = append(seen, done)
+		}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(seen) < 2 || seen[len(seen)-1] != int64(len(body)) {
+			t.Errorf("%s: progress %v, want several reports ending at %d", name, seen, len(body))
+		}
+		for i := 1; i < len(seen); i++ {
+			if seen[i] <= seen[i-1] {
+				t.Errorf("%s: progress went from %d to %d", name, seen[i-1], seen[i])
+			}
+		}
 	}
 }

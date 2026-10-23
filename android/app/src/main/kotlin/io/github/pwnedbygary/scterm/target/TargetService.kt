@@ -40,7 +40,7 @@ import kotlinx.coroutines.flow.collect
  */
 class TargetService : Service() {
     private val statusScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var lastNotification: String? = null
+    private var lastNotification: Pair<String, Boolean>? = null
     private val main = Handler(Looper.getMainLooper())
     private var server: TargetServer? = null
     @Volatile private var backend: ServingBackend? = null
@@ -265,20 +265,24 @@ class TargetService : Service() {
         )
         val text = when {
             b?.ready != true -> b?.status ?: getString(R.string.notification_serving)
-            sessions.isEmpty() -> "Waiting on ${Net.localAddresses().firstOrNull() ?: "this device"}:$port"
-            else -> sessions.joinToString { it.peerName + if (it.holdsLease) " (control)" else "" }
+            sessions.isEmpty() -> {
+                val address = Net.localAddresses().firstOrNull() ?: getString(R.string.serve_this_device)
+                getString(R.string.serve_listening, "$address:$port")
+            }
+            else -> sessions.joinToString { getString(if (it.holdsLease) R.string.serve_controlling else R.string.serve_viewing, it.peerName) }
         }
         val statuses = ScTermApp.of(this).peerMonitor.statuses.value
         val peers = ScTermApp.of(this).peers.all()
         val ready = peers.count { statuses[it.fingerprint]?.tone == Readiness.Tone.GREEN }
         val unavailable = peers.count { statuses[it.fingerprint]?.tone == Readiness.Tone.RED }
         val checking = peers.size - ready - unavailable
-        val summary = "$text\nPaired devices: $ready ready · $checking checking/limited · $unavailable failed"
+        val summary = if (peers.isEmpty()) text else "$text\nPaired devices: $ready ready · $checking checking/limited · $unavailable failed"
         val details = peers.joinToString("\n") { "${it.name}: ${statuses[it.fingerprint]?.label ?: "Not checked"}" }
         val fullText = summary + if (details.isEmpty()) "" else "\n$details"
-        if (lastNotification != fullText) {
-            lastNotification = fullText
-            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(fullText))
+        val shown = fullText to sessions.isNotEmpty()
+        if (lastNotification != shown) {
+            lastNotification = shown
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(fullText, kick = shown.second))
         }
     }
 
@@ -322,7 +326,8 @@ class TargetService : Service() {
         stopSelf()
     }
 
-    private fun notification(text: String): Notification {
+    /** [kick] adds Disconnect all, offered only while someone is connected. */
+    private fun notification(text: String, kick: Boolean = false): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         if (manager.getNotificationChannel(CHANNEL) == null) {
             manager.createNotificationChannel(
@@ -332,8 +337,7 @@ class TargetService : Service() {
         val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java).putExtra("show_peers", true), flags)
         val stop = PendingIntent.getService(this, 1, Intent(this, TargetService::class.java).setAction(ACTION_STOP), flags)
-        val kick = PendingIntent.getService(this, 2, Intent(this, TargetService::class.java).setAction(ACTION_KICK), flags)
-        return Notification.Builder(this, CHANNEL)
+        val builder = Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_serving)
             .setContentTitle(getString(R.string.notification_serving))
             .setContentText(text)
@@ -342,7 +346,11 @@ class TargetService : Service() {
             .setOngoing(true)
             .setContentIntent(open)
             .setCategory(Notification.CATEGORY_SERVICE)
-            .addAction(Notification.Action.Builder(null, getString(R.string.notification_kick), kick).build())
+        if (kick) {
+            val disconnect = PendingIntent.getService(this, 2, Intent(this, TargetService::class.java).setAction(ACTION_KICK), flags)
+            builder.addAction(Notification.Action.Builder(null, getString(R.string.notification_kick), disconnect).build())
+        }
+        return builder
             .addAction(Notification.Action.Builder(null, getString(R.string.notification_stop), stop).build())
             .build()
     }
@@ -382,5 +390,15 @@ class TargetService : Service() {
         fun disconnectAll(context: Context) {
             context.startService(Intent(context, TargetService::class.java).setAction(ACTION_KICK))
         }
+
+        fun hiddenNotifications(context: Context): HiddenNotifications {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            val all = !manager.areNotificationsEnabled()
+            fun hidden(channel: String) = all || manager.getNotificationChannel(channel)?.importance == NotificationManager.IMPORTANCE_NONE
+            return HiddenNotifications(serving = hidden(CHANNEL), pairing = hidden(PAIRING_CHANNEL))
+        }
     }
+
+    /** What Android hides of this service: its notification, and with it Stop ([serving]); its pairing requests ([pairing]). */
+    class HiddenNotifications(val serving: Boolean, val pairing: Boolean)
 }

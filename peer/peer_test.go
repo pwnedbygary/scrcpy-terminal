@@ -202,6 +202,42 @@ func TestIdentityPersists(t *testing.T) {
 	}
 }
 
+// TestLoadIdentityNeverCreatesOne: LoadIdentity reads the identity that
+// LoadOrCreateIdentity keeps, and fails, creating nothing, when there is
+// none (in a directory that is there or not) or it is damaged.
+func TestLoadIdentityNeverCreatesOne(t *testing.T) {
+	empty := t.TempDir()
+	for _, dir := range []string{empty, filepath.Join(empty, "later")} {
+		if id, err := LoadIdentity(dir); id != nil || !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: %v, %v; want no identity and an error that it does not exist", dir, id, err)
+		}
+	}
+	if entries, err := os.ReadDir(empty); err != nil || len(entries) != 0 {
+		t.Errorf("LoadIdentity left %v in the directory (%v)", entries, err)
+	}
+
+	dir := t.TempDir()
+	made, err := LoadOrCreateIdentity(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := LoadIdentity(dir)
+	if err != nil || !read.Fingerprint.Equal(made.Fingerprint) {
+		t.Errorf("read %v, %v; want the identity made in %s", read, err, dir)
+	}
+
+	path := filepath.Join(dir, "identity.pem")
+	if err := os.WriteFile(path, []byte("not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := LoadIdentity(dir); id != nil || err == nil || !strings.HasPrefix(err.Error(), path+": ") {
+		t.Errorf("a damaged identity: %v, %v; want an error that names %s", id, err, path)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "not a key" {
+		t.Errorf("the damaged identity became %q (%v)", data, err)
+	}
+}
+
 func TestStoreFind(t *testing.T) {
 	s := OpenStore(t.TempDir())
 	if _, err := s.Find(""); err == nil {
@@ -251,6 +287,67 @@ func TestStoreFind(t *testing.T) {
 	}
 	if r, err := s.Find(""); err != nil || r.Name != "Pixel 9" {
 		t.Errorf("single record not found by empty query: %v", err)
+	}
+	// An identity, whole or short, in any case and with or without its
+	// dashes, finds its target even when others are named after it. A whole
+	// name still comes before the start of another, and of two targets that
+	// have the name in any case, the first is found.
+	for i, name := range []string{fpA.Short(), a.Fingerprint, strings.ReplaceAll(fpA.Short(), "-", ""), "Pixel 9 Pro", "PIXEL 9"} {
+		s.Put(Record{Fingerprint: strings.Repeat(hex.EncodeToString([]byte{byte(0x10 + i)}), 32), Name: name, Host: "10.0.0.5", Port: DefaultPort})
+	}
+	for _, query := range []string{fpA.Short(), strings.ToLower(fpA.Short()), strings.ReplaceAll(fpA.Short(), "-", ""), a.Fingerprint, strings.ToUpper(a.Fingerprint), " " + fpA.Short() + " "} {
+		if r, err := s.Find(query); err != nil || r.Fingerprint != a.Fingerprint {
+			t.Errorf("Find(%q) = %q, %v; want the target of that identity", query, r.Name, err)
+		}
+	}
+	if r, err := s.Find("pixel 9"); err != nil || r.Fingerprint != a.Fingerprint {
+		t.Errorf("Find(\"pixel 9\") = %q, %v; want the first target of that name", r.Name, err)
+	}
+}
+
+// TestStoreFindHandsBackSeveralMatches: a query that means several targets
+// fails with an *AmbiguousError holding them, worded with their names as
+// stored.
+func TestStoreFindHandsBackSeveralMatches(t *testing.T) {
+	s := OpenStore(t.TempDir())
+	for _, r := range []Record{
+		{Fingerprint: strings.Repeat("ab", 32), Name: "Pixel 8", Host: "10.0.0.2", Port: DefaultPort},
+		{Fingerprint: strings.Repeat("cd", 32), Name: "Pixel\x07 9", Host: "10.0.0.3", Port: DefaultPort},
+	} {
+		if err := s.Put(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for query, want := range map[string]string{
+		"":       "2 devices are paired (Pixel 8, Pixel\x07 9); name one",
+		"  ":     "2 devices are paired (Pixel 8, Pixel\x07 9); name one",
+		" pixel": `" pixel" matches Pixel 8, Pixel` + "\x07" + ` 9; give more of the name`,
+	} {
+		_, err := s.Find(query)
+		var several *AmbiguousError
+		if !errors.As(err, &several) || len(several.Matches) != 2 || several.Query != query || err.Error() != want {
+			t.Errorf("Find(%q): %q\nwant %q, holding both", query, err, want)
+		}
+	}
+}
+
+// TestStoreFindReportsPairingsThatCannotBeRead: when peers.json does not
+// parse, Find and Matches report that, for any query, rather than finding
+// a target or none.
+func TestStoreFindReportsPairingsThatCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "peers.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := OpenStore(dir)
+	for _, query := range []string{"", "Pixel"} {
+		var syntax *json.SyntaxError
+		if r, err := s.Find(query); !errors.As(err, &syntax) {
+			t.Errorf("Find(%q) = %q, %v; want the error parsing peers.json", query, r.Name, err)
+		}
+		if hits, err := s.Matches(query); hits != nil || !errors.As(err, &syntax) {
+			t.Errorf("Matches(%q) = %d targets, %v; want the error parsing peers.json", query, len(hits), err)
+		}
 	}
 }
 

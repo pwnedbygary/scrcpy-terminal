@@ -2,7 +2,9 @@ package main
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 )
 
@@ -49,11 +51,9 @@ type config struct {
 	takeover  bool   // take control on connect even if another device has it
 }
 
-func main() {
-	if runPeerCommand(os.Args[1:]) || runUpdateCommand(os.Args[1:]) {
-		return
-	}
-	cfg := config{
+// defaultConfig is the configuration flags start from.
+func defaultConfig() config {
+	return config{
 		video:           true,
 		audio:           true,
 		control:         true,
@@ -65,6 +65,14 @@ func main() {
 		webPort:         6969,
 		webQuality:      5,
 	}
+}
+
+func main() {
+	if runPeerCommand(os.Args[1:]) || runUpdateCommand(os.Args[1:]) || runDoctorCommand(os.Args[1:]) || runLicensesCommand(os.Args[1:]) ||
+		runCompletionCommand(os.Args[1:]) {
+		return
+	}
+	cfg := defaultConfig()
 	var mirrorFPS float64
 	parseFlags(&cfg, &mirrorFPS)
 	if cfg.keys {
@@ -78,12 +86,25 @@ func main() {
 	if cfg.window {
 		cfg.web = true
 	}
-	if cfg.web && cfg.noTUI {
-		fatal(fmt.Errorf("--web/--window and --no-tui are mutually exclusive"))
+	if err := validateConfig(cfg); err != nil {
+		usageError(err.Error())
 	}
 
-	// Show the version in the status line (useful for bug reports).
+	// A session prints its version first, on stderr, as scterm version prints
+	// it (useful for bug reports).
 	logOnce(fmt.Sprintf("scterm %s\n", version))
+
+	// The browser display listens before any device or peer is touched, so
+	// that a port it cannot use ends the run at once; the display then serves
+	// this listener.
+	var webLn net.Listener
+	if cfg.web {
+		ln, err := listenWeb(cfg.webAddr, cfg.webPort)
+		if err != nil {
+			fatal(err)
+		}
+		webLn = ln
+	}
 
 	var sess *session
 	if cfg.usePeer {
@@ -109,25 +130,65 @@ func main() {
 	}
 	defer sess.stop()
 
-	// Remove any sink-inputs left behind by a previous hard-killed sct
-	// (they keep playing audio from a dead process).
-	cleanupStaleStreams()
+	// A session that plays its sound on this computer first removes the
+	// sink-inputs a hard-killed scterm left behind (they keep playing audio
+	// from a dead process). One that plays nothing here leaves every stream
+	// alone, another live session's included.
+	if playsHere(cfg, sess) {
+		cleanupStaleStreams()
+	}
 
 	app := newApp(sess, cfg)
+	if cfg.web {
+		app.web.ln = webLn
+	}
 	err := app.run()
 	app.shutdown()
+	endSession(sess, err)
+}
+
+// endSession reports how a session ended. A peer target's reason comes first;
+// an error then stops the session and exits with the error's line and status,
+// while a quit returns for main to return.
+func endSession(sess *session, err error) {
 	// A peer target says why it ended a session (revoked, serving stopped, ...).
+	// The reason and the name are its own text: their control characters are
+	// taken out.
 	if sess.peer != nil {
-		if reason := sess.peer.Reason(); reason != "" && reason != "closed" {
-			fmt.Fprintf(os.Stderr, "scterm: %s ended the session: %s\n", sess.deviceName, reason)
+		if reason := cleanText(sess.peer.Reason()); reason != "" && reason != "closed" {
+			name := cleanText(sess.deviceName)
+			if name == "" {
+				name = "the device"
+			}
+			fmt.Fprintf(os.Stderr, "scterm: %s ended the session: %s\n", name, reason)
 		}
 	}
 	if err != nil {
-		fatal(err)
+		sess.stop() // exitWith's exit skips main's deferred stop
+		exitWith(err)
 	}
 }
 
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "scterm: %v\n", err)
 	os.Exit(1)
+}
+
+// exitWith reports the error a session ended with and exits with its status.
+func exitWith(err error) {
+	fmt.Fprintf(os.Stderr, "scterm: %v\n", err)
+	os.Exit(exitStatus(err))
+}
+
+// exitStatus is the exit status of a session that ended with err, as scrcpy's:
+// 0 for a quit, 2 when the device was lost during the session (the stream the
+// display shows ended after it started), and 1 for anything else.
+func exitStatus(err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, new(lostError)):
+		return 2
+	}
+	return 1
 }

@@ -56,6 +56,7 @@ import io.github.pwnedbygary.scterm.protocol.ErrorCodes
 import io.github.pwnedbygary.scterm.protocol.Fingerprint
 import io.github.pwnedbygary.scterm.protocol.Grant
 import io.github.pwnedbygary.scterm.protocol.LeaseState
+import io.github.pwnedbygary.scterm.protocol.LocalAction
 import io.github.pwnedbygary.scterm.protocol.MediaStreamReader
 import io.github.pwnedbygary.scterm.protocol.MediaWire
 import io.github.pwnedbygary.scterm.protocol.PeerMessage
@@ -161,9 +162,15 @@ class ViewerActivity : ComponentActivity() {
         }
         // The panel is a window of its own: it can only be added once this one is.
         window.decorView.post { applyOrientation(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) }
-        // System Back is the remote Back; leaving uses the Disconnect button.
+        // During a session System Back is the remote Back, and leaving uses the
+        // Disconnect button. While connecting, or after a session ended, there is
+        // nothing to send it to, so Back leaves.
         onBackPressedDispatcher.addCallback(this) {
-            if (keyboardShown) hideKeyboard() else input.press(DeviceAction.BACK)
+            when {
+                keyboardShown -> hideKeyboard()
+                session == null -> finish()
+                else -> input.press(DeviceAction.BACK)
+            }
         }
         findViewById<Button>(R.id.overlay_retry).setOnClickListener {
             if (cleanupReady) {
@@ -279,7 +286,9 @@ class ViewerActivity : ComponentActivity() {
                 pending = connected
                 if (!attempts.isCurrent(attempt)) { connected.closeNow(); return@thread }
                 app.peers.update(fingerprint) { it?.copy(grantedByPeer = Grant.toWire(connected.grants), lastSeenMs = System.currentTimeMillis()) }
-                main.post { onConnected(connected, attempt) }
+                // Not through main, whose queue onDestroy empties: a session that arrives
+                // during onDestroy must still reach onConnected, which closes it.
+                runOnUiThread { onConnected(connected, attempt) }
             } catch (e: Exception) {
                 pending?.closeNow()
                 main.post { if (attempts.isCurrent(attempt) && !leaving) fail(describe(e, "$host:$port", name ?: "The target")) }
@@ -418,14 +427,16 @@ class ViewerActivity : ComponentActivity() {
     private fun buildBar() {
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
-        fun add(label: String, onClick: () -> Unit): Button = Button(this).apply {
+        fun add(label: String, description: String? = null, onClick: () -> Unit): Button = Button(this).apply {
             text = label
+            contentDescription = description
             isAllCaps = false
             // A focused button would eat D-pad, Enter and Space meant for the target.
             isFocusable = false
             textSize = 13f
-            minWidth = 0
-            minimumWidth = 0
+            // 48dp touch targets; the background draws a 40dp pill inside.
+            minWidth = dp(48)
+            minimumWidth = dp(48)
             minHeight = 0
             minimumHeight = 0
             setBackgroundResource(R.drawable.bar_button_background)
@@ -433,30 +444,26 @@ class ViewerActivity : ComponentActivity() {
             stateListAnimator = null
             setPadding(dp(14), 0, dp(14), 0)
             setOnClickListener { onClick() }
-            bar.addView(this, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)).apply {
+            bar.addView(this, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)).apply {
                 marginStart = dp(3)
                 marginEnd = dp(3)
             })
         }
-        fun device(label: String, action: DeviceAction) = add(label) { input.press(action) }
 
-        device("Back", DeviceAction.BACK)
-        device("Home", DeviceAction.HOME)
-        device("Recents", DeviceAction.APP_SWITCH)
-        add("Keyboard") { if (keyboardShown) hideKeyboard() else showKeyboard() }
-        device("Vol −", DeviceAction.VOLUME_DOWN)
-        device("Vol +", DeviceAction.VOLUME_UP)
-        device("Mute", DeviceAction.MUTE)
-        device("Power", DeviceAction.POWER)
-        device("Rotate device", DeviceAction.ROTATE)
-        device("Notifications", DeviceAction.NOTIFICATIONS)
-        device("Quick settings", DeviceAction.SETTINGS)
-        device("Collapse", DeviceAction.COLLAPSE)
-        add("Screenshot") { screenshot() }
+        for (action in VIEWER_BAR) add(getString(action.text), action.name(::getString)) { perform(action.id) }
         takeControl = add(getString(R.string.viewer_take_control)) { session?.takeover() }
         add(getString(R.string.viewer_disconnect)) {
             leaving = true
             finish()
+        }
+    }
+
+    private fun perform(id: String) {
+        val device = DeviceAction.byId(id)
+        when {
+            device != null -> input.press(device)
+            id == LocalAction.KEYBOARD.id -> if (keyboardShown) hideKeyboard() else showKeyboard()
+            id == LocalAction.SCREENSHOT.id -> screenshot()
         }
     }
 
@@ -554,7 +561,11 @@ class ViewerActivity : ComponentActivity() {
         overlay.visibility = View.VISIBLE
         overlayText.text = message
         findViewById<ProgressBar>(R.id.progress).visibility = if (busy) View.VISIBLE else View.GONE
-        findViewById<Button>(R.id.overlay_close).visibility = if (busy) View.GONE else View.VISIBLE
+        // A connect can wait out several timeouts: it can always be left.
+        findViewById<Button>(R.id.overlay_close).apply {
+            visibility = View.VISIBLE
+            setText(if (busy) R.string.cancel else R.string.close)
+        }
         findViewById<Button>(R.id.overlay_retry).apply {
             visibility = if (busy || !leaving) View.GONE else View.VISIBLE
             isEnabled = cleanupReady

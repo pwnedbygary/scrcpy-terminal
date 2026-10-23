@@ -2,12 +2,37 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<!-- The page can be zoomed (the picture's touch-action keeps every touch on
+     it for the device), and runs under a notch or a home indicator, which
+     player.css keeps what is on it clear of. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
 <title>scterm</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='7' y='1.5' width='18' height='29' rx='4' fill='%2317171c' stroke='%23ffc850' stroke-width='2'/%3E%3Crect x='10' y='5' width='12' height='19' rx='1' fill='%239ecbff'/%3E%3Ccircle cx='16' cy='27' r='1.4' fill='%23ffc850'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/player.css">
 </head>
 <body>
 <canvas id="screen" width="480" height="1080"></canvas>
+
+<!-- Connection status card: says what the page is waiting for whenever it is
+     not showing live video (player.js picks the words). Only the Reconnect
+     button takes pointer events, so the card never blocks input to the
+     canvas. -->
+<div id="conn" role="status" aria-live="polite">
+  <p id="conn-text">Connecting…</p>
+  <p id="conn-detail"></p>
+  <button id="conn-retry" type="button" hidden>Reconnect</button>
+</div>
+
+<!-- Sound chip: this browser's own sound state, shown only while there is
+     something to do about it (player.js picks the words): tap to start the
+     sound, sound off here, a start that failed, the compatibility audio path,
+     or no sound at all. It stays up while the HUD is hidden when it asks for
+     the tap that starts the sound, or while its words are new, and only the
+     chip itself takes pointer events. -->
+<div id="sound" role="status" aria-live="polite">
+  <button id="sound-chip" type="button" class="off"></button>
+</div>
 
 <!-- Local pointer indication (hover ghost, drag trail, touch ripples). It
      never talks to the device; player.js paints it from the same events that
@@ -31,7 +56,7 @@
     <span class="sep">·</span>
     <span id="fps">—</span>
     <span class="sep">·</span>
-    <span id="audio">audio —</span>
+    <span id="audio">device vol —</span>
     <span class="spacer"></span>
     <span id="state">connecting…</span>
   </div>
@@ -42,69 +67,71 @@
   </div>
 </div>
 
-<!-- Floating menu button: opens the controls sheet. It stays visible with the
-     action bar and is the phone-friendly way to reach the keyboard chord
-     reference. -->
-<button id="menu-btn" title="Controls (Alt+/)">☰</button>
+<!-- Floating menu button: opens the controls sheet. It is always shown and is
+     the phone-friendly way to reach every action. player.js names it after
+     the catalog's Controls action, with its chord in the tooltip, and keeps
+     aria-expanded in step with the sheet. -->
+<button id="menu-btn" type="button" aria-haspopup="dialog" aria-controls="sheet" aria-expanded="false" aria-label="Controls">☰</button>
 
-<!-- Action bar: every device action as a button, same ops as the keyboard. The
-     tooltip (title) names the chord, so the bar doubles as the cheat sheet.
-     Buttons are aria-labelled and keyboard-focusable, which is also what the
-     node input tests and the browser check script assert against. -->
-<div id="bar" class="idle" role="toolbar" aria-label="Device actions">
-  <button data-act="back"      title="Back (Alt+B, Esc, right-click)">Back</button>
-  <button data-act="home"      title="Home (Alt+H)">Home</button>
-  <button data-act="appswitch" title="Recents (Alt+T)">Recents</button>
-  <button data-act="menu"      title="Menu key (no chord)">Menu</button>
-  <button data-act="toolbar"   title="Controls reference (Alt+/)">Controls</button>
-  <span class="bar-sep"></span>
-  <button data-act="volup"     title="Device volume up (Alt+U)">Vol +</button>
-  <button data-act="voldown"   title="Device volume down (Alt+D)">Vol −</button>
-  <button data-act="mute"      title="Device mute (F7)">Mute</button>
-  <span class="bar-sep"></span>
-  <button data-act="rotate"    title="Rotate (Alt+R)">Rotate</button>
-  <button data-act="notif"     title="Notifications (Alt+N)">Notif</button>
-  <button data-act="settings"  title="Settings shade (Alt+E)">Shade</button>
-  <button data-act="collapse"  title="Collapse panels (Alt+C)">Collapse</button>
-  <span class="bar-sep"></span>
-  <button data-act="power"     title="Power (Alt+P)">Power</button>
-  <button data-act="keyboard"  title="Software keyboard (Alt+I, 3-finger tap)">Keys</button>
-  <button data-act="screenshot" title="Save a PNG of the screen (Alt+S)">Shot</button>
-  <button data-act="resetvideo" title="Request a keyframe (Alt+K)">Refresh</button>
-  <button data-act="grab"      title="Grab browser keys (Alt+G)">Grab</button>
-  <button data-act="quit"      title="End the session (Alt+Q)">Quit</button>
-</div>
+<!-- ⋯: shows or hides the action bar on a touch screen, where a finger on the
+     picture is for the device and does not bring the bar up. player.js shows
+     it while the page is used by touch, and keeps aria-expanded in step with
+     the bar. -->
+<button id="bar-btn" type="button" aria-controls="bar" aria-expanded="false" aria-label="Device actions" hidden>⋯</button>
 
-<!-- Controls sheet: the "Alt+/" reference, for phones where a chord is awkward.
-     Pure documentation — it runs nothing, so it can never disagree with the
-     real bindings. -->
-<div id="sheet" class="idle">
+<!-- Action bar: one button per action, in the action catalog's webBar order,
+     then Full screen (this browser's own). player.js builds the buttons from
+     the catalog: each shows the action's short label, which is also its
+     name, and its tooltip names the action and its chords, so the bar
+     doubles as the cheat sheet; a click runs the same action as the chord.
+     Its Controls button, like ☰, says whether the controls sheet is open. -->
+<div id="bar" class="idle" role="toolbar" aria-label="Device actions"></div>
+
+<!-- Controls sheet (Alt+/, the ☰ button or the bar's Controls button): a modal
+     dialog. player.js fills in a row for every action from the catalog, a
+     button that runs it beside its chords; under them are the gestures,
+     this browser's own keys, and Full screen where the browser has it (Tab
+     reaches it here while the keys go to the device). Focus moves into the
+     sheet when it opens. When it closes, the focus goes back to what had it
+     before, if it is still in the sheet or on the page: a bye moves it to the
+     Reconnect button, and there it stays. Esc, Close or a click outside the
+     card closes it. -->
+<div id="sheet" class="idle" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
   <div class="sheet-card">
-    <div class="sheet-title">Controls</div>
+    <div class="sheet-title"><span id="sheet-title">Controls</span> <span id="sheet-keys" class="sheet-keys"></span></div>
+    <div id="sheet-actions" class="sheet-actions"></div>
     <dl>
-      <dt>tap / drag</dt><dd>tap / swipe</dd>
+      <dt>click / drag</dt><dd>tap / swipe</dd>
       <dt>wheel</dt><dd>scroll</dd>
       <dt>right click</dt><dd>Back</dd>
-      <dt>3-finger tap</dt><dd>keyboard</dd>
-      <dt>Alt+/</dt><dd>this sheet</dd>
-      <dt>Alt+B / Esc</dt><dd>Back</dd>
-      <dt>Alt+H / Alt+T</dt><dd>Home / Recents</dd>
-      <dt>Alt+U / Alt+D</dt><dd>Device volume</dd>
-      <dt>Alt+P / Alt+R</dt><dd>Power / Rotate</dd>
-      <dt>Alt+N / Alt+E / Alt+C</dt><dd>Notif / Settings / Collapse</dd>
-      <dt>Alt+I</dt><dd>Software keyboard</dd>
-      <dt>Alt+M / Alt+− / Alt+=</dt><dd>Local mute / volume</dd>
-      <dt>Alt+S / Alt+K</dt><dd>Screenshot / keyframe</dd>
-      <dt>Alt+G</dt><dd>Grab browser keys</dd>
-      <dt>Alt+Q</dt><dd>Quit</dd>
-      <dt>F1..F12 / Alt+F1..F12</dt><dd>the classic aliases</dd>
+      <dt>middle click</dt><dd>Home</dd>
+      <dt>3-finger tap</dt><dd>phone keyboard</dd>
+      <dt><kbd>Esc</kbd></dt><dd>Back, or close this sheet</dd>
+      <dt><kbd>Alt+M</kbd></dt><dd>mute this browser</dd>
+      <dt><kbd>Alt+-</kbd> <kbd>Alt+=</kbd></dt><dd>this browser's volume</dd>
+      <dt><kbd>Alt+F1</kbd>…<kbd>Alt+F12</kbd></dt><dd>same as F1…F12</dd>
     </dl>
-    <button id="sheet-close" title="Close (Esc)">Close</button>
+    <div class="sheet-foot">
+      <button id="sheet-full" type="button" aria-pressed="false" hidden>Full screen</button>
+      <button id="sheet-close" type="button" title="Close (Esc)">Close</button>
+    </div>
   </div>
 </div>
 
-<div id="toast"></div>
+<!-- Toasts: a line on what a key or a button just did, such as Quit asking for
+     its second press. A live region, so it is announced as well as shown, and
+     emptied once it has faded out. -->
+<div id="toast" role="status" aria-live="polite"></div>
 
+<!-- The action catalog (protocol/fixtures/actions.json). The server puts it in
+     place of the next line as a JSON block with the id "actions", and
+     player.js builds the action bar, the controls sheet and its keys from it.
+     web/page_fixture.mjs does the same for the node suites. -->
+<!--scterm:actions-->
+
+<!-- The AudioWorklet's code, loaded here as well: on a page with no AudioWorklet
+     (plain http from another machine) player.js plays from this same ring. -->
+<script src="/pcm-worklet.js"></script>
 <script src="/pointer.js"></script>
 <script src="/player.js"></script>
 </body>

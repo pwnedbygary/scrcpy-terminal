@@ -1,5 +1,12 @@
 # Android peer app, authenticated Go client, and cross-mode parity plan
 
+> **Historical document.** This is the plan written before the Android app and peer mode were
+> built. That work was merged as
+> [#1](https://github.com/pwnedbygary/scrcpy-terminal/pull/1) (commit `a9d3a5b`). The plan is
+> kept as a record and is not updated. For how things work now, read the
+> [README](../../README.md), [android/README.md](../../android/README.md) and the
+> [peer protocol](../PEER_PROTOCOL.md).
+
 Status: proposed implementation plan; no Android implementation is completed by
 this document. Created 2026-09-22 from source baseline
 `e48af13fd32f8e3fa37f2c2d6f72b0122406b545` on `codex/android-client`.
@@ -16,14 +23,14 @@ user's shorthand `android-client`, switch to main, or assume main is unchanged.
 Design revision 3 (2026-09-24), made while implementation started on the
 user's instruction to begin the native app and to push back where the plan
 could be better: see [section 2a](#2a-design-revisions-adopted-2026-09-24).
-The peer protocol is now pinned in [PEER_PROTOCOL.md](PEER_PROTOCOL.md), and
+The peer protocol is now pinned in [PEER_PROTOCOL.md](../PEER_PROTOCOL.md), and
 the first Android implementation lives under `android/`. Host tests pass; no
 physical device has run it yet, so every device-behavior exit criterion
 remains open.
 
 ## 1. Start here: instructions for the next developer or LLM
 
-Read this document, [the current checkpoint](../.agent/HANDOFF.md), and all
+Read this document, [the current checkpoint](../../.agent/HANDOFF.md), and all
 applicable `AGENTS.md` instructions before changing code. The user requested an
 installable native Android peer app with both server and client roles, an
 authenticated Go client, the lowest practical latency and complete functional
@@ -151,7 +158,7 @@ signing keys, SDK versions, or results.
 
 Adopted while starting implementation. Each replaces the plan text it names;
 the rest of the plan still applies. Evidence: `android/` host tests and
-[PEER_PROTOCOL.md](PEER_PROTOCOL.md).
+[PEER_PROTOCOL.md](../PEER_PROTOCOL.md).
 
 1. **Peer payload = scrcpy v4.1 framing, unchanged** (replaces "introduce a
    negotiated protocol … pin an actual schema" in section 5 as a new media and

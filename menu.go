@@ -7,7 +7,7 @@ package main
 // action bar is a small key-driven menu: press Alt+/ and every device action
 // is listed with the chord that runs it. It is deliberately the same action
 // set and the same letters as the web bar, so muscle memory carries between
-// the terminal, a browser tab and a phone -- see appMnemonicOps in appkeys.go.
+// the terminal, a browser tab and a phone -- see appMnemonicOps in actions.go.
 //
 // The menu is an overlay in the same sense as the software keyboard: while it
 // is open it owns the keyboard, and clicks on a row run that row's action.
@@ -16,37 +16,13 @@ package main
 // menuItem is one row: the chord letter, the op it runs, and the label shown.
 type menuItem struct {
 	Key   byte   // letter pressed to run it (0 = no chord)
-	Op    string // app-level op, or one of the local pseudo-ops below
+	Op    string // catalog action id
 	Label string // what the row says
 }
 
-// Pseudo-ops with no device action of their own.
-const (
-	opKeyboard = "keyboard" // show/hide the software keyboard (browser: #ime focus)
-	opMenuKey  = "menukey"  // the Android Menu key (82); Alt+O types an o instead
-)
-
-// menuItems is the action list, in display order. It is the TUI twin of the
-// browser toolbar; keep the two in step (TestMenuMatchesTheChordTable pins the
-// ops to appMnemonicOps, TestPlayerKeysAreTheTerminalKeys pins the browser).
-var menuItems = []menuItem{
-	{'h', "home", "Home"},
-	{'b', "back", "Back"},
-	{'t', "appswitch", "Recents"},
-	{0, opMenuKey, "Menu key"},
-	{'p', "power", "Power"},
-	{'u', "volup", "Volume up"},
-	{'d', "voldown", "Volume down"},
-	{'c', "collapse", "Collapse panels"},
-	{'n', "notif", "Notifications"},
-	{'e', "settings", "Settings shade"},
-	{'r', "rotate", "Rotate"},
-	{'g', "grab", "Grab"},
-	{'s', "screenshot", "Screenshot"},
-	{'k', "resetvideo", "Keyframe"},
-	{'i', opKeyboard, "Keyboard"},
-	{'q', "quit", "Quit"},
-}
+// menuItems (and the action bar's barItems) are derived from the action
+// catalog's views.tuiMenu / views.tuiBar in actions.go: the order and the
+// labels live there rather than in two lists to keep in step.
 
 // toggleMenu opens/closes the action overlay. Like the keyboard it takes a
 // brief mouse grab so the click-to-run-a-row path works under Zellij, and it
@@ -84,20 +60,30 @@ func (a *app) closeMenu() {
 	}
 }
 
-// menuAction runs one menu row. Device ops and quit go through the same
-// applyAppOp the F-keys use; the local ops (screenshot, keyboard, the Menu
-// keycode) are handled here.
+// menuAction runs one menu row. Device actions and quit go through the same
+// applyAppOp the F-keys and the action bar use; the frontend-local catalog
+// actions (the software keyboard, the screenshot) are handled here.
 func (a *app) menuAction(op string) {
 	switch op {
-	case opKeyboard:
+	case "keyboard":
 		a.toggleKeyboard()
-	case opMenuKey:
-		a.sendAndroidKeyMeta(appKeyOps["menu"], 0)
 	case "screenshot":
 		a.screenshot()
 	default:
 		a.applyAppOp(op)
 	}
+}
+
+// runMenuRow runs the row a click or its letter picked: the menu closes and
+// the row's action runs. A first press on Quit instead keeps the menu up to
+// ask for the second.
+func (a *app) runMenuRow(it menuItem) {
+	if it.Op == "quit" && !a.pressQuit(quitFromMenu) {
+		a.refreshMenu()
+		return
+	}
+	a.closeMenu()
+	a.menuAction(it.Op)
 }
 
 // menuKeyInput handles keyboard input while the menu is open. It consumes the
@@ -123,8 +109,7 @@ func (a *app) menuKeyInput(b []byte) bool {
 	// swallowed rather than typed, so a stray letter never reaches the device
 	// through an overlay that is already gone.
 	if it, ok := menuItemForKey(b[0]); ok {
-		a.closeMenu()
-		a.menuAction(it.Op)
+		a.runMenuRow(it)
 		return true
 	}
 	a.closeMenu()
@@ -180,11 +165,16 @@ const menuLeftMargin = 2
 // row backgrounds form a box; the TUI painter then fills the rest of the line.
 func (a *app) menuLines(rows int) []overlayLine {
 	width := 0
+	now := timeNowUnixNano()
 	label := func(it menuItem) string {
-		if it.Key == 0 {
-			return "     " + it.Label
+		text := it.Label
+		if it.Op == "quit" && a.kb.quitArmed(quitFromMenu, now) {
+			text = "Press again to quit"
 		}
-		return string(it.Key) + " ·  " + it.Label
+		if it.Key == 0 {
+			return "     " + text
+		}
+		return string(it.Key) + " ·  " + text
 	}
 	body := make([]string, 0, len(menuItems))
 	for _, it := range menuItems {
@@ -194,7 +184,7 @@ func (a *app) menuLines(rows int) []overlayLine {
 			width = len([]rune(s))
 		}
 	}
-	title := " scterm · actions "
+	title := " scterm · Controls "
 	if len([]rune(title)) > width {
 		width = len([]rune(title))
 	}

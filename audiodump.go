@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"os"
 	"sync"
 )
@@ -23,6 +24,19 @@ func audioDumpFile(path string) *os.File {
 		dumpF = f
 	}
 	return dumpF
+}
+
+// dumpAudioPacket writes one packet from the device to the dump file at path,
+// after its 4-byte big-endian size, for offline analysis.
+func dumpAudioPacket(path string, payload []byte) {
+	f := audioDumpFile(path)
+	if f == nil {
+		return
+	}
+	var sz [4]byte
+	binary.BigEndian.PutUint32(sz[:], uint32(len(payload)))
+	f.Write(sz[:])
+	f.Write(payload)
 }
 
 func closeAudioDump() {

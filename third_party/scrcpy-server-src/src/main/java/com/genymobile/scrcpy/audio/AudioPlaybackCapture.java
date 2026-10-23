@@ -1,3 +1,9 @@
+/*
+ * scterm changed this file on 2026-09-24 (commit afcd41b): createAudioRecord()
+ * also matches USAGE_GAME and USAGE_UNKNOWN, not only USAGE_MEDIA, so playback
+ * capture records games and untagged players too. The change is marked
+ * "scterm patch" below; the rest of the file is scrcpy 4.1's.
+ */
 package com.genymobile.scrcpy.audio;
 
 import com.genymobile.scrcpy.AndroidVersions;

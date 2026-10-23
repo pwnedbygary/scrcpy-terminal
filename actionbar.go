@@ -20,8 +20,6 @@ const (
 	// barIdle is how long the bar stays after the last mouse activity,
 	// matching the web page's HUD cadence.
 	barIdle = 2500 * time.Millisecond
-	// barScrollStep shifts the window when the bar is wider than the pane.
-	barScrollStep = 8
 	// barMinWidth is the smallest pane the bar will draw in.
 	barMinWidth = 16
 	// barPad is the inner padding inside each pill (each side); barGap is the
@@ -40,25 +38,8 @@ type barItem struct {
 	Short string
 }
 
-var barItems = []barItem{
-	{menuItem{'h', "home", "Home"}, "Home"},
-	{menuItem{'b', "back", "Back"}, "Back"},
-	{menuItem{'t', "appswitch", "Recents"}, "Rec"},
-	{menuItem{0, opMenuKey, "Menu key"}, "Menu"},
-	{menuItem{'u', "volup", "Volume up"}, "Vol+"},
-	{menuItem{'d', "voldown", "Volume down"}, "Vol-"},
-	{menuItem{0, "mute", "Mute"}, "Mute"},
-	{menuItem{'r', "rotate", "Rotate"}, "Rot"},
-	{menuItem{'n', "notif", "Notifications"}, "Notif"},
-	{menuItem{'e', "settings", "Settings shade"}, "Shade"},
-	{menuItem{'c', "collapse", "Collapse panels"}, "Collapse"},
-	{menuItem{'p', "power", "Power"}, "Power"},
-	{menuItem{'i', opKeyboard, "Keyboard"}, "Keys"},
-	{menuItem{'s', "screenshot", "Screenshot"}, "Shot"},
-	{menuItem{'k', "resetvideo", "Keyframe"}, "Refresh"},
-	{menuItem{'g', "grab", "Grab"}, "Grab"},
-	{menuItem{'q', "quit", "Quit"}, "Quit"},
-}
+// barItems is derived from the action catalog's views.tuiBar in actions.go,
+// alongside menuItems: the labels and the order live in one place.
 
 // barHit is one clickable region of the rendered bar: rune columns (0-based,
 // [from,to)) on the bar's overlay line. scroll != 0 marks the ‹ / › edges;
@@ -124,13 +105,22 @@ func (a *app) barHideCheck(now int64) {
 	if now-a.barLastActivity < int64(barIdle) {
 		return
 	}
+	a.hideBar()
+}
+
+// hideBar takes the bar off the screen and forgets its layout and the
+// pointer's row.
+func (a *app) hideBar() {
+	shown := a.barShow
 	a.barShow = false
 	a.barFlashIdx = -1
 	a.barFlashAt = 0
 	a.barHits = nil
 	a.barTopRow, a.barBotRow = 0, 0
 	a.barPointerY = 0 // no remembered position once the strip is gone
-	a.refreshOverlays()
+	if shown {
+		a.refreshOverlays()
+	}
 }
 
 // barLayout packs the bar into at most width rune cells starting at the
@@ -148,12 +138,9 @@ func (a *app) barLayoutAt(offset, width int) (string, []barHit, bool, bool) {
 	}
 	left := offset > 0
 	// Reserve one rune for a possible right arrow, so a full row still has
-	// room for it and nothing is drawn past the pane.
-	limit := width
-	if left {
-		limit -= 2 // "‹ "
-	}
-	limit--
+	// room for it and nothing is drawn past the pane. The left arrow needs no
+	// reserve: it is drawn first and counted in used.
+	limit := width - 1
 
 	text := make([]rune, 0, width)
 	var hits []barHit
@@ -170,6 +157,7 @@ func (a *app) barLayoutAt(offset, width int) (string, []barHit, bool, bool) {
 		from, to := add("‹ ")
 		hits = append(hits, barHit{from: from, to: to, scroll: -1})
 	}
+	now := timeNowUnixNano()
 	right := false
 	for i := offset; i < len(barItems); i++ {
 		it := barItems[i]
@@ -184,7 +172,13 @@ func (a *app) barLayoutAt(offset, width int) (string, []barHit, bool, bool) {
 		if len(hits) > 0 {
 			add(spaces(barGap))
 		}
-		from, to := add(spaces(barPad) + it.Short + spaces(barPad))
+		pill := spaces(barPad) + it.Short + spaces(barPad)
+		if it.Op == "quit" && a.kb.quitArmed(quitFromBar, now) {
+			// The same cells as the resting label: arming must not move or
+			// page out any button.
+			pill = spaces(barPad) + it.Short + "?" + spaces(barPad-1)
+		}
+		from, to := add(pill)
 		hits = append(hits, barHit{from: from, to: to, idx: i})
 	}
 	if right {
@@ -268,25 +262,54 @@ func (a *app) barClick(cellX, cellY int, pressed bool) bool {
 			continue
 		}
 		if h.scroll != 0 {
-			a.barOffset += h.scroll * barScrollStep
-			if a.barOffset < 0 {
-				a.barOffset = 0
-			}
-			if a.barOffset > len(barItems)-1 {
-				a.barOffset = len(barItems) - 1
-			}
+			a.barOffset = a.barPage(h.scroll)
 			a.barFlashIdx = -1
 			a.refreshOverlays()
 			return true
 		}
 		a.barFlashIdx = h.idx
 		a.barFlashAt = timeNowUnixNano()
-		a.menuAction(barItemAt(h).Op)
+		if op := barItemAt(h).Op; op != "quit" || a.pressQuit(quitFromBar) {
+			a.menuAction(op)
+		}
 		a.refreshOverlays()
 		return true
 	}
 	// The strip itself: a press below the last button must not tap the video.
 	return true
+}
+
+// barPage returns the offset of the page after the current one (dir > 0) or
+// before it. A page holds as many buttons as fit, so the next page starts
+// right after the last button painted, and paging back retraces the pages
+// that paging forward from the first button shows.
+func (a *app) barPage(dir int) int {
+	if dir > 0 {
+		return min(a.barOffset+barButtons(a.barHits), len(barItems)-1)
+	}
+	width, _ := termSize()
+	prev := 0
+	for start := 0; start < a.barOffset; {
+		prev = start
+		_, hits, _, right := a.barLayoutAt(start, width)
+		if !right {
+			break
+		}
+		start += barButtons(hits)
+	}
+	return prev
+}
+
+// barButtons counts the buttons (not the arrows) among hits, and never less
+// than one, so a page turn always moves.
+func barButtons(hits []barHit) int {
+	n := 0
+	for _, h := range hits {
+		if h.scroll == 0 {
+			n++
+		}
+	}
+	return max(n, 1)
 }
 
 const barScrollStyle = "\x1b[48;2;40;40;48m\x1b[38;2;180;180;190m"

@@ -19,7 +19,12 @@ package main
 //	home, menu, appswitch, power, volup, voldown, mute, notif, settings, collapse
 //	rotate                      rotate the device
 //	resetvideo                  ask the device for a keyframe
-//	gain    {gain}              local (browser) volume, percent
+//	gain    {gain,mute}         host sound output (the PulseAudio sink): gain is a
+//	                            percent (absent or negative: unchanged), then
+//	                            mute:true mutes and mute:false restores the volume
+//	                            from before the mute; ignored once the sink has
+//	                            failed or the sound has stopped; the page's own
+//	                            volume is local and never sent
 //	quit                        end the session
 
 import (
@@ -34,8 +39,8 @@ const webInbox = 512
 
 func (s *webServer) dispatch(c *webClient, ev *webEvent) {
 	if s.app == nil {
-		// Headless (--web --no-tui): no app loop to serialize against, so
-		// apply immediately from the socket reader. Same order, less latency.
+		// Headless (no app loop to serialize against): apply immediately from
+		// the socket reader. Same order, less latency.
 		s.applyControl(c, ev)
 		return
 	}
@@ -99,29 +104,25 @@ func (s *webServer) applyControl(c *webClient, ev *webEvent) {
 		}
 	case "text":
 		a.webInput(ev.Text)
-	case "back", "home", "menu", "appswitch", "power", "volup", "voldown",
-		"mute", "notif", "settings", "collapse", "rotate", "resetvideo", "grab":
-		// One shared dispatch with the terminal's F-keys (appkeys.go), so F5 in
-		// the browser and F5 in the TUI are the same action by construction.
-		op := ev.Op
-		s.send(func() { a.applyAppOp(op) })
-		if isVolumeKey(appKeyOps[op]) {
-			s.kickVolume()
-		}
+	case "grab":
+		// Frontend state rather than a wire action, but the same toggle the
+		// terminal's Alt+G and F12 run.
+		s.send(func() { a.applyAppOp(ev.Op) })
 	case "gain":
 		if a == nil {
 			break
 		}
-		if a.audio != nil && a.audio.err == nil {
-			g := ev.Gain
+		if a.audio != nil && a.audio.failure() == nil && a.stream.soundStopped() == nil {
+			if ev.Gain != nil && *ev.Gain >= 0 {
+				a.audio.setGain(*ev.Gain)
+			}
 			if ev.Mute != nil {
 				if *ev.Mute {
-					g = 0
+					a.audio.setGain(0)
 				} else if a.audio.gainPercent() == 0 {
-					g = 100
+					a.audio.toggleMute()
 				}
 			}
-			a.audio.setGain(g)
 			a.refreshStatus()
 		}
 		if c != nil {
@@ -129,11 +130,24 @@ func (s *webServer) applyControl(c *webClient, ev *webEvent) {
 		}
 	case "quit":
 		a.quitWeb()
+	default:
+		// One shared dispatch with the terminal's F-keys (appkeys.go), so F5 in
+		// the browser and F5 in the TUI are the same action by construction:
+		// the action catalog (actions.go) says what the action puts on the wire.
+		act, ok := deviceActionFor(ev.Op)
+		if !ok {
+			return // an op no frontend implements, ignored as before
+		}
+		s.send(func() { a.applyAppOp(act.ID) })
+		if actionTouchesDeviceVolume(act) {
+			s.kickVolume()
+		}
 	}
 }
 
-// applyEventHeadless handles control events for --web --no-tui runs, where
-// there is no app loop: the server talks to the controller directly.
+// applyEventHeadless handles control events for a web server with no app
+// loop, where the server talks to the controller directly. main refuses --web
+// with --no-tui, so only the tests build one.
 func (s *webServer) applyEventHeadless(c *webClient, ev *webEvent) {
 	switch ev.Op {
 	case "down":
@@ -156,39 +170,21 @@ func (s *webServer) applyEventHeadless(c *webClient, ev *webEvent) {
 		}
 	case "text":
 		s.typeHeadless(ev.Text)
-	case "back":
-		if s.ctrl != nil {
-			_ = s.ctrl.back()
+	case "quit":
+		s.stopWith(webByeQuit)
+	default:
+		// The same catalog dispatch the terminal and the browser dispatcher
+		// use (actions.go). A failed write still refreshes the volume readout,
+		// as the browser dispatcher does: the key-down may have reached the
+		// device before the key-up failed.
+		act, ok := deviceActionFor(ev.Op)
+		if !ok {
+			return // an op no frontend implements, ignored as before
 		}
-	case "home", "menu", "appswitch", "power", "volup", "voldown", "mute":
-		if s.ctrl != nil {
-			_ = s.ctrl.injectKey(appKeyOps[ev.Op], 0)
-		}
-		if ev.Op == "volup" || ev.Op == "voldown" || ev.Op == "mute" {
+		_ = performDeviceAction(s.ctrl, act)
+		if actionTouchesDeviceVolume(act) {
 			s.kickVolume()
 		}
-	case "notif":
-		if s.ctrl != nil {
-			_ = s.ctrl.expandNotifications()
-		}
-	case "settings":
-		if s.ctrl != nil {
-			_ = s.ctrl.expandSettings()
-		}
-	case "collapse":
-		if s.ctrl != nil {
-			_ = s.ctrl.collapsePanels()
-		}
-	case "rotate":
-		if s.ctrl != nil {
-			_ = s.ctrl.rotate()
-		}
-	case "resetvideo":
-		if s.ctrl != nil {
-			_ = s.ctrl.resetVideo()
-		}
-	case "quit":
-		s.quit()
 	}
 }
 
@@ -216,12 +212,6 @@ func (s *webServer) typeHeadless(text string) {
 		buf = utf8.AppendRune(buf, r)
 	}
 	flush()
-}
-
-// headlessKey is the Android keycode for an app-level key op; the table lives
-// in appkeys.go so the terminal's F-keys and the browser's ops stay identical.
-func headlessKey(op string) uint32 {
-	return appKeyOps[op]
 }
 
 // ---------------------------------------------------------------------------
@@ -281,47 +271,6 @@ func (a *app) webGrab() {
 	a.refreshStatus()
 }
 
-// backPress presses Back exactly as the terminal does: a full down+up pair via
-// ctrl.back(), which the scrcpy server also turns into a screen wake when the
-// display is off. Sending only the key-up (as this used to) reaches the device
-// and is then ignored, so Back appeared to do nothing in the browser.
-func (a *app) backPress() {
-	if a.ctrl == nil {
-		return
-	}
-	_ = a.ctrl.back()
-}
-
-func (a *app) expandNotifications() {
-	if a.ctrl != nil {
-		_ = a.ctrl.expandNotifications()
-	}
-}
-
-func (a *app) expandSettings() {
-	if a.ctrl != nil {
-		_ = a.ctrl.expandSettings()
-	}
-}
-
-func (a *app) collapsePanels() {
-	if a.ctrl != nil {
-		_ = a.ctrl.collapsePanels()
-	}
-}
-
-func (a *app) rotateDevice() {
-	if a.ctrl != nil {
-		_ = a.ctrl.rotate()
-	}
-}
-
-func (a *app) resetVideo() {
-	if a.ctrl != nil {
-		_ = a.ctrl.resetVideo()
-	}
-}
-
 // webInput types text into the device. Single letters/digits/space go as key
 // events (games and IMEs respond to them); everything else is injected as
 // text, which is the only way to send punctuation and non-ASCII reliably.
@@ -372,7 +321,7 @@ func asciiKey(c byte) (uint32, uint32, bool) {
 // quitWeb ends a --web/--window session from a client request.
 func (a *app) quitWeb() {
 	if a.web != nil {
-		a.web.stop()
+		a.web.stopWith(webByeQuit)
 	}
 	select {
 	case a.events <- inputEvent{kind: evQuit}:

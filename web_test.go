@@ -1,8 +1,15 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestComputeWebCanvas covers the letterbox geometry shared by the scaler, the
@@ -112,6 +119,219 @@ func TestOriginOK(t *testing.T) {
 	}
 }
 
+// TestWebAddrNameIsServed: when --web-addr is a name, the page is served by
+// that name, since scterm prints its address with it and --window opens that
+// address, whether the name stands for a loopback address (as this computer's
+// name does in /etc/hosts, 127.0.1.1) or not. Names around it stay refused.
+func TestWebAddrNameIsServed(t *testing.T) {
+	for _, ip := range []string{"127.0.1.1", "192.0.2.7"} {
+		names, _ := webHostNames(net.ParseIP(ip), "", "Mirror.Box.lan", "")
+		for host, want := range map[string]bool{
+			"mirror.box.lan:6969":     true,
+			"MIRROR.BOX.LAN":          true,
+			"box.lan:6969":            false,
+			"www.mirror.box.lan:6969": false,
+			"evil.example:6969":       false,
+		} {
+			if got := webHostAllowed(host, names); got != want {
+				t.Errorf("with --web-addr Mirror.Box.lan on %s, %q allowed = %v, want %v", ip, host, got, want)
+			}
+		}
+	}
+}
+
+// TestWebServesTheListenerItIsGiven: given a listener, as main gives it the one
+// it opened before it touched a device, the server serves that listener and
+// does not listen again. It prints, and --window opens, that listener's port,
+// which the kernel picked for --web-port 0, and it accepts the names that suit
+// that listener's address (allowedNames): here 192.0.2.10, an address on the
+// network, where this computer's host name is served too.
+func TestWebServesTheListenerItIsGiven(t *testing.T) {
+	t.Setenv(webHostsEnv, "")
+	listen, hostname := webListen, osHostname
+	t.Cleanup(func() { webListen, osHostname = listen, hostname })
+	webListen = func(network, address string) (net.Listener, error) {
+		t.Errorf("the server listened again, on %s", address)
+		return nil, errors.New("listened again")
+	}
+	osHostname = func() (string, error) { return "Scterm-Box", nil }
+	startNotices(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	cfg := config{web: true, webAddr: "127.0.0.1", webPort: 0}
+	srv := newWebServer(cfg, &session{deviceName: "testphone"}, &streamState{cfg: cfg}, nil, nil, nil)
+	srv.ln = addrListener{ln, &net.TCPAddr{IP: net.IPv4(192, 0, 2, 10), Port: port}}
+	ran := make(chan error, 1)
+	go func() { ran <- srv.run(false) }()
+	select {
+	case <-srv.ready:
+	case err := <-ran:
+		t.Fatalf("the server ended before it served: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the server never started serving")
+	}
+	t.Cleanup(srv.stop)
+	if want := fmt.Sprintf("http://127.0.0.1:%d/", port); srv.port != port || srv.url != want {
+		t.Errorf("the server is on port %d and prints %s; want port %d and %s", srv.port, srv.url, port, want)
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	for _, host := range []string{addr, "scterm-box:" + strconv.Itoa(port)} {
+		resp, body := askAs(t, addr, "/", host, "", false)
+		if resp.StatusCode != http.StatusOK || !strings.Contains(body, `<canvas id="screen"`) {
+			t.Errorf("GET / as %q: status %d, want the page", host, resp.StatusCode)
+		}
+	}
+}
+
+// TestWebStopBeforeRunServesNothing: a stop that comes before the server is
+// up, as a signal at start-up does, leaves run nothing to do: run returns nil
+// at once, prints no address and leaves the listener closed.
+func TestWebStopBeforeRunServesNothing(t *testing.T) {
+	t.Setenv(webHostsEnv, "") // an entry it ignores would be reported
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{web: true, webAddr: "127.0.0.1"}
+	srv := newWebServer(cfg, &session{deviceName: "testphone"}, &streamState{cfg: cfg}, nil, nil, nil)
+	srv.ln = ln
+	srv.stop()
+	var ran error
+	if out := captureStderr(t, func() { ran = srv.run(false) }); ran != nil || out != "" {
+		t.Errorf("run after a stop: %v, and printed %q; want nil and nothing", ran, out)
+	}
+	if c, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second); err == nil {
+		c.Close()
+		t.Error("the listener still took a connection after the stop")
+	}
+}
+
+// TestWebStopBeforeRunFreesItsPort: run given no listener listens itself, on
+// the port it is asked for, and a stop that came first then leaves it to close
+// that listener: run returns at once and prints nothing, and the port is free
+// again, for the next scterm.
+func TestWebStopBeforeRunFreesItsPort(t *testing.T) {
+	t.Setenv(webHostsEnv, "") // an entry it ignores would be reported
+	port := freeLoopbackPort(t)
+	cfg := config{web: true, webAddr: "127.0.0.1", webPort: port}
+	srv := newWebServer(cfg, &session{deviceName: "testphone"}, &streamState{cfg: cfg}, nil, nil, nil)
+	srv.stop()
+	var ran error
+	if out := captureStderr(t, func() { ran = srv.run(false) }); ran != nil || out != "" {
+		t.Errorf("run after a stop: %v, and printed %q; want nil and nothing", ran, out)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("port %d is still taken after run gave up: %v", port, err)
+	}
+	ln.Close()
+}
+
+// TestWebStopFromAnotherGoroutine: a stop can come at any time from another
+// goroutine, a signal's, while run sets the server up. The stops come from at
+// once to about 2 ms in, so before and after the server is up; the race
+// detector checks that each is ordered with run, and run returns either way.
+func TestWebStopFromAnotherGoroutine(t *testing.T) {
+	for i := range 20 {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := config{web: true, webAddr: "127.0.0.1"}
+		srv := newWebServer(cfg, &session{deviceName: "testphone"}, &streamState{cfg: cfg}, nil, nil, nil)
+		srv.ln = ln
+		ran := make(chan error, 1)
+		go func() { ran <- srv.run(false) }()
+		time.Sleep(time.Duration(i) * 100 * time.Microsecond)
+		srv.stop()
+		select {
+		case err := <-ran:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("run did not return after the stop")
+		}
+	}
+}
+
+// TestWebServesThisComputersNamesOnlyOnTheNetwork: this computer's host name,
+// with and without .local, and for a host name with dots its first label with
+// .local, are served only when the server listens where other computers can
+// reach it: on an address that is not a loopback address, 0.0.0.0 and ::
+// included. On a loopback address, or when the address is not known, they are
+// refused like any other name, while the --web-addr name and the names in
+// SCTERM_WEB_HOSTS are served either way.
+func TestWebServesThisComputersNamesOnlyOnTheNetwork(t *testing.T) {
+	for _, c := range []struct {
+		hostname string
+		own      []string // its names
+		others   []string // never its names
+	}{
+		{"Box.Example.COM",
+			[]string{"box.example.com", "BOX.Example.com.:6969", "box.example.com.local", "box.local", "Box.Local:6969"},
+			[]string{"box", "box:6969", "example.com", "www.box.example.com", "box.example.local", "box.lan", "other.local"}},
+		{"Box.local", // with .local already
+			[]string{"box", "BOX:6969", "box.", "box.local", "Box.Local.:6969"},
+			[]string{"box.local.local", "www.box", "box.lan", "other.local", "local"}},
+	} {
+		for _, l := range []struct {
+			ip      string
+			network bool
+		}{
+			{"192.0.2.10", true}, {"2001:db8::10", true}, {"0.0.0.0", true}, {"::", true},
+			{"127.0.0.1", false}, {"127.0.1.1", false}, {"::1", false}, {"::ffff:127.0.0.1", false}, {"", false},
+		} {
+			names, _ := webHostNames(net.ParseIP(l.ip), c.hostname, "mirror.lan", "proxy.example.org")
+			for _, host := range c.own {
+				if got := webHostAllowed(host, names); got != l.network {
+					t.Errorf("host name %s, listening on %q: %q allowed = %v, want %v", c.hostname, l.ip, host, got, l.network)
+				}
+			}
+			for _, host := range c.others {
+				if webHostAllowed(host, names) {
+					t.Errorf("host name %s, listening on %q: %q allowed, want refused", c.hostname, l.ip, host)
+				}
+			}
+			for _, host := range []string{"mirror.lan", "proxy.example.org:443"} {
+				if !webHostAllowed(host, names) {
+					t.Errorf("host name %s, listening on %q: %q refused, want allowed", c.hostname, l.ip, host)
+				}
+			}
+		}
+	}
+}
+
+// TestWebHostsEntriesMustBeNames: an entry of SCTERM_WEB_HOSTS is a name, or a
+// name and a port, with spaces around it allowed and empty entries skipped.
+// Anything else, and a name that starts with a dot or has two dots in a row,
+// which no request could match either, is handed back to be reported, in
+// order, and is not served, nor are its parts. One final dot is allowed.
+func TestWebHostsEntriesMustBeNames(t *testing.T) {
+	names, ignored := webHostNames(net.ParseIP("127.0.0.1"), "", "",
+		" Mirror.lan ,, http://phone.lan,phone.lan/,phone.lan:8443/,*.lan,a.lan b.lan,a.lan;b.lan,user@phone.lan,"+
+			":8443,::1,[::1,proxy.example.org:8443 ,my_box.lan,.example.lan,box..lan,box.lan..,..,b\u00fccher.lan,box.lan.,")
+	want := []string{"http://phone.lan", "phone.lan/", "phone.lan:8443/", "*.lan", "a.lan b.lan", "a.lan;b.lan",
+		"user@phone.lan", ":8443", "::1", "[::1", ".example.lan", "box..lan", "box.lan..", "..", "b\u00fccher.lan"}
+	if !slices.Equal(ignored, want) {
+		t.Errorf("ignored entries %q, want %q", ignored, want)
+	}
+	for _, host := range []string{"mirror.lan", "proxy.example.org", "my_box.lan:6969", "box.lan"} {
+		if !webHostAllowed(host, names) {
+			t.Errorf("%q refused, want allowed", host)
+		}
+	}
+	for _, host := range []string{"phone.lan", "a.lan", "b.lan", "lan", "user", ".example.lan", "example.lan",
+		"box..lan", "box.lan..", "..", "xn--bcher-kva.lan"} {
+		if webHostAllowed(host, names) {
+			t.Errorf("%q allowed, want refused", host)
+		}
+	}
+}
+
 func TestAsciiKey(t *testing.T) {
 	cases := []struct {
 		c    byte
@@ -133,18 +353,6 @@ func TestAsciiKey(t *testing.T) {
 		if ok != c.ok || code != c.code || meta != c.meta {
 			t.Errorf("asciiKey(%q) = (%d,%#x,%v), want (%d,%#x,%v)",
 				c.c, code, meta, ok, c.code, c.meta, c.ok)
-		}
-	}
-}
-
-func TestHeadlessKey(t *testing.T) {
-	want := map[string]uint32{
-		"home": 3, "menu": 82, "appswitch": 187, "power": 26,
-		"volup": 24, "voldown": 25, "mute": 164, "nope": 0,
-	}
-	for op, code := range want {
-		if got := headlessKey(op); got != code {
-			t.Errorf("headlessKey(%q) = %d, want %d", op, got, code)
 		}
 	}
 }

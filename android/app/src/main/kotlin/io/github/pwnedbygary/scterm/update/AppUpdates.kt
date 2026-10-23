@@ -53,6 +53,10 @@ object AppUpdates {
     const val DIFFERENT_KEY = "This copy of scterm is signed with a different key than the release (it was built from source), so " +
         "Android won't let the release replace it. To switch, uninstall scterm, which removes its pairings, then install the release APK."
 
+    /** Debug builds have their own package name (app/build.gradle.kts), so the release never replaces them. */
+    const val DEBUG_BUILD = "This is a debug build of scterm, a separate app from the release: the release APK " +
+        "installs next to it, with its own pairings, and leaves this one as it is."
+
     /** Whether a release may replace this install, as far as can be told before downloading it. */
     fun releaseCanReplace(context: Context): Boolean {
         if (BuildConfig.RELEASE_CERT_SHA256.isEmpty()) return true

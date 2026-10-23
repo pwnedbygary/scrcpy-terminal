@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,6 +42,11 @@ const (
 	wsMaxPayload = 8 << 20
 
 	wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+	// wsCloseTimeout bounds a close: its last frames, and a frame still being
+	// written when it starts. A peer that stopped reading would otherwise hold
+	// the close, and the server's shutdown, for the whole writeTimeout.
+	wsCloseTimeout = 2 * time.Second
 )
 
 // wsConn is a hijacked HTTP connection speaking WebSocket.
@@ -58,6 +64,11 @@ type wsConn struct {
 	hdr [10]byte
 
 	writeTimeout time.Duration
+	// closeBy is the write deadline (unix nanoseconds) of every write once a
+	// close has begun; 0 until then.
+	closeBy atomic.Int64
+	// wrote counts the bytes of the frames written whole, headers included.
+	wrote atomic.Int64
 
 	// closeOnce makes Close idempotent and thread-safe: the reader and the
 	// writer goroutines both call it, and the close frame must not race the
@@ -137,14 +148,26 @@ func wsUpgrade(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 
 // Close sends a close frame (best effort) and closes the TCP connection.
 // It is safe to call from any goroutine, repeatedly.
-func (c *wsConn) Close() error {
+func (c *wsConn) Close() error { return c.CloseWith("") }
+
+// CloseWith is Close with one last text message ahead of the close frame,
+// written under the same lock hold so that no other frame can come between.
+func (c *wsConn) CloseWith(last string) error {
 	if c == nil || c.conn == nil {
 		return nil
 	}
 	c.closeOnce.Do(func() {
+		// A frame being written to a peer that stopped reading holds wmu
+		// until its deadline: bring that deadline in first.
+		by := time.Now().Add(wsCloseTimeout)
+		c.closeBy.Store(by.UnixNano())
+		_ = c.conn.SetWriteDeadline(by)
 		// Take the write lock so the close frame cannot interleave with a
 		// frame that is mid-write, then take the socket down.
 		c.wmu.Lock()
+		if last != "" {
+			_ = c.writeFrame(wsOpText, []byte(last))
+		}
 		_ = c.writeFrame(wsOpClose, []byte{0x03, 0xe8}) // 1000 normal closure
 		_ = c.conn.Close()
 		c.wmu.Unlock()
@@ -156,24 +179,21 @@ func (c *wsConn) Close() error {
 func (c *wsConn) writeFrame(opcode byte, payload []byte) error {
 	n := len(payload)
 	c.hdr[0] = 0x80 | opcode // FIN
+	hdr := c.hdr[:2]
 	switch {
 	case n < 126:
 		c.hdr[1] = byte(n)
-		if err := c.writeAll(c.hdr[:2]); err != nil {
-			return err
-		}
 	case n <= 0xffff:
 		c.hdr[1] = 126
 		binary.BigEndian.PutUint16(c.hdr[2:4], uint16(n))
-		if err := c.writeAll(c.hdr[:4]); err != nil {
-			return err
-		}
+		hdr = c.hdr[:4]
 	default:
 		c.hdr[1] = 127
 		binary.BigEndian.PutUint64(c.hdr[2:10], uint64(n))
-		if err := c.writeAll(c.hdr[:10]); err != nil {
-			return err
-		}
+		hdr = c.hdr[:10]
+	}
+	if err := c.writeAll(hdr); err != nil {
+		return err
 	}
 	if n > 0 {
 		if err := c.writeAll(payload); err != nil {
@@ -183,12 +203,18 @@ func (c *wsConn) writeFrame(opcode byte, payload []byte) error {
 	if err := c.bw.Flush(); err != nil {
 		return err
 	}
+	c.wrote.Add(int64(len(hdr) + n))
 	return nil
 }
 
 func (c *wsConn) writeAll(b []byte) error {
 	if c.writeTimeout > 0 {
 		_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+	}
+	// Read after setting ours: a close that begins in between sets its
+	// deadline after ours, so its deadline is the one left standing.
+	if by := c.closeBy.Load(); by != 0 {
+		_ = c.conn.SetWriteDeadline(time.Unix(0, by))
 	}
 	_, err := c.bw.Write(b)
 	return err

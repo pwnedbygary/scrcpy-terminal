@@ -87,13 +87,25 @@ var chromiumGlobs = []string{
 
 // findBrowser picks a launcher for the given URL and desired window size.
 func findBrowser(url string, w, h int) (browserCmd, error) {
-	if p := chromiumPath(); p != "" {
+	switch name, p := windowBrowser(); name {
+	case "chromium":
 		return chromiumCmd(p, url, w, h), nil
-	}
-	if p, err := exec.LookPath("firefox"); err == nil {
+	case "firefox":
 		return firefoxCmd(p, url, w, h)
 	}
 	return browserCmd{}, fmt.Errorf("no chromium/chrome or firefox found on PATH")
+}
+
+// windowBrowser names the browser --window starts, chromium or firefox, and
+// its path; "" when there is neither.
+func windowBrowser() (name, path string) {
+	if p := chromiumPath(); p != "" {
+		return "chromium", p
+	}
+	if p, err := exec.LookPath("firefox"); err == nil {
+		return "firefox", p
+	}
+	return "", ""
 }
 
 func chromiumPath() string {
@@ -150,7 +162,9 @@ func isRunnableFile(p string) bool {
 //
 // The pane is still part of the user's graphical session, so the compositor is
 // reachable by socket even when nobody exported the variables: recover the
-// display from the sockets, and let an already-complete environment win.
+// display from the sockets. In order: a WAYLAND_DISPLAY that works, the user's
+// Wayland compositor (even when DISPLAY works), a DISPLAY that works, and any
+// X server.
 func browserEnv() ([]string, string) {
 	env := os.Environ()
 
@@ -166,7 +180,7 @@ func browserEnv() ([]string, string) {
 		env = setEnvKV(env, "WAYLAND_DISPLAY", sock)
 		env = setEnvKV(env, "XDG_SESSION_TYPE", "wayland")
 		env = setEnvKV(env, "XDG_RUNTIME_DIR", runtimeDir())
-		return env, fmt.Sprintf("no DISPLAY/WAYLAND_DISPLAY in this session; using the Wayland compositor %s", sock)
+		return env, fmt.Sprintf("no usable WAYLAND_DISPLAY in this session; using the Wayland compositor %s", sock)
 	}
 	if d := os.Getenv("DISPLAY"); d != "" {
 		if n, ok := x11SocketName(d); ok && isSocket(filepath.Join("/tmp/.X11-unix", "X"+n)) {
@@ -388,8 +402,13 @@ user_pref("browser.fullscreen.autohide", true);
 
 // openWindow launches the browser window and returns immediately: the process
 // outlives nothing important (the server is the parent), and window mode ends
-// when the last client disconnects.
+// webLeaveGrace after the last client disconnects, unless a client (a reloaded
+// page) connects again first. Once a stop has begun it opens nothing (see
+// startWindow).
 func (s *webServer) openWindow(url string) error {
+	if s.closing.Load() {
+		return nil
+	}
 	w, h := s.windowGeometry()
 	bc, err := findBrowser(url, w, h)
 	if err != nil {
@@ -419,19 +438,20 @@ func (s *webServer) openWindow(url string) error {
 	if logFile != nil {
 		cmd.Stdout, cmd.Stderr = logFile, logFile
 	}
-	if err := cmd.Start(); err != nil {
-		if logFile != nil {
-			logFile.Close()
-		}
+	started, err := s.startWindow(cmd, logPath)
+	if logFile != nil {
+		logFile.Close() // a browser that started holds its own descriptor now
+	}
+	if !started {
 		if bc.tempDir != "" {
 			os.RemoveAll(bc.tempDir)
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		removeFile(logPath) // a stop has begun: no window, nothing to explain
+		return nil
 	}
-	if logFile != nil {
-		logFile.Close() // the browser holds its own descriptor now
-	}
-	s.setWindow(cmd, logPath)
 	if bc.name == "firefox" {
 		if os.Getenv("SCTERM_FIREFOX_KIOSK") != "" {
 			fmt.Fprintf(stderrWriter(), "scterm: window: firefox kiosk (%s)\n", bc.path)
@@ -618,6 +638,29 @@ func (s *webServer) setWindow(cmd *exec.Cmd, logPath string) {
 	s.winMu.Lock()
 	s.win, s.winLog = cmd, logPath
 	s.winMu.Unlock()
+}
+
+// windowStart starts the browser's process: cmd.Start, or in tests a stand-in.
+var windowStart = (*exec.Cmd).Start
+
+// startWindow starts cmd, the browser window, and remembers it as setWindow
+// does, unless a stop has begun, and reports whether it started it. A stop
+// closes only the window it finds (killWindow), so a window started after it
+// looked would outlive scterm and hold the private profile's lock. The stop
+// sets closing before it looks for the window under winMu, and winMu is held
+// here from the check until the window is remembered, so either the stop
+// finds the window or the window never starts.
+func (s *webServer) startWindow(cmd *exec.Cmd, logPath string) (bool, error) {
+	s.winMu.Lock()
+	defer s.winMu.Unlock()
+	if s.closing.Load() {
+		return false, nil
+	}
+	if err := windowStart(cmd); err != nil {
+		return false, err
+	}
+	s.win, s.winLog = cmd, logPath
+	return true, nil
 }
 
 func (s *webServer) clearWindow(cmd *exec.Cmd) {

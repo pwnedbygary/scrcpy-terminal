@@ -2,9 +2,9 @@
 """Minimal uiautomator driver for scterm device tests.
 
 Reads the current screen with `uiautomator dump` and taps elements by text,
-so the on-device steps of docs/validation/android-device-tests.md can be
-repeated. It only ever runs `adb shell uiautomator dump`, `adb exec-out cat`
-of that dump, and `adb shell input tap X Y` on the selected device.
+so on-device test steps can be repeated by script. It only ever runs
+`adb shell uiautomator dump`, `adb exec-out cat` of that dump, and
+`adb shell input tap X Y` on the selected device.
 
     SERIAL=<adb serial> android/devicetest/ui.py texts
     SERIAL=<adb serial> android/devicetest/ui.py find  REGEX

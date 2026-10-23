@@ -1,7 +1,8 @@
 package main
 
 /*
-#cgo CFLAGS: -O3 -mavx2 -fomit-frame-pointer -I${SRCDIR}
+#cgo CFLAGS: -O3 -fomit-frame-pointer -I${SRCDIR}
+#cgo amd64 CFLAGS: -mavx2
 #cgo pkg-config: libpulse-simple
 #include <pulse/simple.h>
 #include <pulse/error.h>
@@ -145,7 +146,9 @@ static void sct_audio_close(sct_audio_sink *a) {
 import "C"
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -156,8 +159,19 @@ import (
 type audioSink struct {
 	mu   sync.Mutex
 	sink *C.sct_audio_sink
-	gain int32 // q8, 256 = 1.0
-	err  error
+	gain int32 // q8, 256 = 1.0, derived from pct
+	// err is why the sink cannot play at all, if it cannot: open's error, or
+	// errNoSound. It is set before the sink is shared and never changes after;
+	// a write that fails later, on the playback goroutine, sets writeFailed
+	// instead. Read both through failure.
+	err         error
+	writeFailed atomic.Bool
+
+	// pct is the volume in whole percent, and unmutePct the volume the last
+	// mute replaced. volMu keeps them and gain changing together.
+	volMu     sync.Mutex
+	pct       int32
+	unmutePct int32
 
 	// silent drops PCM instead of writing it to the host device. Web/window
 	// mode sets it: there the browser is the audio output, and playing on the
@@ -165,62 +179,185 @@ type audioSink struct {
 	// window on the same machine is plainly wrong. This is independent of
 	// fanPCM, so browser audio is unaffected.
 	silent atomic.Bool
+
+	// closed is set by close: the stream is gone from the sound server, and
+	// the sink plays nothing more. plays and the follower read it from other
+	// goroutines than the one that closes.
+	closed atomic.Bool
 }
 
 func newAudioSink() *audioSink {
-	a := &audioSink{gain: 256}
+	a := &audioSink{gain: 256, pct: 100}
 	a.open()
 	return a
 }
 
-// open (re)connects to PulseAudio. Retries a few times with a backoff since
-// audio servers (PipeWire) may be starting up. Reports the real PA error.
-func (a *audioSink) open() {
-	var lastErr string
-	// First try the default server (respects PULSE_SERVER / the session
-	// socket). If that fails, fall back to the explicit runtime-dir socket
-	// so terminals with a stale PULSE_SERVER still get sound.
-	servers := []string{"", pulseSocketPath()}
-	devices := audioDevices()
-	for _, server := range servers {
-		for _, device := range devices {
-			for attempt := 0; attempt < 3; attempt++ {
-				sink := C.sct_audio_open_with_server(cstr("scterm"), cstr(server), cstr(device))
-				if sink != nil && sink.valid != 0 {
-					fmt.Fprintf(stderrWriter(), "scterm: audio sink: %s (device %q)\n",
-						serverOrDefault(server), deviceOrDefault(device))
-					a.sink = sink
-					a.err = nil
-					return
-				}
-				if sink != nil {
-					if es := C.sct_audio_last_error(sink); es != nil {
-						lastErr = C.GoString(es)
-						C.free(unsafe.Pointer(es))
-					}
-					C.sct_audio_close(sink)
-				}
-				time.Sleep(time.Duration(150*(attempt+1)) * time.Millisecond)
-			}
-			lastErr = fmt.Sprintf("server %q device %q: %s", serverOrDefault(server), deviceOrDefault(device), lastErr)
-		}
-	}
-	if lastErr == "" {
-		lastErr = "pulseaudio not available"
-	}
-	a.err = fmt.Errorf("audio sink: %s", lastErr)
+// errNoSound is the error of the sink of a session without sound, which is
+// never opened (noAudioSink).
+var errNoSound = errors.New("the session has no sound")
+
+// noAudioSink is the sink of a session without sound. It never connects to
+// the sound server, so the session does not show in the desktop's mixer and
+// does not wait for a server that is not there. Its error makes every use
+// treat it as a sink that cannot play.
+func noAudioSink() *audioSink {
+	return &audioSink{gain: 256, pct: 100, err: errNoSound}
 }
 
-// audioDevices returns the sink device candidates, in priority order:
-//  1. SCT_AUDIO_DEVICE env override (explicit user choice)
-//  2. the sink currently receiving audio (active sink-inputs) - this is
-//     "the actively selected device" on the user's desktop
-//  3. physical ALSA sinks that are RUNNING (in use by the session)
-//  4. any physical ALSA sink
-//  5. the server default (empty string)
+// browserOnlySink is the sink of a session whose only sound output is the
+// browser (hostAudioSilent). Like noAudioSink, it is never opened: the session
+// asks pactl for no sink, does not connect to the sound server and starts no
+// follower. Nothing failed, so it has no error, which tells it apart from a
+// sink that did not open; it is silent instead, so it plays nothing (plays).
+func browserOnlySink() *audioSink {
+	a := &audioSink{gain: 256, pct: 100}
+	a.silent.Store(true)
+	return a
+}
+
+// plays reports whether the sink plays the sound on this computer: it
+// opened, has not failed or been closed since, and is not kept silent for the
+// browser.
+func (a *audioSink) plays() bool {
+	return a != nil && a.failure() == nil && !a.closed.Load() && !a.silent.Load()
+}
+
+// failure is why the sink does not play: why it never opened, or the write
+// that failed since; nil while it works, and for the sink of a browser-only
+// session, which is silent instead (browserOnlySink). Closing the sink is no
+// failure: failure stays what it was. The run loop, the status row and the
+// browser ask from other goroutines than the one that writes.
+func (a *audioSink) failure() error {
+	switch {
+	case a.err != nil:
+		return a.err
+	case a.writeFailed.Load():
+		return errPulseLagged{}
+	}
+	return nil
+}
+
+// open connects to PulseAudio and opens the stream on the first server and
+// sink that work (see openFirst). Reports the real PA errors.
+func (a *audioSink) open() {
+	name := C.CString("scterm")
+	defer C.free(unsafe.Pointer(name))
+	server, device, err := openFirst(audioServers(), audioDevices(), func(server, device string) (int, string) {
+		cserver, cdevice := cstrOrNil(server), cstrOrNil(device)
+		defer C.free(unsafe.Pointer(cserver))
+		defer C.free(unsafe.Pointer(cdevice))
+		sink := C.sct_audio_open_with_server(name, cserver, cdevice)
+		if sink == nil {
+			return int(C.PA_ERR_INTERNAL), "out of memory"
+		}
+		if sink.valid != 0 {
+			a.sink = sink
+			return 0, ""
+		}
+		var msg string
+		if es := C.sct_audio_last_error(sink); es != nil {
+			msg = C.GoString(es)
+			C.free(unsafe.Pointer(es))
+		}
+		code := int(sink.err)
+		C.sct_audio_close(sink)
+		return code, msg
+	}, audioPause)
+	a.err = err
+	if err == nil {
+		noticef("scterm: audio sink: %s (device %q)\n",
+			serverOrDefault(server), deviceOrDefault(device))
+	}
+}
+
+// audioTries is how many times openFirst tries a server and sink.
+const audioTries = 3
+
+// audioPause waits between open's rounds of tries.
+var audioPause = time.Sleep
+
+// openFirst tries each server with each device, in that order, and returns
+// the first pair that opens. try makes one attempt and returns 0, or the
+// libpulse error code and text. Pairs that fail are tried again, in later
+// rounds 150 and 300 ms apart, since audio servers (PipeWire) may be starting
+// up; a pair whose arguments were refused is not (see paRetry). The error
+// gives the last failure of every pair.
+func openFirst(servers, devices []string, try func(server, device string) (int, string), sleep func(time.Duration)) (string, string, error) {
+	type pair struct {
+		server, device, err string
+		refused             bool
+	}
+	var pairs []pair
+	for _, server := range servers {
+		for _, device := range devices {
+			pairs = append(pairs, pair{server: server, device: device})
+		}
+	}
+	for round := 0; round < audioTries; round++ {
+		if round > 0 {
+			sleep(time.Duration(150*round) * time.Millisecond)
+		}
+		again := false
+		for i := range pairs {
+			p := &pairs[i]
+			if p.refused {
+				continue
+			}
+			code, msg := try(p.server, p.device)
+			if code == 0 {
+				return p.server, p.device, nil
+			}
+			p.err, p.refused = msg, !paRetry(code)
+			again = again || !p.refused
+		}
+		if !again {
+			break
+		}
+	}
+	var errs []string
+	for _, p := range pairs {
+		errs = append(errs, fmt.Sprintf("server %q device %q: %s",
+			serverOrDefault(p.server), deviceOrDefault(p.device), p.err))
+	}
+	if len(errs) == 0 {
+		errs = append(errs, "pulseaudio not available")
+	}
+	return "", "", fmt.Errorf("audio sink: %s", strings.Join(errs, "; "))
+}
+
+// paRetry reports whether an open that failed with the libpulse error code
+// may work when tried again: not when libpulse or the server refused the
+// server or sink it was given, which no wait changes.
+func paRetry(code int) bool {
+	return code != C.PA_ERR_INVALID && code != C.PA_ERR_INVALIDSERVER
+}
+
+// audioServers returns the servers to try, in order: libpulse's default
+// (""), which is PULSE_SERVER or client.conf's default-server when set and
+// otherwise the user's socket (in PULSE_RUNTIME_PATH or XDG_RUNTIME_DIR),
+// then the XDG_RUNTIME_DIR socket by name, so terminals with a stale
+// PULSE_SERVER still get sound. When the default is that socket, trying it
+// twice costs a failed connect, not a wait: openFirst tries every pair before
+// it pauses.
+func audioServers() []string {
+	if socket := pulseSocketPath(); socket != "" {
+		return []string{"", socket}
+	}
+	return []string{""}
+}
+
+// audioDevices returns the sink device candidates, in priority order. When
+// SCT_AUDIO_DEVICE is set it is the only one; otherwise:
+//  1. the default sink, when it is a sound card (alsa_output.*): what the
+//     desktop's volume panel selects
+//  2. the sinks other programs are playing on (they have sink-inputs)
+//  3. the sound cards that are RUNNING
+//  4. every sound card, in pactl's order
+//  5. the server default (empty string), when pactl lists no sound card or
+//     cannot run
 //
-// The default sink may be a virtual one (e.g. a game-streaming sink)
-// that silently buffers audio nobody hears, hence it is last.
+// A default sink that is not a sound card (e.g. a game-streaming sink) may
+// silently buffer audio nobody hears, so it is not taken first.
 func audioDevices() []string {
 	if d := envOr("SCT_AUDIO_DEVICE", ""); d != "" {
 		return []string{d}
@@ -272,7 +409,7 @@ func audioDevices() []string {
 		}
 	}
 
-	// 2) active sinks (have streams) - prefer the one with most inputs
+	// 2) active sinks (have streams), in pactl's order
 	var active []string
 	for _, s := range sinks {
 		if s.inputs > 0 {
@@ -329,10 +466,11 @@ func pulseSocketPath() string {
 }
 
 func (a *audioSink) errString() string {
-	if a.err == nil {
+	err := a.failure()
+	if err == nil {
 		return ""
 	}
-	return fmt.Sprintf("%v (check: pipewire or pulseaudio running? `pactl info`)", a.err)
+	return fmt.Sprintf("%v (check: pipewire or pulseaudio running? `pactl info`)", err)
 }
 
 func errNoAudio() error {
@@ -345,13 +483,19 @@ func (errPulseUnavailable) Error() string {
 	return "pulseaudio not available"
 }
 
-func cstr(s string) *C.char {
+// cstrOrNil is C.CString, but NULL for "": libpulse takes NULL, not an empty
+// string, for its default server or sink, and refuses "" as an invalid
+// argument. Free the result with C.free.
+func cstrOrNil(s string) *C.char {
+	if s == "" {
+		return nil
+	}
 	return C.CString(s)
 }
 
 // writePCM16 feeds interleaved s16 stereo samples to the sink (in place gain).
 func (a *audioSink) writePCM16(pcm []byte) {
-	if a.err != nil {
+	if a.failure() != nil {
 		return
 	}
 	if a.silent.Load() {
@@ -374,7 +518,7 @@ func (a *audioSink) writePCM16(pcm []byte) {
 		return
 	}
 	if C.sct_audio_write(a.sink, (*C.uint8_t)(bytePtr(pcm)), C.int(len(pcm))) != 0 {
-		a.err = errPulseLagged{}
+		a.writeFailed.Store(true)
 		logOnce("scterm: audio sink write failed; audio stopped. Check `pactl list sinks` and your audio server.\n")
 	}
 }
@@ -383,41 +527,90 @@ type errPulseLagged struct{}
 
 func (errPulseLagged) Error() string { return "pulseaudio write failed" }
 
-// setGain sets volume in percent (0..200). Mute = 0.
+// setGain sets the volume in whole percent (0..200). Mute = 0, and the volume
+// it replaces is kept for toggleMute.
 func (a *audioSink) setGain(pct int) {
-	if pct < 0 {
-		pct = 0
+	a.volMu.Lock()
+	defer a.volMu.Unlock()
+	a.storeGain(pct)
+}
+
+// toggleMute mutes, or brings back the volume from before the mute (100% when
+// there was none).
+func (a *audioSink) toggleMute() {
+	a.volMu.Lock()
+	defer a.volMu.Unlock()
+	if atomic.LoadInt32(&a.pct) > 0 {
+		a.storeGain(0)
+		return
 	}
-	if pct > 200 {
-		pct = 200
+	pct := int(a.unmutePct)
+	if pct == 0 {
+		pct = 100
 	}
+	a.storeGain(pct)
+}
+
+// storeGain is setGain with volMu held.
+func (a *audioSink) storeGain(pct int) {
+	pct = min(max(pct, 0), 200)
+	if old := atomic.LoadInt32(&a.pct); pct == 0 && old > 0 {
+		a.unmutePct = old
+	}
+	atomic.StoreInt32(&a.pct, int32(pct))
 	atomic.StoreInt32(&a.gain, int32(pct*256/100))
 }
 
 func (a *audioSink) gainPercent() int {
-	return int(atomic.LoadInt32(&a.gain)) * 100 / 256
+	return int(atomic.LoadInt32(&a.pct))
 }
 
 // cleanupStaleStreams: if scterm was killed hard (SIGKILL, pane death) or a
 // stray instance is still alive in another pane, its sink-input keeps
 // playing audio and no amount of quitting the visible instance stops it
-// ("the app is killed but the sound still plays"). On startup, kill every
-// leftover scterm sink-input BEFORE opening our own stream, so the new
-// instance is the only audio source. (pactl has no kill-sink-input;
-// the libpulse control API does.)
+// ("the app is killed but the sound still plays"). A session that plays its
+// sound on this computer (playsHere) kills every leftover scterm sink-input
+// at start, BEFORE opening its own stream, so it is the only audio source.
+// A session that plays nothing here leaves them alone: they may belong to
+// another live session. (pactl has no kill-sink-input; the libpulse control
+// API does.)
 func cleanupStaleStreams() {
-	// Kill both the current and the legacy application name: a stray
-	// stream from an old sct binary must not survive the rename.
-	n := int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("scterm")))
-	n += int(C.sct_audio_kill_streams(cstr(pulseSocketPath()), cstr("sct")))
-	if n > 0 {
-		fmt.Fprintf(stderrWriter(), "scterm: silenced %d leftover audio stream(s)\n", n)
+	if n := killStaleStreams(audioServers(), killAppStreams); n > 0 {
+		noticef("scterm: silenced %d leftover audio stream(s)\n", n)
 	}
 }
 
+// killAppStreams kills the streams of app on server ("" is libpulse's
+// default) and returns how many, or -1 when it cannot connect.
+var killAppStreams = func(server, app string) int {
+	cserver, capp := cstrOrNil(server), C.CString(app)
+	defer C.free(unsafe.Pointer(cserver))
+	defer C.free(unsafe.Pointer(capp))
+	return int(C.sct_audio_kill_streams(cserver, capp))
+}
+
+// killStaleStreams runs kill on the first of servers that answers (open tries
+// them in the same order) and returns how many streams it killed.
+func killStaleStreams(servers []string, kill func(server, app string) int) int {
+	for _, server := range servers {
+		n := kill(server, "scterm")
+		if n < 0 {
+			continue
+		}
+		// Kill both the current and the legacy application name: a stray
+		// stream from an old sct binary must not survive the rename.
+		return n + max(kill(server, "sct"), 0)
+	}
+	return 0
+}
+
+// close takes the stream off the sound server at once (sct_audio_close). It
+// can run while the session goes on, once its sound has stopped (playAudio):
+// the lock keeps it from freeing the stream under a write.
 func (a *audioSink) close() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.closed.Store(true)
 	if a.sink != nil {
 		C.sct_audio_close(a.sink)
 		a.sink = nil

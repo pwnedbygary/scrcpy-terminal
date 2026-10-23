@@ -4,7 +4,9 @@
 Only the port, token and scid are read from the command the app displays,
 each checked against a strict pattern, and substituted into the fixed
 template below (the one HelperBackend.activationCommand prints), so nothing
-else from the screen reaches a shell.
+else from the screen reaches a shell. The helper runs from the APK of the app
+showing the command, which must be one of PACKAGES: the release or a debug
+build.
 
     SERIAL=<adb serial> android/devicetest/activate_helper.py
 """
@@ -14,6 +16,7 @@ import sys
 import ui
 
 SHOWN = re.compile(r"HelperMain (?P<port>\d{1,5}) (?P<token>[0-9a-fA-F]{64}) 4\.1 scid=(?P<scid>[0-9a-f]{8}) ")
+PACKAGES = ('io.github.pwnedbygary.scterm', 'io.github.pwnedbygary.scterm.debug')
 TEMPLATE = (
     "CLASSPATH={apk} nohup app_process / io.github.pwnedbygary.scterm.helper.HelperMain "
     "{port} {token} 4.1 scid={scid} tunnel_forward=false cleanup=false power_on=false "
@@ -23,11 +26,13 @@ TEMPLATE = (
 
 
 def main():
-    texts = [n.get('text') or '' for n in ui.dump().iter('node')]
-    found = next((m for m in map(SHOWN.search, texts) if m), None)
+    shown = ((n.get('package'), SHOWN.search(n.get('text') or '')) for n in ui.dump().iter('node'))
+    package, found = next(((p, m) for p, m in shown if m), (None, None))
     if not found or not 0 < int(found['port']) < 65536:
         sys.exit('no helper command on screen')
-    path = ui.adb('shell', 'pm', 'path', 'io.github.pwnedbygary.scterm').stdout.strip()
+    if package not in PACKAGES:
+        sys.exit(f'the helper command is shown by {package!r}, not by scterm')
+    path = ui.adb('shell', 'pm', 'path', package).stdout.strip()
     apk = re.fullmatch(r'package:(/data/app/[\w.=/~+-]+/base\.apk)', path)
     if not apk:
         sys.exit(f'unexpected apk path: {path!r}')

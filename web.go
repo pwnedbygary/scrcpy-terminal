@@ -29,12 +29,16 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
+	"unicode"
 )
 
 // ---------------------------------------------------------------------------
@@ -48,7 +52,8 @@ import (
 //	0x02 audio : PCM s16le stereo 48 kHz
 //	0x03 hello : JSON (server capabilities, sent right after the client hello)
 //
-// Text (server -> client): JSON status/ack messages.
+// Text (server -> client): JSON status/ack messages, and a last
+// {"op":"bye","reason":...} just before the server closes the socket.
 // Text (client -> server): JSON control events, see webEvent.
 const (
 	webMsgVideo = 0x01
@@ -90,7 +95,7 @@ type webEvent struct {
 	Meta   uint32 `json:"meta,omitempty"`   // Android metastate
 	Text   string `json:"text,omitempty"`
 	Delta  int    `json:"delta,omitempty"`  // wheel notches, positive = up
-	Gain   int    `json:"gain,omitempty"`   // percent, -1 = no change
+	Gain   *int   `json:"gain,omitempty"`   // percent; absent or negative = no change
 	Mute   *bool  `json:"mute,omitempty"`   // toggle/pin the audio gain
 	W      int    `json:"w,omitempty"`      // viewport px (hello)
 	H      int    `json:"h,omitempty"`      // viewport px (hello)
@@ -225,6 +230,8 @@ type webClient struct {
 
 	sentVideo, dropVideo atomic.Int64
 	encErrors            atomic.Int64
+	rawBytes             atomic.Int64
+	kbpsBits             atomic.Uint64 // float64 bits, set by sendLoop
 }
 
 // ---------------------------------------------------------------------------
@@ -242,14 +249,30 @@ type webServer struct {
 	app      *app // nil in headless web mode (--no-tui with --web)
 	headless bool
 
-	ln   net.Listener
-	http *http.Server
+	// ln and http are what run serves. main sets ln before run starts; run
+	// sets http, and ln when it listens itself, under srvMu, which stopWith
+	// takes to read them: a stop can come from another goroutine at any
+	// time, a signal's for one.
+	srvMu sync.Mutex
+	ln    net.Listener
+	http  *http.Server
 
 	clientsMu sync.Mutex
-	clients   []*webClient
-	nextID    uint64
+	// clients is copy-on-write: frame and pushPCM walk a snapshot of it
+	// without the lock, so a slice once stored here is never written again.
+	clients []*webClient
+	nextID  uint64
+	// leaveTimer ends a --window session once its last viewer has been gone
+	// for leaveGrace (webLeaveGrace; tests shorten it). Guarded by clientsMu.
+	leaveGrace time.Duration
+	leaveTimer *time.Timer
+	// stopBye is the bye of the stop, set when it takes its list of viewers to
+	// close: a viewer whose upgrade completes later gets it from handleWS.
+	// Guarded by clientsMu.
+	stopBye string
 
-	// frame pool: slots returned by clients as soon as they are encoded/sent
+	// frame pool: a frame's buffer comes back once its last holder is done
+	// with it (see frame), an output buffer once it is sent
 	poolMu sync.Mutex
 	pool   [4][]byte
 
@@ -269,7 +292,13 @@ type webServer struct {
 	url     string
 	closing atomic.Bool
 	done    chan struct{}
+	// stopped is closed when the first stop has finished: the byes and close
+	// frames are written and the window is gone.
+	stopped chan struct{}
 
+	// nClients is len(clients) for readers that do not take clientsMu. It is
+	// stored under clientsMu with every change to the list, so it can never be
+	// left behind by two changes at once.
 	nClients atomic.Int64
 	// hadClient is true once any viewer has connected, ever. It is what tells
 	// a browser that died before it could display anything (a failure worth
@@ -291,6 +320,13 @@ type webServer struct {
 	encMsBits atomic.Uint64
 
 	dropLog atomic.Int64 // last unix-nano of a rate-limited error log
+
+	// refused holds the names of the refused requests reported so far, and
+	// refusedMore whether a line has said that further ones go unreported
+	// (see reportRefused). Guarded by refusedMu.
+	refusedMu   sync.Mutex
+	refused     map[string]bool
+	refusedMore bool
 
 	// The DEVICE's own media volume, read back from the device (see
 	// pollVolume). The browser HUD shows this instead of the host-sink gain:
@@ -472,24 +508,78 @@ func newWebServer(cfg config, sess *session, stream *streamState, audio *audioSi
 		inbox:    make(chan webCmd, webInbox),
 		ready:    make(chan struct{}),
 		done:     make(chan struct{}),
+		stopped:  make(chan struct{}),
 		volKick:  make(chan struct{}, 1),
+
+		leaveGrace: webLeaveGrace,
 	}
 	s.devVolIdx.Store(-1) // no reading yet; 0 would mean "device muted"
 	return s
 }
 
+// webListen opens the server's listener: net.Listen, or in tests one on
+// loopback whatever address it is asked for.
+var webListen = net.Listen
+
+// listenWeb opens the browser display's listener on addr ("" is 127.0.0.1)
+// and port, or says why it cannot and what to do.
+func listenWeb(addr string, port int) (net.Listener, error) {
+	if addr == "" {
+		addr = "127.0.0.1"
+	}
+	ln, err := webListen("tcp", net.JoinHostPort(addr, fmt.Sprintf("%d", port)))
+	if err != nil {
+		return nil, webListenError(addr, port, err)
+	}
+	return ln, nil
+}
+
+// webListenError says why the browser display cannot listen on port on addr,
+// from err, the error of listening there, and what to do about it.
+func webListenError(addr string, port int, err error) error {
+	switch {
+	case errors.Is(err, syscall.EADDRINUSE):
+		detail, todo := webPortInUse(addr, port)
+		return fmt.Errorf("web: %s: %s", detail, todo)
+	case errors.Is(err, syscall.EACCES):
+		return fmt.Errorf("web: port %d on %s needs privileges that scterm does not have: %s", port, addr, webPortAnother)
+	case errors.Is(err, syscall.EADDRNOTAVAIL):
+		return fmt.Errorf("web: %s is not an address of this computer: "+
+			"--web-addr takes one of its addresses, 0.0.0.0 for all of them, or the default, 127.0.0.1", addr)
+	}
+	return fmt.Errorf("web: listen on %s:%d: %w", addr, port, err)
+}
+
+// webPortAnother says how to choose another port for the browser display.
+const webPortAnother = "choose another port with --web-port PORT (0 picks a free one)"
+
+// webPortInUse says that port on addr is in use, and what to do about it, as
+// the browser display and scterm doctor both say it.
+func webPortInUse(addr string, port int) (detail, todo string) {
+	return fmt.Sprintf("port %d on %s is in use", port, addr), "stop the program that uses it, or " + webPortAnother
+}
+
 // run starts the HTTP server, prints the URL, optionally opens a browser
-// window, and blocks until the server is shut down.
+// window, and blocks until the server is shut down. It serves s.ln when that
+// is set, as main sets it, and otherwise listens itself. A stop that has begun
+// when run is about to publish its server leaves run nothing to do: it closes
+// the listener, given or its own, and returns without serving or printing its
+// address (it still warns of SCTERM_WEB_HOSTS entries it ignores, as it reads
+// them first). A later stop shuts down what run has started, and no browser
+// window outlives it: a window starts only if the stop has not begun, and the
+// stop then closes it (startWindow).
 func (s *webServer) run(openWindow bool) error {
 	host := s.addr
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	ln, err := net.Listen("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", s.port)))
-	if err != nil {
-		return fmt.Errorf("web: listen on %s:%d: %w", host, s.port, err)
+	ln := s.ln
+	if ln == nil {
+		var err error
+		if ln, err = listenWeb(host, s.port); err != nil {
+			return err
+		}
 	}
-	s.ln = ln
 	// Record the real port (0 = pick any free port).
 	if ta, ok := ln.Addr().(*net.TCPAddr); ok {
 		s.port = ta.Port
@@ -503,11 +593,19 @@ func (s *webServer) run(openWindow bool) error {
 	mux.HandleFunc("/pcm-worklet.js", s.handleWorklet)
 	mux.HandleFunc("/ws", s.handleWS)
 
-	s.http = &http.Server{
-		Handler:           mux,
+	srv := &http.Server{
+		Handler:           s.hostCheck(mux, s.allowedNames(ln)),
 		ReadHeaderTimeout: 5 * time.Second,
 		// No WriteTimeout: /ws hijacks the connection and owns it afterwards.
 	}
+	s.srvMu.Lock()
+	if s.closing.Load() {
+		s.srvMu.Unlock()
+		ln.Close()
+		return nil
+	}
+	s.ln, s.http = ln, srv
+	s.srvMu.Unlock()
 
 	url := fmt.Sprintf("http://%s/", net.JoinHostPort(host, fmt.Sprintf("%d", s.port)))
 	if host == "0.0.0.0" || host == "::" {
@@ -515,18 +613,14 @@ func (s *webServer) run(openWindow bool) error {
 	}
 	s.url = url
 	close(s.ready)
-	if s.audio == nil || s.audio.err != nil {
-		fmt.Fprintf(stderrWriter(), "scterm: web display on %s (video only: %s)\n", url, s.audioErrString())
-	} else {
-		fmt.Fprintf(stderrWriter(), "scterm: web display on %s\n", url)
-	}
+	fmt.Fprintf(stderrWriter(), "scterm: web display on %s\n", url)
 
 	// The PCM tap is registered before the first client connects: it fans out
 	// to whoever is listening at the time.
 	s.stream.addPCMTap(s.pushPCM)
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- s.http.Serve(ln) }()
+	go func() { serveErr <- srv.Serve(ln) }()
 
 	// One goroutine applies control events in order; see webinput.go.
 	go s.runDispatcher()
@@ -557,38 +651,61 @@ func (s *webServer) run(openWindow bool) error {
 
 // stop shuts the server down and disconnects every client.
 func (s *webServer) stop() {
+	s.stopWith(webByeStopped)
+}
+
+// webStopWait bounds how long a later stop waits for the first to finish: the
+// first may still be closing a stalled viewer's socket (up to wsCloseTimeout),
+// and then the window.
+const webStopWait = 5 * time.Second
+
+// webLeaveGrace is how long a --window session outlives its last viewer: a
+// reload drops the page's socket, and the reloaded page connects again well
+// within it.
+const webLeaveGrace = 3 * time.Second
+
+// stopWith is stop, telling every client why in a bye, the last message before
+// its close frame. Only the first call stops the server, so its reason is the
+// one shown. A later call waits for the first to finish: the app loop stops
+// the server again on its way out of the process, and must not exit while a
+// Quit from the browser is still writing the byes or closing the window.
+func (s *webServer) stopWith(reason string) {
 	if s.closing.Swap(true) {
+		select {
+		case <-s.stopped:
+		case <-time.After(webStopWait):
+		}
 		return
 	}
+	defer close(s.stopped)
 	close(s.done)
-	if s.http != nil {
+	s.srvMu.Lock()
+	srv, ln := s.http, s.ln
+	s.srvMu.Unlock()
+	if srv != nil {
 		ctx, cancel := timeoutContext(2 * time.Second)
-		_ = s.http.Shutdown(ctx)
+		_ = srv.Shutdown(ctx)
 		cancel()
 	}
-	if s.ln != nil {
-		_ = s.ln.Close()
+	if ln != nil {
+		_ = ln.Close()
 	}
+	bye := byeMessage(reason)
 	s.clientsMu.Lock()
 	clients := append([]*webClient(nil), s.clients...)
+	s.stopBye = bye
+	s.cancelLeave()
 	s.clientsMu.Unlock()
+	// All at once, so a viewer that stopped reading delays only its own bye.
+	var wg sync.WaitGroup
 	for _, c := range clients {
-		c.close()
+		wg.Go(func() { c.closeWith(bye) })
 	}
+	wg.Wait()
 	// Close the window we opened: it displays nothing without the server, and
 	// an orphan would hold the private profile lock against the next run.
 	s.killWindow()
 	s.freeEncoders()
-}
-
-func (s *webServer) audioErrString() string {
-	if s.audio == nil {
-		return "audio disabled"
-	}
-	if s.audio.err == nil {
-		return "audio ok"
-	}
-	return s.audio.errString()
 }
 
 // frame is the frameSink implementation: called from the video demux goroutine
@@ -596,9 +713,13 @@ func (s *webServer) audioErrString() string {
 // blocks (a client whose mailbox is still full loses its oldest frame).
 //
 // Buffer ownership, which is what keeps this allocation-free and race-free:
-// the sink owns the buffer until a client queues it in its mailbox; the
-// client's sender owns it until it has encoded/written it; whoever removes a
-// frame from a mailbox returns its buffer to the pool exactly once.
+// every client is handed the same frame, so its buffer is shared, and f.refs
+// counts who still holds it: the sink while it hands the frame out, and each
+// client from when its mailbox takes the frame until its sender has encoded or
+// copied it, or a newer frame or the client's close drops it from the mailbox.
+// Each holder lets go once, through releaseFrame, and the last to let go
+// returns the buffer to the pool: once per frame, and never while a client can
+// still read it.
 func (s *webServer) frame(f *videoFrame) {
 	if f == nil {
 		return
@@ -608,52 +729,59 @@ func (s *webServer) frame(f *videoFrame) {
 	clients := s.clients
 	s.clientsMu.Unlock()
 
-	queued := false
+	// The sink's own hold: a client that sends the frame before the rest have
+	// been offered it must not free the buffer under them.
+	f.refs.Add(1)
 	for _, c := range clients {
 		if c.closed.Load() {
 			continue
 		}
-		if c.offer(f) {
-			queued = true
-		}
+		c.offer(f)
 	}
-	if !queued {
-		s.poolPut(f.rgb)
-	}
+	s.releaseFrame(f)
 }
 
-// offer hands one frame to a client. It reports whether the frame is now owned
-// by that client's mailbox (false: the sink must recycle it).
-func (c *webClient) offer(f *videoFrame) bool {
+// offer hands one frame to a client, whose mailbox then holds it (see frame).
+func (c *webClient) offer(f *videoFrame) {
 	if c.closed.Load() {
-		return false
+		return
 	}
 	c.frameMu.Lock()
 	if c.closed.Load() {
 		c.frameMu.Unlock()
-		return false
+		return
 	}
+	f.refs.Add(1)
 	old := c.frame
 	c.frame = f
 	c.frameMu.Unlock()
 	if old != nil {
-		// We just took it out of the mailbox, so we own it now.
-		c.srv.poolPut(old.rgb)
+		c.dropVideo.Add(1)
+		// Dropped from the mailbox unsent: that was the mailbox's hold.
+		c.srv.releaseFrame(old)
 	}
 	select {
 	case c.frameReady <- struct{}{}:
 	default:
 	}
-	return true
 }
 
-// takeFrame returns the newest frame (the caller then owns its buffer).
+// takeFrame returns the newest frame. The caller takes over the mailbox's hold
+// on it, and lets go with releaseFrame.
 func (c *webClient) takeFrame() *videoFrame {
 	c.frameMu.Lock()
 	f := c.frame
 	c.frame = nil
 	c.frameMu.Unlock()
 	return f
+}
+
+// releaseFrame lets go of one hold on f (see frame). The last holder returns
+// the buffer to the pool.
+func (s *webServer) releaseFrame(f *videoFrame) {
+	if f.refs.Add(-1) == 0 {
+		s.poolPut(f.rgb)
+	}
 }
 
 // pushPCM is the stream PCM tap: fan out to clients that want audio.
@@ -742,10 +870,14 @@ func (s *webServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	webNoCache(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Inline script/style only; connect-src for the WebSocket. img-src blob:
-	// is used by the screenshot key.
+	// is used by the screenshot key. frame-ancestors, and X-Frame-Options for
+	// browsers without it, keep any website from framing the page and steering
+	// clicks and keys into it: as 127.0.0.1 the page passes hostCheck.
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
-			"connect-src 'self' ws: wss:; img-src 'self' blob: data:; media-src 'none'; worker-src 'self' blob:")
+			"connect-src 'self' ws: wss:; img-src 'self' blob: data:; media-src 'none'; worker-src 'self' blob:; "+
+			"frame-ancestors 'none'")
+	w.Header().Set("X-Frame-Options", "DENY")
 	_, _ = w.Write([]byte(webIndexHTML))
 }
 
@@ -771,6 +903,192 @@ func (s *webServer) handleWorklet(w http.ResponseWriter, r *http.Request) {
 	webNoCache(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	_, _ = w.Write([]byte(webPCMWorkletJS))
+}
+
+// webHostsEnv names the environment variable that lists more names the page
+// is served by (a reverse proxy's, or another name this computer has on the
+// network), separated by commas.
+const webHostsEnv = "SCTERM_WEB_HOSTS"
+
+// webRefusedMax is how many refused names are reported, each once: a page can
+// make requests addressed to any number of names.
+const webRefusedMax = 16
+
+// osHostname is this computer's host name: os.Hostname, or in tests a fixed
+// one.
+var osHostname = os.Hostname
+
+// allowedNames returns the names, besides IP addresses and localhost, that a
+// request may address the server by when it listens on ln (webHostNames). It
+// reports each entry of SCTERM_WEB_HOSTS that it ignores, quoted in ASCII, so
+// a letter that only looks like an ASCII one shows as an escape.
+func (s *webServer) allowedNames(ln net.Listener) map[string]bool {
+	var ip net.IP
+	if ta, ok := ln.Addr().(*net.TCPAddr); ok {
+		ip = ta.IP
+	}
+	hostname, _ := osHostname()
+	names, ignored := webHostNames(ip, hostname, s.addr, os.Getenv(webHostsEnv))
+	for _, e := range ignored {
+		noticef("scterm: web: ignored %+q in %s: %s\n", e, webHostsEnv, webHostsAdvice(e))
+	}
+	return names
+}
+
+// webHostsAdvice says what is wrong with entry, an entry of SCTERM_WEB_HOSTS
+// that webHostNames ignores, and how to write it.
+func webHostsAdvice(entry string) string {
+	if _, ok := webHostName(entry); ok {
+		return "no request can match a name that starts with a dot or has two dots in a row; " +
+			"list each name in full, such as mirror.example.lan"
+	}
+	advice := "an entry must be a name, or a name and a port, such as mirror.lan or mirror.lan:8443"
+	if strings.ContainsFunc(entry, func(r rune) bool { return r > unicode.MaxASCII }) {
+		advice += "; write an international name in its xn-- form"
+	}
+	return advice
+}
+
+// webHostNames are the names, besides IP addresses and localhost, that a
+// request to the server may be addressed to when it listens on ip: addr, the
+// address it was asked to listen on, in case it is a name, since scterm prints
+// that address and --window opens it; the names in hosts, the value of
+// SCTERM_WEB_HOSTS; and, when ip is known and not a loopback address, this
+// computer's hostname, with and without .local, and for a hostname with dots
+// its first label with .local (its multicast DNS name). On a loopback address
+// no other computer reaches the server, and this one reaches it by an address
+// or localhost, so the hostname would only serve someone on the network who
+// answers for it with 127.0.0.1. 0.0.0.0 and :: are not loopback addresses:
+// they put the server on the network. It also returns the entries of hosts
+// that no request can match, which it leaves out: those that are not a name,
+// or a name and a port, and the names with an empty label, which start with a
+// dot or have two dots in a row.
+func webHostNames(ip net.IP, hostname, addr, hosts string) (names map[string]bool, ignored []string) {
+	names = map[string]bool{}
+	add := func(s string) {
+		if name, ok := webHostName(s); ok {
+			names[name] = true
+		}
+	}
+	if h, ok := webHostName(hostname); ok && ip != nil && !ip.IsLoopback() {
+		h = strings.TrimSuffix(h, ".local")
+		add(h)
+		add(h + ".local")
+		if first, _, dotted := strings.Cut(h, "."); dotted {
+			add(first + ".local")
+		}
+	}
+	add(addr)
+	for _, s := range strings.Split(hosts, ",") {
+		s = strings.TrimSpace(s)
+		name, ok := webHostName(s)
+		switch {
+		case s == "":
+		case ok && !slices.Contains(strings.Split(name, "."), ""):
+			names[name] = true
+		default:
+			ignored = append(ignored, s)
+		}
+	}
+	return names, ignored
+}
+
+// webHostName reads a Host header: a name (ASCII letters, digits, '-', '.' and
+// '_') or an IPv4 address, or an IPv6 address in brackets, then maybe a colon
+// and a port. It returns the name or the address, in lower case and without a
+// final dot, and false for anything else, an empty header included.
+func webHostName(hostport string) (string, bool) {
+	host, port, ipv6 := hostport, "", false
+	if inner, ok := strings.CutPrefix(hostport, "["); ok {
+		addr, rest, closed := strings.Cut(inner, "]")
+		if ip, err := netip.ParseAddr(addr); !closed || err != nil || !ip.Is6() {
+			return "", false
+		}
+		host, port, ipv6 = addr, rest, true
+	} else if i := strings.IndexByte(hostport, ':'); i >= 0 {
+		host, port = hostport[:i], hostport[i:]
+	}
+	if port != "" && (port[0] != ':' || strings.Trim(port[1:], "0123456789") != "") {
+		return "", false
+	}
+	if !ipv6 && strings.Trim(host, "-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz") != "" {
+		return "", false
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	return host, host != ""
+}
+
+// webHostAllowed reports whether a request whose Host header is hostport is
+// addressed to the server by a name it is meant to be reached by, on any port:
+// an IP address, which no DNS answer stands behind; localhost or a name that
+// ends in .localhost, which browsers keep on this computer; or one of names.
+// A website that points its own name at this computer (DNS rebinding) loads
+// its page from that name, so the page's requests carry it, and are refused.
+func webHostAllowed(hostport string, names map[string]bool) bool {
+	name, ok := webHostName(hostport)
+	if !ok {
+		return false
+	}
+	if _, err := netip.ParseAddr(name); err == nil {
+		return true
+	}
+	return name == "localhost" || strings.HasSuffix(name, ".localhost") || names[name]
+}
+
+// hostCheck hands a request to next only when it is addressed to a name the
+// server is meant to be reached by (webHostAllowed): the page, its assets and
+// the WebSocket alike. Any other request gets a 403 that says what to do
+// instead, and none of the page.
+func (s *webServer) hostCheck(next http.Handler, names map[string]bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if webHostAllowed(r.Host, names) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The address the request reached works for this viewer, even when
+		// the server listens on every interface.
+		addr := net.JoinHostPort("127.0.0.1", fmt.Sprint(s.port))
+		if a, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+			addr = a.String()
+		}
+		s.reportRefused(r.Host, addr)
+		http.Error(w, fmt.Sprintf("scterm does not serve the page by this name. Open it by address, as http://%s/, or start scterm with the name in %s.",
+			addr, webHostsEnv), http.StatusForbidden)
+	})
+}
+
+// reportRefused says that a request addressed to hostport was refused, and
+// what to open instead (addr): once per name, for the first webRefusedMax
+// names, then once that further names go unreported.
+func (s *webServer) reportRefused(hostport, addr string) {
+	name, ok := webHostName(hostport)
+	if !ok {
+		name = hostport
+	}
+	if len(name) > 253 { // longer than any DNS name
+		name = name[:253] + "…"
+	}
+	s.refusedMu.Lock()
+	report, more := false, false
+	switch {
+	case s.refused[name]:
+	case len(s.refused) < webRefusedMax:
+		if s.refused == nil {
+			s.refused = map[string]bool{}
+		}
+		s.refused[name] = true
+		report = true
+	case !s.refusedMore:
+		s.refusedMore, more = true, true
+	}
+	s.refusedMu.Unlock()
+	switch {
+	case report:
+		noticef("scterm: web: refused a request addressed to %q; if you opened it, use http://%s/ or start scterm with the name in %s\n",
+			name, addr, webHostsEnv)
+	case more:
+		notice("scterm: web: refused requests addressed to more names; they are not reported\n")
+	}
 }
 
 // originOK rejects cross-origin WebSocket handshakes (a random page must not
@@ -807,6 +1125,17 @@ func (s *webServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.clientsMu.Lock()
+	// A stop that has already taken its list of viewers to close would never
+	// close this one, so it gets that stop's bye here. One added before is on
+	// the list: the stop takes the list and sets stopBye under clientsMu.
+	if bye := s.stopBye; bye != "" {
+		s.clientsMu.Unlock()
+		// It connected all the same, and its page shows why the session
+		// ended: a --window browser that shows it has displayed something.
+		s.hadClient.Store(true)
+		_ = ws.CloseWith(bye)
+		return
+	}
 	s.nextID++
 	c := &webClient{
 		srv:         s,
@@ -818,10 +1147,11 @@ func (s *webServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		closeCh:     make(chan struct{}),
 		statusEvery: 500 * time.Millisecond,
 	}
-	s.clients = append(s.clients, c)
+	s.clients = append(s.clients[:len(s.clients):len(s.clients)], c)
 	n := len(s.clients)
-	s.clientsMu.Unlock()
 	s.nClients.Store(int64(n))
+	s.cancelLeave()
+	s.clientsMu.Unlock()
 	s.hadClient.Store(true)
 
 	logOnce(fmt.Sprintf("scterm: web client %d connected (%d total)\n", c.id, n))
@@ -835,15 +1165,19 @@ func (s *webServer) handleWS(w http.ResponseWriter, r *http.Request) {
 // client loops
 // ---------------------------------------------------------------------------
 
-func (c *webClient) close() {
+func (c *webClient) close() { c.closeWith("") }
+
+// closeWith is close, sending last (if not empty) as the final message before
+// the close frame.
+func (c *webClient) closeWith(last string) {
 	if c.closed.Swap(true) {
 		return
 	}
 	close(c.closeCh)
-	_ = c.ws.Close()
+	_ = c.ws.CloseWith(last)
 	c.frameMu.Lock()
 	if c.frame != nil {
-		c.srv.poolPut(c.frame.rgb)
+		c.srv.releaseFrame(c.frame)
 		c.frame = nil
 	}
 	c.frameMu.Unlock()
@@ -855,27 +1189,59 @@ func (c *webClient) close() {
 	s.clientsMu.Lock()
 	for i, x := range s.clients {
 		if x == c {
-			s.clients = append(s.clients[:i], s.clients[i+1:]...)
+			s.clients = append(s.clients[:i:i], s.clients[i+1:]...)
 			break
 		}
 	}
 	n := len(s.clients)
-	s.clientsMu.Unlock()
 	s.nClients.Store(int64(n))
-	logOnce(fmt.Sprintf("scterm: web client %d disconnected (%d left)\n", c.id, n))
-
-	// Window mode: the window *is* the session. When its last viewer goes
-	// away there is nothing left to display, so stop.
+	// Window mode: the window *is* the session. When its last viewer has been
+	// gone for leaveGrace there is nothing left to display, so stop; a reload
+	// comes back sooner than that.
 	if s.cfg.window && n == 0 && !s.closing.Load() {
-		s.quit()
+		s.leaveLater()
+	}
+	s.clientsMu.Unlock()
+	logOnce(fmt.Sprintf("scterm: web client %d disconnected (%d left)\n", c.id, n))
+}
+
+// leaveLater ends the session leaveGrace from now unless a viewer connects
+// first. Callers hold clientsMu.
+func (s *webServer) leaveLater() {
+	s.cancelLeave()
+	var t *time.Timer
+	t = time.AfterFunc(s.leaveGrace, func() {
+		s.clientsMu.Lock()
+		current := s.leaveTimer == t
+		if current {
+			s.leaveTimer = nil
+		}
+		empty := len(s.clients) == 0
+		s.clientsMu.Unlock()
+		if current && empty && !s.closing.Load() {
+			s.quit()
+		}
+	})
+	s.leaveTimer = t
+}
+
+// cancelLeave drops a pending leaveLater. Callers hold clientsMu.
+func (s *webServer) cancelLeave() {
+	if s.leaveTimer != nil {
+		s.leaveTimer.Stop()
+		s.leaveTimer = nil
 	}
 }
 
+// quit ends the session once its grace has run out: through the app's loop
+// when there is one, waiting for room in its event queue (it runs on the
+// timer's own goroutine, and a dropped quit would leave the session running
+// without its window), or by stopping the server.
 func (s *webServer) quit() {
 	if s.app != nil {
 		select {
 		case s.app.events <- inputEvent{kind: evQuit}:
-		default:
+		case <-s.done:
 		}
 		return
 	}
@@ -889,6 +1255,11 @@ func (c *webClient) sendLoop() {
 	ticker := time.NewTicker(c.statusEvery)
 	defer ticker.Stop()
 
+	// A status's kbps covers what was written from one half-second status
+	// to the next, neither counted: the status alone would keep it above 0
+	// while nothing else goes out. A status that answers a ping neither
+	// ends that window nor brings a new figure: it repeats the last one.
+	wrote, since := c.ws.wrote.Load(), time.Now()
 	for {
 		select {
 		case <-c.closeCh:
@@ -900,10 +1271,21 @@ func (c *webClient) sendLoop() {
 			}
 			c.sendFrame(f)
 		case <-ticker.C:
+			kbps := kbpsOver(c.ws.wrote.Load()-wrote, time.Since(since))
+			c.kbpsBits.Store(math.Float64bits(kbps))
 			c.sendStatus()
+			wrote, since = c.ws.wrote.Load(), time.Now()
 			c.drainAudio()
 		}
 	}
+}
+
+// kbpsOver is the rate of n bytes in d, in kilobits per second.
+func kbpsOver(n int64, d time.Duration) float64 {
+	if d <= 0 {
+		return 0
+	}
+	return float64(n) * 8 / 1000 / d.Seconds()
 }
 
 // sendFrame encodes (when needed) and writes one video frame.
@@ -926,9 +1308,10 @@ func (c *webClient) sendFrame(f *videoFrame) {
 	// canvas the buffer cannot fill.
 	if need := cv.cw * cv.ch * 4; need <= 0 || len(f.rgb) < need {
 		c.encErrors.Add(1)
+		c.dropVideo.Add(1)
 		s.logLimited("scterm: web: frame buffer %d bytes cannot fill canvas %dx%d (%d bytes)\n",
 			len(f.rgb), cv.cw, cv.ch, need)
-		s.poolPut(f.rgb)
+		s.releaseFrame(f)
 		return
 	}
 
@@ -938,19 +1321,21 @@ func (c *webClient) sendFrame(f *videoFrame) {
 		format = webFormatRaw
 		buf = s.poolGet(webHeaderLen + len(f.rgb))
 		copy(buf[webHeaderLen:], f.rgb)
-		s.poolPut(f.rgb)
+		s.releaseFrame(f)
 	} else {
 		format = webFormatJPEG
 		size := s.encoderMaxSize(cv)
 		if size <= 0 {
-			s.poolPut(f.rgb)
+			c.dropVideo.Add(1)
+			s.releaseFrame(f)
 			return
 		}
 		buf = s.poolGet(webHeaderLen + size)
 		// encodeWith records the encode cost itself (inside the encoder lock).
 		n, err := s.encodeWith(cv, f.rgb, buf, webHeaderLen)
-		s.poolPut(f.rgb)
+		s.releaseFrame(f)
 		if err != nil || n <= 0 {
+			c.dropVideo.Add(1)
 			if err != errJencTooSmall {
 				c.encErrors.Add(1)
 				s.logLimited("scterm: web: jpeg encode: %v\n", err)
@@ -979,6 +1364,9 @@ func (c *webClient) sendFrame(f *videoFrame) {
 	if err := c.ws.WriteBinary(buf); err != nil {
 		s.poolPut(buf)
 		return
+	}
+	if raw {
+		c.rawBytes.Add(int64(len(buf)))
 	}
 	s.poolPut(buf)
 
@@ -1136,7 +1524,7 @@ type webHello struct {
 	Device  string `json:"device"`
 	VideoW  int    `json:"videoW"`
 	VideoH  int    `json:"videoH"`
-	Audio   bool   `json:"audio"`
+	Audio   bool   `json:"audio"` // the session's sound is on (see webStatus.Audio)
 	Raw     bool   `json:"raw"`
 	Version string `json:"version"`
 }
@@ -1150,9 +1538,17 @@ type webStatus struct {
 	CanvasH int     `json:"canvasH"`
 	FitW    int     `json:"fitW"`
 	FitH    int     `json:"fitH"`
-	Gain    int     `json:"gain"`
-	Muted   bool    `json:"muted"`
-	Audio   string  `json:"audio"`
+	// Gain is the volume of this computer's sound output in percent, which
+	// the gain op sets, and Muted whether it is 0. Once that output has
+	// failed, at open or since, or the session's sound has stopped, the op
+	// changes nothing, and they say 100 and false.
+	Gain  int  `json:"gain"`
+	Muted bool `json:"muted"`
+	// Audio is the session's sound as the browser gets it: "on" while the
+	// session has a sound stream that has not stopped (soundStopped), and
+	// "off" otherwise. The PCM tap feeds the browser whether or not this
+	// computer's sink opened, so the sink only decides HostAudio.
+	Audio string `json:"audio"`
 	// DevVol is the DEVICE's media volume as a percentage of its own scale
 	// (DevVolIdx out of DevVolMax). This is what the HUD shows: it is the
 	// volume the volume keys actually change, and — unlike Gain — it is the
@@ -1164,19 +1560,20 @@ type webStatus struct {
 	DevVolOK  bool    `json:"devVolOk"`
 	Clients   int64   `json:"clients"`
 	Sent      int64   `json:"sent"`
-	Dropped   int64   `json:"dropped"`
+	Dropped   int64   `json:"dropped"` // frames this viewer missed since it connected
 	Control   bool    `json:"control"`
 	Keys      int     `json:"keys"` // Android keycodes the UI can send
-	KBps      float64 `json:"kbps"`
+	KBps      float64 `json:"kbps"` // kbit/s from one half-second status to the next; a ping's answer repeats it
 	JPEGms    float64 `json:"jpegMs"`
-	RawBytes  int64   `json:"rawBytes"`
+	RawBytes  int64   `json:"rawBytes"` // since it connected, video headers included
 	// AudioPeak is the largest |sample| seen since start (0 = the device is
 	// sending digital silence). The TUI status line has always shown this; web
 	// mode needs it to answer "is the device actually making a sound?" without
 	// listening.
 	AudioPeak int16 `json:"audioPeak"`
-	// HostAudio reports whether the host sink also plays (--audio-dup); false
-	// means the browser is the sole audio output.
+	// HostAudio reports whether this computer plays the sound too
+	// (--audio-dup, with a sink that opened and has not failed since); false
+	// means the browser is the sole audio output, or that the sound is off.
 	HostAudio bool `json:"hostAudio"`
 }
 
@@ -1192,7 +1589,7 @@ func (c *webClient) sendHello() {
 		Op:      "hello",
 		Proto:   1,
 		Device:  dev,
-		Audio:   c.srv.audio != nil && c.srv.audio.err == nil,
+		Audio:   c.srv.stream.soundOn(),
 		Raw:     raw,
 		Version: version,
 	})
@@ -1203,17 +1600,18 @@ func (c *webClient) sendStatus() {
 	c.mu.Lock()
 	cv := c.cv
 	c.mu.Unlock()
+	// Read once, so that a status worked out as the sound stops gives the
+	// volume only along with audio on.
+	on := c.srv.stream.soundOn()
 	gain := 100
 	muted := false
-	audio := "off"
-	if c.srv.audio != nil {
-		if c.srv.audio.err == nil {
-			gain = c.srv.audio.gainPercent()
-			muted = gain == 0
-			audio = "on"
-		} else {
-			audio = "error"
-		}
+	if on && c.srv.audio != nil && c.srv.audio.failure() == nil {
+		gain = c.srv.audio.gainPercent()
+		muted = gain == 0
+	}
+	audio, hostAudio := "off", false
+	if on {
+		audio, hostAudio = "on", c.srv.audio.plays()
 	}
 	c.srv.clientsMu.Lock()
 	n := int64(len(c.srv.clients))
@@ -1237,13 +1635,40 @@ func (c *webClient) sendStatus() {
 		DevVolOK:  devOK,
 		Clients:   n,
 		Sent:      c.sentVideo.Load(),
+		Dropped:   c.dropVideo.Load(),
 		Control:   c.srv.ctrl != nil,
 		Keys:      1,
+		KBps:      math.Float64frombits(c.kbpsBits.Load()),
 		JPEGms:    c.srv.encodeMs(),
+		RawBytes:  c.rawBytes.Load(),
 		AudioPeak: c.srv.stream.peakAudio(),
-		HostAudio: c.srv.audio != nil && !c.srv.audio.silent.Load(),
+		HostAudio: hostAudio,
 	}
 	c.writeJSON(st)
+}
+
+// The reasons a bye gives. The page shows them to the viewer under "Session
+// ended", so they are sentences, not codes.
+const (
+	webByeQuit        = "Quit from the browser."
+	webByeStreamEnded = "The device stream ended."
+	webByeStopped     = "scterm stopped."
+)
+
+// webBye is the last message a client gets before the server closes its
+// socket. The page stops reconnecting when it sees one.
+type webBye struct {
+	Op     string `json:"op"`
+	Reason string `json:"reason"`
+}
+
+// byeMessage is the bye for reason, encoded for closeWith.
+func byeMessage(reason string) string {
+	b, err := json.Marshal(webBye{Op: "bye", Reason: reason})
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func (c *webClient) writeJSON(v any) {
@@ -1252,7 +1677,7 @@ func (c *webClient) writeJSON(v any) {
 		return
 	}
 	if err := c.ws.WriteText(string(b)); err != nil {
-		c.closed.Store(true)
+		c.close()
 	}
 }
 

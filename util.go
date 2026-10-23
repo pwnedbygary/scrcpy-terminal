@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
+	"io/fs"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -69,27 +74,62 @@ func truncateRunes(s string, n int) string {
 	return s
 }
 
-// writePPMFile writes an RGBA buffer as a binary PPM to path (alpha ignored).
-func writePPMFile(path string, rgba []byte, w, h int) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
+// writePPMFile writes a canvas as a binary PPM to path. The canvas is what the
+// scaler produces, FFmpeg's AV_PIX_FMT_BGR0: bytes B, G, R, unused per pixel,
+// while a PPM stores R, G, B.
+func writePPMFile(path string, bgr0 []byte, w, h int) error {
+	out := fmt.Appendf(nil, "P6\n%d %d\n255\n", w, h)
+	out = slices.Grow(out, w*h*3)
+	for i := 0; i < w*h; i++ {
+		p := bgr0[i*4 : i*4+3]
+		out = append(out, p[2], p[1], p[0])
 	}
-	defer f.Close()
-	fmt.Fprintf(f, "P6\n%d %d\n255\n", w, h)
-	for y := 0; y < h; y++ {
-		row := rgba[y*w*4 : (y+1)*w*4]
-		for x := 0; x < w; x++ {
-			f.Write(row[x*4 : x*4+3]) // ignore alpha
-		}
-	}
-	return nil
+	return os.WriteFile(path, out, 0o666)
 }
 
-// dumpPPM writes an RGBA canvas as a binary PPM (verification tool).
-func dumpPPM(dir string, idx int, rgba []byte, w, h int) error {
+// writeShotPNG writes a BGR0 picture (see writePPMFile) as a PNG named for at,
+// scterm-YYYYMMDD-HHMMSS.png, in the current directory, and returns the name.
+// A name that is taken gets -2, -3 and so on, so two screenshots in the same
+// second both stay.
+func writeShotPNG(at time.Time, bgr0 []byte, w, h int) (string, error) {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for i := 0; i < w*h; i++ {
+		p, q := bgr0[i*4:i*4+3], img.Pix[i*4:i*4+4]
+		q[0], q[1], q[2], q[3] = p[2], p[1], p[0], 255
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		return "", err
+	}
+	stamp := at.Format("20060102-150405")
+	for n := 1; ; n++ {
+		name := "scterm-" + stamp + ".png"
+		if n > 1 {
+			name = fmt.Sprintf("scterm-%s-%d.png", stamp, n)
+		}
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+		if errors.Is(err, fs.ErrExist) && n < 1000 {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, err = f.Write(out.Bytes())
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			os.Remove(name)
+			return "", err
+		}
+		return name, nil
+	}
+}
+
+// dumpPPM writes a canvas as a binary PPM (verification tool).
+func dumpPPM(dir string, idx int, bgr0 []byte, w, h int) error {
 	os.MkdirAll(dir, 0o755)
-	return writePPMFile(fmt.Sprintf("%s/frame%d.ppm", dir, idx), rgba, w, h)
+	return writePPMFile(fmt.Sprintf("%s/frame%d.ppm", dir, idx), bgr0, w, h)
 }
 
 // printSortedKeys lists all Android keycodes (for -keys).

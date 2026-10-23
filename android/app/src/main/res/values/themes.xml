@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="accent">#FF4FC3F7</color>
+    <color name="on_accent">#FF121417</color>
     <color name="surface">#FF121417</color>
     <color name="card">#FF1D2126</color>
+    <color name="card_stroke">#FF2F353C</color>
     <color name="muted">#FF9AA4AE</color>
     <color name="launcher_background">#FF101418</color>
 
@@ -34,6 +36,24 @@
     <style name="ControlsPanelAnimation">
         <item name="android:windowEnterAnimation">@anim/controls_in</item>
         <item name="android:windowExitAnimation">@anim/controls_out</item>
+    </style>
+
+    <!-- The app's own buttons (MainActivity, the viewer's connection overlay):
+         the main action filled with the accent, the others outlined. No state
+         list animator: a raised button's shadow would show around an outline. -->
+    <style name="Widget.ScTerm.Button" parent="android:Widget.Material.Button">
+        <item name="android:stateListAnimator">@null</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+
+    <style name="Widget.ScTerm.Button.Primary">
+        <item name="android:background">@drawable/button_primary</item>
+        <item name="android:textColor">@color/button_primary_text</item>
+    </style>
+
+    <style name="Widget.ScTerm.Button.Secondary">
+        <item name="android:background">@drawable/button_secondary</item>
+        <item name="android:textColor">@color/button_secondary_text</item>
     </style>
 
 </resources>

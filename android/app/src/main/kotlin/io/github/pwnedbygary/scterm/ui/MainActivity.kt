@@ -8,6 +8,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Typeface
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -88,6 +89,11 @@ class MainActivity : ComponentActivity() {
     private lateinit var inviteButton: Button
     private lateinit var kickButton: Button
     private lateinit var inputButton: Button
+    private lateinit var inputHelp: View
+    private lateinit var notificationsLine: TextView
+    private lateinit var notificationsHelp: View
+    private lateinit var networkHelp: View
+    private var localNetworkDenied = false
     private lateinit var helperBox: LinearLayout
     private lateinit var helperCommand: TextView
     private lateinit var shizukuButton: Button
@@ -95,7 +101,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var pageScroll: ScrollView
     private lateinit var peersList: LinearLayout
 
-    private data class PeerRowViews(val root: LinearLayout, val title: TextView, val detail: TextView, val status: TextView, val connect: Button)
+    private data class PeerRowViews(val root: LinearLayout, val title: TextView, val detail: TextView, val status: TextView, val connect: Button, val manage: Button)
     private val peerRows = mutableMapOf<String, PeerRowViews>()
 
     private var pendingAfterPermissions: (() -> Unit)? = null
@@ -111,15 +117,24 @@ class MainActivity : ComponentActivity() {
     private var requestDialog: AlertDialog? = null
     private var requestShown: TargetServer.PairingRequest? = null
     private var nearbyPairing: NearbyPairing? = null
+    private var pairDialog: AlertDialog? = null
+    private var nearbyProgressDialog: AlertDialog? = null
+    private var nearbyConfirmDialog: AlertDialog? = null
+    private var nearbyBrowser: Nearby.Browser? = null
 
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val next = pendingAfterPermissions
         pendingAfterPermissions = null
         // Notifications are optional; local network access is not.
-        if (Permissions.missingForNetworking(this, serving = false).isEmpty()) {
-            next?.invoke()
-        } else {
-            toast("Local network access is required to reach other devices.")
+        when {
+            Permissions.missingForNetworking(this, serving = false).isEmpty() -> next?.invoke()
+            shouldShowRequestPermissionRationale(Permissions.LOCAL_NETWORK) -> toast("Local network access is required to reach other devices.")
+            else -> {
+                // Android no longer asks: only App info can grant it now.
+                localNetworkDenied = true
+                renderNetworkHelp()
+                pageScroll.smoothScrollTo(0, 0)
+            }
         }
     }
 
@@ -148,10 +163,16 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        // Dialogs die with this window; a pairing waiting on one cannot finish.
+        // Dialogs die with this window without running their dismiss listeners:
+        // a pairing waiting on one cannot finish, and a search would keep its
+        // multicast lock.
+        nearbyBrowser?.stop()
         nearbyPairing?.cancel()
         invitationDialog?.dismiss()
         requestDialog?.dismiss()
+        pairDialog?.dismiss()
+        nearbyProgressDialog?.dismiss()
+        nearbyConfirmDialog?.dismiss()
         super.onDestroy()
     }
 
@@ -172,6 +193,13 @@ class MainActivity : ComponentActivity() {
         // Back from the "install unknown apps" setting.
         awaitingInstallPermission?.takeIf { packageManager.canRequestPackageInstalls() }?.let(::startUpdate)
         maybeCheckForUpdate()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Back from a settings page or a permission prompt: the lines about them show what changed there.
+        renderServing(Serving.state.value)
+        renderNetworkHelp()
     }
 
     override fun onStop() {
@@ -197,8 +225,8 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
-        column.addView(text(getString(R.string.app_name), 26f, Typeface.BOLD))
-        column.addView(text("Serve this device to paired peers, or control theirs.", 14f, color = R.color.muted).apply {
+        column.addView(text(getString(R.string.app_name), 26f, Typeface.BOLD).apply { ViewCompat.setAccessibilityHeading(this, true) })
+        column.addView(text("Serve this device to paired devices, or control theirs.", 14f, color = R.color.muted).apply {
             setPadding(0, 0, 0, dp(16))
         })
 
@@ -207,9 +235,10 @@ class MainActivity : ComponentActivity() {
         addressView = text("", 13f, color = R.color.muted)
         versionView = text("", 13f, color = R.color.muted)
         updateButton = button(getString(R.string.update_check)) { onUpdateButton() }
+        networkHelp = settingsHelp(text(getString(R.string.local_network_denied), 14f), getString(R.string.open_app_info)) { openAppInfo() }
         column.addView(card(
             getString(R.string.section_this_device),
-            nameView, identityView, addressView, versionView,
+            nameView, identityView, addressView, networkHelp, versionView,
             row(button("Rename") { showRenameDialog() }, updateButton),
         ))
 
@@ -230,10 +259,17 @@ class MainActivity : ComponentActivity() {
             }
         }
         serveStatus = text("", 14f)
-        serveButton = button(getString(R.string.serve_start)) { toggleServing() }
+        serveButton = button(getString(R.string.serve_start), primary = true) { toggleServing() }
         inviteButton = button(getString(R.string.serve_invite)) { showInviteDialog() }
         kickButton = button(getString(R.string.serve_kick)) { TargetService.disconnectAll(this) }
-        inputButton = button(getString(R.string.serve_enable_input)) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        inputButton = button(getString(R.string.serve_enable_input)) { openSettings(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        inputHelp = settingsHelp(text(getString(R.string.serve_input_restricted), 13f, color = R.color.muted), getString(R.string.open_app_info)) {
+            openAppInfo()
+        }
+        notificationsLine = text(getString(R.string.serve_notifications_blocked), 14f)
+        notificationsHelp = settingsHelp(notificationsLine, getString(R.string.open_notification_settings)) {
+            openSettings(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
+        }
         helperCommand = text("", 12f).apply {
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
@@ -246,7 +282,7 @@ class MainActivity : ComponentActivity() {
         )
         column.addView(card(
             getString(R.string.section_serve),
-            backendGroup, serveStatus, row(serveButton, inviteButton), row(kickButton, inputButton), helperBox,
+            backendGroup, serveStatus, notificationsHelp, row(serveButton, inviteButton), row(kickButton, inputButton), inputHelp, helperBox,
         ))
 
         peersList = column()
@@ -257,7 +293,8 @@ class MainActivity : ComponentActivity() {
             pageScroll = this
             addView(column)
             ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
-                val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+                val types = WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime()
+                val bars = insets.getInsets(types)
                 view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
                 insets
             }
@@ -267,13 +304,18 @@ class MainActivity : ComponentActivity() {
     /** How the viewer shows its controls and statistics over a fullscreen (landscape) video. */
     private fun viewerSettings(): Array<View> {
         fun hideLabel(seconds: Int) = resources.getQuantityString(R.plurals.viewer_hide_after, seconds, seconds)
+        fun delayState(seconds: Int) = resources.getQuantityString(R.plurals.viewer_seconds, seconds, seconds)
         val hideAfter = text(hideLabel(app.viewerControlsHideSeconds), 14f)
         val seconds = SeekBar(this).apply {
             max = ScTermApp.MAX_CONTROLS_HIDE_SECONDS - 1
             progress = app.viewerControlsHideSeconds - 1
+            // Read out as a delay in seconds, not as a percentage of the bar.
+            contentDescription = getString(R.string.viewer_hide_delay)
+            ViewCompat.setStateDescription(this, delayState(app.viewerControlsHideSeconds))
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
                     hideAfter.text = hideLabel(value + 1)
+                    ViewCompat.setStateDescription(bar, delayState(value + 1))
                     if (fromUser) app.viewerControlsHideSeconds = value + 1
                 }
 
@@ -320,6 +362,8 @@ class MainActivity : ComponentActivity() {
         inviteButton.visibility = View.GONE
         kickButton.visibility = View.GONE
         inputButton.visibility = View.GONE
+        inputHelp.visibility = View.GONE
+        notificationsHelp.visibility = View.GONE
         helperBox.visibility = View.GONE
         when (state) {
             ServeState.Stopped -> {
@@ -337,15 +381,14 @@ class MainActivity : ComponentActivity() {
                 serveButton.isEnabled = true
             }
             is ServeState.Serving -> {
-                val address = Net.localAddresses().firstOrNull() ?: "this device"
+                val address = Net.localAddresses().firstOrNull() ?: getString(R.string.serve_this_device)
                 serveStatus.text = buildString {
-                    append(state.status).append("\nListening on ").append(address).append(':').append(state.port)
+                    append(state.status).append('\n').append(getString(R.string.serve_listening, "$address:${state.port}"))
                     if (state.sessions.isEmpty()) {
                         append("\nNo one is connected.")
                     } else {
                         for (s in state.sessions) {
-                            append("\n• ").append(s.peerName).append(" (").append(s.address).append(")")
-                            append(if (s.holdsLease) " controlling" else " viewing")
+                            append("\n• ").append(getString(if (s.holdsLease) R.string.serve_controlling_from else R.string.serve_viewing_from, s.peerName, s.address))
                         }
                     }
                     invitationExpiresAtMs?.let {
@@ -357,7 +400,22 @@ class MainActivity : ComponentActivity() {
                 serveButton.isEnabled = true
                 inviteButton.visibility = View.VISIBLE
                 if (state.sessions.isNotEmpty()) kickButton.visibility = View.VISIBLE
-                if (state.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) inputButton.visibility = View.VISIBLE
+                if (state.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) {
+                    inputButton.visibility = View.VISIBLE
+                    // Android 13+ greys out the switch for apps installed from outside a store.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) inputHelp.visibility = View.VISIBLE
+                }
+                val hidden = TargetService.hiddenNotifications(this)
+                if (hidden.serving || hidden.pairing) {
+                    notificationsLine.setText(
+                        when {
+                            !hidden.pairing -> R.string.serve_stop_notification_blocked
+                            !hidden.serving -> R.string.serve_pairing_notifications_blocked
+                            else -> R.string.serve_notifications_blocked
+                        },
+                    )
+                    notificationsHelp.visibility = View.VISIBLE
+                }
                 state.helperCommand?.takeIf { !state.ready }?.let {
                     helperCommand.text = it
                     helperShellCommand = state.helperShellCommand
@@ -366,6 +424,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** Shown once Android stopped asking for local network access, until it is granted. */
+    private fun renderNetworkHelp() {
+        if (Permissions.missingForNetworking(this, serving = false).isEmpty()) localNetworkDenied = false
+        networkHelp.visibility = if (localNetworkDenied) View.VISIBLE else View.GONE
     }
 
     private fun renderInvitation(expiresAtMs: Long?) {
@@ -397,7 +461,11 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
-    private fun refreshPeerStatus() = withNetworkPermissions(serving = false) { app.peerMonitor.refresh() }
+    private fun refreshPeerStatus() = withNetworkPermissions(serving = false) {
+        app.peerMonitor.refresh()
+        // A re-check keeps showing each device's last result until the new one arrives.
+        if (app.peers.all().isNotEmpty()) toast(getString(R.string.peers_checking))
+    }
 
     private fun renderPeers() {
         val peers = app.peers.all().sortedBy { it.name.lowercase() }
@@ -416,15 +484,19 @@ class MainActivity : ComponentActivity() {
                 val status = text("", 14f).apply {
                     minHeight = dp(48)
                     gravity = Gravity.CENTER_VERTICAL
+                    setBackgroundResource(selectableBackground())
                     setOnClickListener { app.peers.find(peer.id)?.let(::showPeerStatus) }
                     isFocusable = true
                 }
-                val connect = button(getString(R.string.connect)) { app.peers.find(peer.id)?.let(::connect) }
-                PeerRowViews(column(title, status, detail, row(connect, button("Manage…") { app.peers.find(peer.id)?.let(::showManageDialog) })).apply {
+                val connect = button(getString(R.string.connect), primary = true) { app.peers.find(peer.id)?.let(::connect) }
+                val manage = button(getString(R.string.manage)) { app.peers.find(peer.id)?.let(::showManageDialog) }
+                PeerRowViews(column(title, status, detail, row(connect, manage)).apply {
                     setPadding(0, dp(8), 0, dp(8))
-                }, title, detail, status, connect)
+                }, title, detail, status, connect, manage)
             }
             views.title.text = peer.name
+            views.connect.contentDescription = getString(R.string.connect_to, peer.name)
+            views.manage.contentDescription = getString(R.string.manage_device, peer.name)
             views.detail.text = buildString {
                 append("Identity ").append(peer.id.short)
                 peer.target?.let { append("\nAddress ").append(it.host).append(':').append(it.port) }
@@ -477,10 +549,10 @@ class MainActivity : ComponentActivity() {
             append("\nReverse network readiness is checked by the other device.")
         }
         val actions = mutableListOf<View>(text(detail, 14f))
-        actions += button("Network settings") { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) }
+        actions += button("Network settings") { openSettings(Intent(Settings.ACTION_WIFI_SETTINGS)) }
         if (local == null) actions += button("Start serving this device") { startServing() }
         if (local?.kind == BackendKind.HELPER && !local.ready && helperShellCommand != null && ShizukuActivation.installed(this)) actions += button("Start this device's helper with Shizuku") { startHelperWithShizuku() }
-        if (local?.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) actions += button("Enable input on this device") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        if (local?.kind == BackendKind.PROJECTION && !RemoteInputService.isEnabled(this)) actions += button("Enable input on this device") { openSettings(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         AlertDialog.Builder(this).setTitle(peer.name).setView(ScrollView(this).apply { addView(padded(column(*actions.toTypedArray()))) })
             .setPositiveButton("Refresh") { _, _ -> refreshPeerStatus() }
             .setNeutralButton("Manage…") { _, _ -> showManageDialog(peer) }
@@ -611,6 +683,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showPairDialog(prefill: String?) = withNetworkPermissions(serving = false) {
+        // One at a time (a second link or a double tap): onDestroy stops only the newest search.
+        pairDialog?.dismiss()
+        nearbyBrowser?.stop()
         val input = EditText(this).apply {
             hint = "192.168.1.20:${Invitation.DEFAULT_PORT} ABCD-EFGH-JKMN-PQRS"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_FLAG_MULTI_LINE
@@ -649,8 +724,14 @@ class MainActivity : ComponentActivity() {
                 if (input.text.isBlank()) toast("Pick a nearby device, or enter an invitation.") else pair(input.text.toString(), allowBack.isChecked)
             }
             .setNegativeButton(R.string.cancel, null)
-            .setOnDismissListener { browser.stop() }
+            .setOnDismissListener {
+                browser.stop()
+                if (nearbyBrowser === browser) nearbyBrowser = null
+                if (pairDialog === dialog) pairDialog = null
+            }
             .show()
+        pairDialog = dialog
+        nearbyBrowser = browser
         browser.start()
     }
 
@@ -684,6 +765,7 @@ class MainActivity : ComponentActivity() {
             .setNegativeButton(R.string.cancel) { _, _ -> cancelled = true }
             .setOnCancelListener { cancelled = true }
             .show()
+        nearbyProgressDialog = progress
         val servePort = (Serving.state.value as? ServeState.Serving)?.port
         Nearby.resolve(this, service) { address ->
             if (cancelled || isDestroyed) return@resolve
@@ -696,12 +778,18 @@ class MainActivity : ComponentActivity() {
             thread(name = "pairing", isDaemon = true) {
                 val started = runCatching { ControllerClient(app.identity, app.clientInfo).startNearbyPairing(host, port, servePort) }
                 runOnUiThread {
-                    progress.dismiss()
                     val pairing = started.getOrNull()
-                    when {
-                        cancelled || isDestroyed -> pairing?.cancel()
-                        pairing != null -> confirmNearby(pairing, host, port, allowBack)
-                        else -> alert("Pairing failed", describePairingFailure(started.exceptionOrNull()!!, nearby = true))
+                    // A cancelled dialog is already gone, and a destroyed screen's
+                    // window cannot be dismissed.
+                    if (cancelled || isDestroyed) {
+                        pairing?.cancel()
+                        return@runOnUiThread
+                    }
+                    progress.dismiss()
+                    if (pairing != null) {
+                        confirmNearby(pairing, host, port, allowBack)
+                    } else {
+                        alert("Pairing failed", describePairingFailure(started.exceptionOrNull()!!, nearby = true))
                     }
                 }
             }
@@ -719,6 +807,7 @@ class MainActivity : ComponentActivity() {
             .setNegativeButton(R.string.cancel, null)
             .setCancelable(false)
             .show()
+        nearbyConfirmDialog = dialog
         // Replaced listeners keep the dialog up while waiting for the other device.
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { button ->
             button.isEnabled = false
@@ -748,7 +837,7 @@ class MainActivity : ComponentActivity() {
                 name = result.device.name,
                 target = TargetAddress(host, port),
                 grantedByPeer = Grant.toWire(result.grants),
-                inbound = if (allowBack) Grant.toWire(Grant.FULL) else old?.inbound ?: emptyList(),
+                inbound = inboundAfterPairing(allowBack, old?.inbound),
                 lastSeenMs = now,
             )
         }
@@ -858,7 +947,7 @@ class MainActivity : ComponentActivity() {
                     release.versionCode <= BuildConfig.VERSION_CODE -> toast(getString(R.string.update_none, BuildConfig.VERSION_NAME))
                     !AppUpdates.releaseCanReplace(this) -> AlertDialog.Builder(this)
                         .setTitle(getString(R.string.update_released, release.version))
-                        .setMessage(AppUpdates.DIFFERENT_KEY)
+                        .setMessage(if (BuildConfig.DEBUG) AppUpdates.DEBUG_BUILD else AppUpdates.DIFFERENT_KEY)
                         .setPositiveButton(R.string.update_page) { _, _ -> openPage(release.page) }
                         .setNegativeButton(R.string.done, null)
                         .show()
@@ -894,7 +983,7 @@ class MainActivity : ComponentActivity() {
                 .setTitle(R.string.update_permission_title)
                 .setMessage(R.string.update_permission_text)
                 .setPositiveButton(R.string.update_permission_open) { _, _ ->
-                    startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, "package:$packageName".toUri()))
+                    openSettings(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, "package:$packageName".toUri()))
                 }
                 .setNegativeButton(R.string.cancel) { _, _ -> awaitingInstallPermission = null }
                 .show()
@@ -940,6 +1029,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun openAppInfo() = openSettings(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()))
+
+    /** Some builds leave out a settings page. */
+    private fun openSettings(intent: Intent) {
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            toast(getString(R.string.settings_unavailable))
+        }
+    }
+
     // --------------------------------------------------------------- helpers
 
     private fun describePairingFailure(e: Throwable, nearby: Boolean = false): String = when {
@@ -972,7 +1072,13 @@ class MainActivity : ComponentActivity() {
         setPadding(0, dp(12), 0, dp(12))
     }
 
-    private fun sectionLabel(title: String) = text(title.uppercase(), 13f, Typeface.BOLD, R.color.accent)
+    /**
+     * A card's or dialog section's title, as a heading. uppercase() ignores the locale, where
+     * isAllCaps would follow it and show "THİS DEVİCE" on Turkish devices.
+     */
+    private fun sectionLabel(title: String) = text(title.uppercase(), 13f, Typeface.BOLD, R.color.accent).apply {
+        ViewCompat.setAccessibilityHeading(this, true)
+    }
 
     /** "see its screen, hear its audio and control it", or the same about "your" device. */
     private fun describeAccess(grants: Set<Grant>, theirs: Boolean): String {
@@ -1001,10 +1107,14 @@ class MainActivity : ComponentActivity() {
             clip.description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }
         }
         getSystemService(ClipboardManager::class.java)?.setPrimaryClip(clip)
-        toast("Copied")
+        // Android 13 and later confirm a copy themselves.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) toast("Copied")
     }
 
     private fun alert(title: String, message: String) {
+        // Results arrive from other threads, sometimes after this screen is gone;
+        // showing a dialog on a dead window crashes.
+        if (isFinishing || isDestroyed) return
         AlertDialog.Builder(this).setTitle(title).setMessage(message).setPositiveButton(R.string.done, null).show()
     }
 
@@ -1021,34 +1131,44 @@ class MainActivity : ComponentActivity() {
         setPadding(0, dp(2), 0, dp(2))
     }
 
-    private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
-        text = label
-        isAllCaps = false
-        setOnClickListener { onClick() }
-    }
+    /** [primary] for the main action of a card or row, filled with the accent; the others are outlined. */
+    private fun button(label: String, primary: Boolean = false, onClick: () -> Unit) =
+        Button(this, null, 0, if (primary) R.style.Widget_ScTerm_Button_Primary else R.style.Widget_ScTerm_Button_Secondary).apply {
+            text = label
+            setOnClickListener { onClick() }
+        }
+
+    /** The theme's ripple, for something tappable that is not a button. */
+    private fun selectableBackground(): Int =
+        TypedValue().also { theme.resolveAttribute(android.R.attr.selectableItemBackground, it, true) }.resourceId
 
     private fun column(vararg views: View) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         views.forEach { addView(it) }
     }
 
+    /** Equal widths, 8dp apart; the gaps go only between the views that are not gone. */
     private fun row(vararg views: View) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
-        views.forEach {
-            addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
-        }
+        dividerDrawable = GradientDrawable().apply { setSize(dp(8), 0) }
+        showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
+        views.forEach { addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)) }
     }
 
     private fun card(title: String, vararg children: View) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setBackgroundColor(ContextCompat.getColor(context, R.color.card))
+        setBackgroundResource(R.drawable.card_background)
         setPadding(dp(16), dp(12), dp(16), dp(12))
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = dp(12)
         }
-        addView(text(title.uppercase(), 13f, Typeface.BOLD, R.color.accent))
+        addView(sectionLabel(title))
         children.forEach { addView(it) }
     }
+
+    /** A line about something only system settings can change, with the button that opens them; hidden until needed. */
+    private fun settingsHelp(line: TextView, label: String, open: () -> Unit) =
+        column(line, row(button(label, onClick = open))).apply { visibility = View.GONE }
 
     private fun padded(view: View) = LinearLayout(this).apply {
         setPadding(dp(20), dp(8), dp(20), 0)

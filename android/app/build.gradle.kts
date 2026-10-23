@@ -53,6 +53,11 @@ android {
     }
 
     buildTypes {
+        // A separate app next to the release: with one package name, switching
+        // between the two means uninstalling one, which deletes its pairings.
+        debug {
+            applicationIdSuffix = ".debug"
+        }
         release {
             signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
@@ -96,4 +101,15 @@ dependencies {
     implementation(libs.shizuku.provider)
     testImplementation(libs.junit)
     testImplementation(libs.kotlin.test.junit)
+}
+
+// ViewerBarTest holds the viewer's bar and its strings to the action catalog
+// shared with the Go client, at the repository root.
+val fixtures = layout.projectDirectory.dir("../../protocol/fixtures")
+val appStrings = layout.projectDirectory.file("src/main/res/values/strings.xml")
+tasks.withType<Test>().configureEach {
+    inputs.dir(fixtures).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(appStrings).withPathSensitivity(PathSensitivity.RELATIVE)
+    systemProperty("scterm.fixtures", fixtures.asFile.absolutePath)
+    systemProperty("scterm.strings", appStrings.asFile.absolutePath)
 }

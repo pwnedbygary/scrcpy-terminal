@@ -200,6 +200,7 @@ let lastFitW = 0;
 let lastFitH = 0;
 let audioPeak = 0;
 let hostAudio = false;
+let lastStatus = null;
 
 function checkRawFrame(buf, w, h) {
   rawChecked++;
@@ -253,6 +254,7 @@ ws.onText((txt) => {
     note(`hello: device=${msg.device} proto=${msg.proto} version=${msg.version} audio=${msg.audio}`);
   } else if (msg.op === "status") {
     statuses++;
+    lastStatus = msg;
     canvasW = msg.canvasW;
     canvasH = msg.canvasH;
     fps = msg.fps;
@@ -336,6 +338,14 @@ note(
     `(${(bytes / span / 1024).toFixed(0)} KB/s), canvas ${canvasW}x${canvasH}, ` +
     `audio ${(audioBytes / 1024).toFixed(0)} KB, ${statuses} status, lost=${lost}`
 );
+if (lastStatus) {
+  // The server's own count for this connection, from its last status: frames
+  // it dropped never reach the page, so they never show as lost.
+  note(
+    `server's last status: ${lastStatus.sent} frames sent, ${lastStatus.dropped} dropped, ` +
+      `${Math.round(lastStatus.kbps)} kbps, ${(lastStatus.rawBytes / 1024).toFixed(0)} KB raw`
+  );
+}
 if (mode === "raw") {
   note(
     `raw content: ${rawChecked} frames inspected, ${rawLenBad} wrong length, ` +

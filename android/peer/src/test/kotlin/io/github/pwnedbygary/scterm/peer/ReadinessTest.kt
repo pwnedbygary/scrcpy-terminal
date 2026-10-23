@@ -16,8 +16,22 @@ class ReadinessTest {
         assertEquals("Ready—another device has control", Readiness.classify(ready.copy(controlOccupied = true)).label)
         assertEquals(Readiness.Tone.YELLOW, Readiness.classify(ready.copy(grants = listOf("control"))).tone)
         assertEquals("Viewing permission missing", Readiness.classify(ready.copy(grants = emptyList())).label)
-        assertEquals("Helper needed", Readiness.classify(ready.copy(ready = false, reason = "Helper needed")).label)
         assertEquals("Video unavailable", Readiness.classify(ready.copy(caps = null)).label)
+    }
+    @Test fun notReadyBadgeIsShortAndTheTargetsSentenceStaysAsDetail() {
+        // What a helper target that is not running yet answers, word for word.
+        val helper = "its full-control helper is not running. Start it on that device (Start with Shizuku) or from a computer with adb"
+        val status = Readiness.classify(ready.copy(ready = false, reason = helper))
+        assertEquals("Helper not running", status.label)
+        assertEquals(Readiness.Tone.YELLOW, status.tone)
+        assertTrue(status.detail.contains(helper, ignoreCase = true))
+        val full = Readiness.classify(ready.copy(ready = false, reason = "too many sessions"))
+        assertEquals("Too many viewers", full.label)
+        assertTrue(full.detail.contains("too many sessions", ignoreCase = true))
+        val other = Readiness.classify(ready.copy(ready = false, reason = "Helper needed"))
+        assertEquals("Serving not ready", other.label)
+        assertTrue(other.detail.contains("Helper needed"))
+        assertEquals("Serving not ready", Readiness.classify(ready.copy(ready = false, reason = "")).label)
     }
     @Test fun failuresAndOlderPeersAreDistinct() {
         assertEquals(Readiness.Tone.RED, Readiness.failure(SocketTimeoutException()).tone)
@@ -26,6 +40,10 @@ class ReadinessTest {
         assertEquals("Pairing no longer accepted", Readiness.failure(PeerException("not_paired", "unknown")).label)
         val mismatch = SSLHandshakeException("TLS").apply { initCause(CertificateException("wrong identity")) }
         assertEquals("Identity mismatch", Readiness.failure(mismatch).label)
+        val refused = Readiness.failure(PeerException("busy", "the target is restarting its capture"))
+        assertEquals("Peer refused the check", refused.label)
+        assertEquals(Readiness.Tone.RED, refused.tone)
+        assertTrue(refused.detail.contains("the target is restarting its capture", ignoreCase = true))
     }
     @Test fun authenticatedSavedPeerRejectionOverridesMismatchedDiscoveryCandidate() {
         val mismatch = Readiness.failure(SSLHandshakeException("TLS").apply { initCause(CertificateException("candidate identity")) })
@@ -55,6 +73,20 @@ class ReadinessTest {
         ledger.complete("RP6", second, Readiness.failure(SocketTimeoutException()).copy(checkedAtMs = 2_000))
         assertEquals(1_000L, ledger.snapshot().getValue("RP6").lastContactMs)
         assertEquals(2_000L, ledger.snapshot().getValue("RP6").checkedAtMs)
+    }
+    @Test fun onlyANeverCheckedPeerShowsCheckingWhileARecheckKeepsTheLastResult() {
+        val ledger = ReadinessLedger()
+        val first = ledger.begin("RP6")
+        assertEquals("Checking…", ledger.snapshot().getValue("RP6").label)
+        assertTrue(ledger.complete("RP6", first, Readiness.classify(ready).copy(checkedAtMs = 1_000)))
+        val second = ledger.begin("RP6")
+        assertEquals("Ready", ledger.snapshot().getValue("RP6").label)
+        assertEquals(1_000L, ledger.snapshot().getValue("RP6").checkedAtMs)
+        assertTrue(ledger.complete("RP6", second, Readiness.failure(SocketTimeoutException()).copy(checkedAtMs = 2_000)))
+        assertEquals("Not reachable", ledger.snapshot().getValue("RP6").label)
+        ledger.invalidate() // a manual refresh
+        ledger.schedule(listOf("RP6"))
+        assertEquals("Not reachable", ledger.snapshot().getValue("RP6").label)
     }
 
     @Test fun periodicPollingPreservesEightSlowPeersWithTwoWorkers() {

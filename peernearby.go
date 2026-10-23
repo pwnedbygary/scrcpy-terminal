@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"scterm/peer"
@@ -17,8 +18,15 @@ import (
 // nearbySearch is how long `scterm pair` keeps looking for an inviting device.
 const nearbySearch = 30 * time.Second
 
+// invitationSearch finds devices inviting on this network; a variable so
+// tests stay off the network.
+var invitationSearch peerDiscovery = peer.DiscoverNearby
+
 // pairNearbyCommand pairs with a device inviting on this network: both
-// screens show a six-digit code, and both users confirm it.
+// screens show a six-digit code, and both users confirm it. The names are
+// the devices' own text: they are stored as the device gave them; on the
+// lines before the pairing's command they are shown in quotes, as quoteText
+// shows them, and why a pairing failed shows them cleaned.
 func pairNearbyCommand() error {
 	client, store, err := openPeerClient()
 	if err != nil {
@@ -33,7 +41,7 @@ func pairNearbyCommand() error {
 	if len(devices) > 1 {
 		labels := make([]string, len(devices))
 		for i, n := range devices {
-			labels[i] = fmt.Sprintf("%s (%s)", n.Name, net.JoinHostPort(n.Host, strconv.Itoa(n.Port)))
+			labels[i] = fmt.Sprintf("%s (%s)", quoteText(n.Name, nameCells), net.JoinHostPort(n.Host, strconv.Itoa(n.Port)))
 		}
 		i, err := choose("Pair with which device?", labels)
 		if err != nil {
@@ -49,7 +57,7 @@ func pairNearbyCommand() error {
 	if name == "" {
 		name = d.Name
 	}
-	fmt.Printf("\n    %s\n\nCheck that %s shows the same code, then accept there too.\n", peer.DisplayCode(p.Code), name)
+	fmt.Fprintf(os.Stderr, "\n    %s\n\nCheck that %s shows the same code, then accept there too.\n", peer.DisplayCode(p.Code), quoteText(name, nameCells))
 	answer := make(chan string, 1)
 	go func() {
 		a, _ := ask("Does it match? [y/N] ")
@@ -58,7 +66,7 @@ func pairNearbyCommand() error {
 	select {
 	case r := <-p.Result():
 		// The device answered first: its user declined, or it went away.
-		fmt.Println()
+		fmt.Fprintln(os.Stderr) // end the question's line
 		return nearbyFailure(name, r.Err)
 	case a := <-answer:
 		if a = strings.ToLower(a); a != "y" && a != "yes" {
@@ -67,7 +75,7 @@ func pairNearbyCommand() error {
 		}
 	}
 	p.Confirm() // if this fails, the result says why
-	fmt.Printf("Waiting for %s to accept…\n", name)
+	fmt.Println("Waiting for the device to accept…")
 	r := <-p.Result()
 	if r.Err != nil {
 		return nearbyFailure(name, r.Err)
@@ -79,7 +87,7 @@ func pairNearbyCommand() error {
 	if err := store.Put(rec); err != nil {
 		return err
 	}
-	reportPaired(client, name, r.Pair.Fingerprint, r.Pair.Grants)
+	reportPaired(client, store, name, r.Pair.Fingerprint, r.Pair.Grants)
 	return nil
 }
 
@@ -87,7 +95,7 @@ func pairNearbyCommand() error {
 func findNearby() ([]peer.NearbyDevice, error) {
 	deadline := time.Now().Add(nearbySearch)
 	for hinted := false; ; {
-		devices, err := peer.DiscoverNearby(context.Background(), 3*time.Second)
+		devices, err := invitationSearch(context.Background(), 3*time.Second)
 		if err != nil || len(devices) > 0 {
 			return devices, err
 		}
@@ -102,13 +110,15 @@ func findNearby() ([]peer.NearbyDevice, error) {
 }
 
 // nearbyFailure words a failed nearby pairing for the person at this terminal.
+// The name and the refusal are the device's own text, so they are cleaned.
 func nearbyFailure(name string, err error) error {
+	name = cleanText(name)
 	var rej *peer.RejectError
 	switch {
 	case errors.Is(err, peer.ErrPairingCancelled):
 		return errors.New("pairing cancelled")
-	case errors.As(err, &rej) && rej.Code == peer.RejectDeclined && rej.Message != "":
-		return fmt.Errorf("not paired: %s", rej.Message)
+	case errors.As(err, &rej) && rej.Code == peer.RejectDeclined && cleanText(rej.Message) != "":
+		return fmt.Errorf("not paired: %s", cleanText(rej.Message))
 	case errors.As(err, &rej) && rej.Code == peer.RejectDeclined:
 		return fmt.Errorf("not paired: %s declined", name)
 	case errors.As(err, &rej) && rej.Code == "no_invitation":
@@ -118,7 +128,7 @@ func nearbyFailure(name string, err error) error {
 	case errors.As(err, &rej) && rej.Code == "bad_proof":
 		return fmt.Errorf("%s did not follow the pairing protocol, so nothing was paired", name)
 	default:
-		return fmt.Errorf("pairing with %s: %w", name, err)
+		return fmt.Errorf("pairing with %s: %s", name, cleanText(err.Error()))
 	}
 }
 
@@ -132,7 +142,8 @@ func pickPeer(store *peer.Store, query string) (peer.Record, error) {
 	if len(hits) > 1 && interactive() {
 		labels := make([]string, len(hits))
 		for i, r := range hits {
-			labels[i] = fmt.Sprintf("%s (%s)", r.Name, net.JoinHostPort(r.Host, strconv.Itoa(r.Port)))
+			fp, _ := r.ID() // Matches leaves out the pairings whose identity does not parse
+			labels[i] = fmt.Sprintf("%s (%s)", deviceData(fp, r.Name), net.JoinHostPort(r.Host, strconv.Itoa(r.Port)))
 		}
 		i, err := choose("Connect to which device?", labels)
 		if err != nil {
@@ -140,14 +151,40 @@ func pickPeer(store *peer.Store, query string) (peer.Record, error) {
 		}
 		return hits[i], nil
 	}
-	return store.Find(query) // the one match, or why there is none
+	return findPeer(store, query) // the one match, or why there is none
+}
+
+// findPeer is store.Find for the terminal: when the query means several
+// devices, the error lists them as pasteArg writes them, so that each can be
+// typed back as it is shown, and no other text of the devices' is shown (a
+// device that nothing selects alone is listed by its short identity).
+func findPeer(store *peer.Store, query string) (peer.Record, error) {
+	rec, err := store.Find(query)
+	var several *peer.AmbiguousError
+	if errors.As(err, &several) {
+		shown := *several
+		shown.Matches = make([]peer.Record, len(several.Matches))
+		for i, r := range several.Matches {
+			fp, _ := r.ID() // Matches leaves out the pairings whose identity does not parse
+			arg, ok := pasteArg(store, r.Name, fp)
+			if !ok {
+				arg = fp.Short()
+			}
+			r.Name = arg
+			shown.Matches[i] = r
+		}
+		return rec, &shown
+	}
+	return rec, err
 }
 
 var terminalInput = bufio.NewReader(os.Stdin)
 
-// ask shows a prompt and reads one line of the answer.
+// ask shows a prompt and reads one line of the answer. The prompt goes to
+// stderr, as read -p puts it, so it shows when stdout is redirected; what a
+// question is about goes there with it.
 func ask(prompt string) (string, error) {
-	fmt.Print(prompt)
+	fmt.Fprint(os.Stderr, prompt)
 	line, err := terminalInput.ReadString('\n')
 	if err != nil && line == "" {
 		return "", err
@@ -158,7 +195,7 @@ func ask(prompt string) (string, error) {
 // choose lists labelled options, numbered from 1, and returns the index picked.
 func choose(question string, labels []string) (int, error) {
 	for i, l := range labels {
-		fmt.Printf("  %d) %s\n", i+1, l)
+		fmt.Fprintf(os.Stderr, "  %d) %s\n", i+1, l)
 	}
 	for {
 		a, err := ask(fmt.Sprintf("%s [1-%d] ", question, len(labels)))
@@ -171,8 +208,7 @@ func choose(question string, labels []string) (int, error) {
 	}
 }
 
-// interactive reports whether stdin is a terminal someone can answer from.
-func interactive() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
+// interactive reports whether stdin is a terminal someone can answer from. A
+// character device is not enough: /dev/null is one, and a prompt read from it
+// ends in EOF.
+var interactive = func() bool { return isTerminal(syscall.Stdin) }

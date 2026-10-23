@@ -41,4 +41,31 @@ class ProbeTest {
             assertFails { client.probe("127.0.0.1", port, TestIdentities.stranger.fingerprint) }
         } finally { server.stop() }
     }
+
+    @Test fun atMaxSessionsTheCheckSaysNotReadyAndTheNextSessionIsRefused() {
+        val backend = FixtureBackend()
+        val server = TargetServer(TestIdentities.target, InMemoryPeerStore(), DeviceInfo("RP6"), object : TargetServer.BackendProvider {
+            override fun create(): TargetBackend = backend
+            override fun status() = TargetServer.BackendStatus(true, backend.capabilities)
+        }, TargetServer.Config(port = 0, bindAddress = InetAddress.getLoopbackAddress(), maxSessions = 1))
+        val port = server.start()
+        val client = ControllerClient(TestIdentities.controller, ClientInfo("Phone", "test"))
+        fun probe() = client.probe("127.0.0.1", port, TestIdentities.target.fingerprint)
+        fun connect() = client.connect("127.0.0.1", port, TestIdentities.target.fingerprint, StreamRequest(video = false, audio = false))
+        try {
+            client.pair(server.invite("127.0.0.1", setOf(Grant.VIEW, Grant.CONTROL)))
+            assertTrue(probe().ready)
+            connect().let { session ->
+                // The wire text the Go client and older apps show as it is.
+                val full = probe()
+                assertFalse(full.ready)
+                assertEquals("too many sessions", full.reason)
+                val refused = assertFailsWith<PeerException> { connect() }
+                assertEquals("busy", refused.code)
+                assertEquals("too many sessions", refused.message)
+                session.disconnect()
+            }
+            eventually(message = "the session to end") { probe().ready }
+        } finally { server.stop() }
+    }
 }

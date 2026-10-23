@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/binary"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -296,5 +298,120 @@ func TestMenuAndKeyboardAreExclusive(t *testing.T) {
 	a.toggleKeyboard()
 	if a.menuOpen {
 		t.Error("opening the keyboard left the menu open")
+	}
+}
+
+// quitQueued reports whether a quit reached the run loop, and takes it off the
+// queue.
+func quitQueued(a *app) bool {
+	for {
+		select {
+		case ev := <-a.events:
+			if ev.kind == evQuit {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
+
+// ageQuitArm makes a pending overlay Quit d older, as if d had gone by since
+// its first press.
+func ageQuitArm(a *app, d time.Duration) {
+	a.kb.quit.at -= int64(d)
+}
+
+// menuRow is the 1-based screen row of the painted menu line containing text.
+func menuRow(t *testing.T, a *app, text string) int {
+	t.Helper()
+	for i, line := range a.tui.overlay {
+		if strings.Contains(line.text, text) {
+			return i + 1
+		}
+	}
+	t.Fatalf("no menu line contains %q", text)
+	return 0
+}
+
+// TestMenuQuitTakesTwoPresses: Quit's letter or a click on its row arms it and
+// keeps the menu up, the row reading "Press again to quit"; a second press
+// within 2 s quits, and one after that does not.
+func TestMenuQuitTakesTwoPresses(t *testing.T) {
+	withTermSize(t, 80, 30)
+	a := newTestApp(newController(&capConn{}))
+	a.tui = &tui{cols: 80, rows: 29}
+
+	a.toggleMenu()
+	a.handleInput([]byte{'q'})
+	if quitQueued(a) {
+		t.Fatal("one q in the menu quit")
+	}
+	if !a.menuOpen {
+		t.Fatal("the first q closed the menu, leaving nothing to press again")
+	}
+	menuRow(t, a, "Press again to quit")
+	a.handleInput([]byte{'q'})
+	if !quitQueued(a) {
+		t.Fatal("a second q at once did not quit")
+	}
+
+	a.toggleMenu()
+	y := menuRow(t, a, "Quit")
+	click := func() {
+		a.handleInput(mouseSeq(0, 5, y, true))
+		a.handleInput(mouseSeq(0, 5, y, false))
+	}
+	click()
+	if quitQueued(a) {
+		t.Fatal("one click on the Quit row quit")
+	}
+	if !a.menuOpen {
+		t.Fatal("the first click on Quit closed the menu")
+	}
+	if got := menuRow(t, a, "Press again to quit"); got != y {
+		t.Errorf("the armed label is on row %d, the Quit row is %d", got, y)
+	}
+	ageQuitArm(a, 2100*time.Millisecond)
+	click()
+	if quitQueued(a) {
+		t.Fatal("a click 2.1 s after the first quit")
+	}
+	click()
+	if !quitQueued(a) {
+		t.Fatal("a second click at once did not quit")
+	}
+}
+
+// TestQuitChordsQuitAtOnce: only the overlays' Quit controls take two presses.
+// Alt+Q quits on its own, also with the menu open and its Quit armed, and so
+// does Ctrl-Q in the menu.
+func TestQuitChordsQuitAtOnce(t *testing.T) {
+	withTermSize(t, 80, 30)
+	a := newTestApp(nil)
+	a.tui = &tui{cols: 80, rows: 29}
+
+	a.handleInput([]byte{0x1b, 'q'})
+	if !quitQueued(a) {
+		t.Error("Alt+Q did not quit at once")
+	}
+	a.toggleMenu()
+	a.handleInput([]byte{0x1b, 'q'})
+	if !quitQueued(a) {
+		t.Error("Alt+Q with the menu open did not quit at once")
+	}
+	a.handleInput([]byte{'q'})
+	quitQueued(a)
+	a.handleInput([]byte{0x1b, 'q'})
+	if !quitQueued(a) {
+		t.Error("Alt+Q with the menu's Quit armed did not quit at once")
+	}
+
+	b := newTestApp(nil)
+	b.tui = &tui{cols: 80, rows: 29}
+	b.toggleMenu()
+	b.handleInput([]byte{0x11}) // Ctrl-Q
+	if !quitQueued(b) {
+		t.Error("Ctrl-Q in the menu did not quit at once")
 	}
 }

@@ -88,6 +88,34 @@ func (c *controller) injectText(text string) error {
 	return nil
 }
 
+// clipboardTextMaxBytes is the scrcpy client's limit for the text of one
+// set-clipboard message (SC_CONTROL_MSG_CLIPBOARD_TEXT_MAX_LENGTH: a 256 KiB
+// message less its 14-byte header); Android peers end a session that sends a
+// longer one.
+const clipboardTextMaxBytes = 1<<18 - 14
+
+var errClipboardTooLong = errors.New("clipboard text too long")
+
+// setClipboard puts text on the device clipboard and, with paste, has the
+// device paste it into the focused field (Android 7 and later). It asks for no
+// acknowledgement (sequence 0).
+func (c *controller) setClipboard(text string, paste bool) error {
+	if len(text) > clipboardTextMaxBytes {
+		return errClipboardTooLong
+	}
+	if dbgControl != "" {
+		// Never the text: a paste routinely holds passwords.
+		fmt.Fprintf(os.Stderr, "scterm: set clipboard: %d bytes, paste=%v\n", len(text), paste)
+	}
+	// msg layout: [sequence(8)][paste(1)][pad(2)] text
+	msg := make([]byte, 8+1+2+len(text))
+	if paste {
+		msg[8] = 1
+	}
+	copy(msg[11:], text)
+	return c.send(ctrlSetClipboard, msg)
+}
+
 // backOrScreenOn sends the back key action.
 func (c *controller) backOrScreenOn(down bool) error {
 	action := uint8(1)
@@ -172,7 +200,7 @@ func deviceMsgReader(conn net.Conn) {
 			// A closed socket is the normal way this goroutine ends: on quit,
 			// the session tears the control connection down first.
 			if !isClosedConnErr(err) {
-				fmt.Fprintf(stderrWriter(), "scterm: control recv: %v\n", err)
+				noticef("scterm: control recv: %v\n", err)
 			}
 			return
 		}
@@ -228,7 +256,7 @@ func parseDeviceMessage(b []byte) (int, bool) {
 		}
 		return 5 + l, true
 	default:
-		fmt.Fprintf(stderrWriter(), "scterm: unknown device msg %d\n", b[0])
+		noticef("scterm: unknown device msg %d\n", b[0])
 		return 1, true
 	}
 }

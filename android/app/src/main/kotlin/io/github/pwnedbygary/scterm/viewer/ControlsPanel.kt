@@ -101,8 +101,9 @@ class ControlsPanel(
         window.setBackgroundDrawable(
             GradientDrawable().apply {
                 cornerRadius = dp(20).toFloat()
-                // Light over the blurred video; without the blur, dark enough to read on anything.
-                setColor(if (blur) 0x59101418 else 0xD9101418.toInt())
+                // Over the blurred video, still dark enough for white labels on the bar's
+                // buttons to keep 4.5:1 on a white screen; darker still without the blur.
+                setColor(if (blur) 0xB8101418.toInt() else 0xD9101418.toInt())
                 setStroke(dp(1), 0x33FFFFFF)
             },
         )

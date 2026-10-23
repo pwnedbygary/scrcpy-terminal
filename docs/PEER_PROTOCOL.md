@@ -5,8 +5,8 @@ scterm target (the Android app serving its screen). Reference implementations:
 `android/protocol` (formats) and `android/peer` (TLS, sessions, policy) in
 Kotlin, `peer/` in Go, with golden vectors in `protocol/fixtures/` that both
 must match. Status: host-tested on the JVM and in Go (including Go against
-the Kotlin target), and exercised on a physical Android 16 phone as target
-and controller; not yet between two physical devices.
+the Kotlin target), and exercised between two physical devices, an Android 16
+phone and an Android 13 handheld, each as target and as controller.
 
 ## Design in one paragraph
 
@@ -48,8 +48,10 @@ The controller opens TLS (pinning `f` when present, otherwise accepting the
 certificate provisionally) and exchanges one frame each way:
 
 ```text
-controller -> {"type":"pair","v":1,"proof":"<hex>","client":{"name":"…","app":"…"},"servePort":27300}
-target     -> {"type":"paired","proof":"<hex>","device":{"name":"…"},"grants":["view","audio","control"]}
+controller -> {"type":"pair","v":1,"proof":"<hex>","client":{"name":"…","app":"…"},
+               "servePort":27300}
+target     -> {"type":"paired","proof":"<hex>","device":{"name":"…"},
+               "grants":["view","audio","control"]}
            or {"type":"reject","code":"bad_proof"|"no_invitation","message":"…"}
 ```
 
@@ -78,7 +80,7 @@ request at a time, and its user must accept each request:
 
 ```text
 controller -> {"type":"pair_nearby","v":1,"client":{…},"servePort":27300}
-target     -> {"type":"code_commit","commit":"<hex>"}          (or reject no_invitation / unavailable)
+target     -> {"type":"code_commit","commit":"<hex>"}          (or reject no_invitation/unavailable)
 controller -> {"type":"code_nonce","nonce":"<64 hex>"}
 target     -> {"type":"code_reveal","nonce":"<64 hex>","device":{"name":"…"}}
                 both screens now show the code; each user compares and answers
@@ -88,7 +90,8 @@ target     -> {"type":"paired","device":{…},"grants":[…]}        (no proof)
 ```
 
 ```text
-commit = SHA-256("scterm-code-v1" 0x00 "commit" 0x00 || targetNonce || targetFingerprint || controllerFingerprint)
+commit = SHA-256("scterm-code-v1" 0x00 "commit" 0x00 ||
+         targetNonce || targetFingerprint || controllerFingerprint)
 code   = first 4 bytes of SHA-256("scterm-code-v1" 0x00 "code" 0x00 ||
          controllerFingerprint || targetFingerprint || controllerNonce || targetNonce),
          as a big-endian unsigned integer, mod 1 000 000, shown as six digits ("482 915")
@@ -113,7 +116,7 @@ Grants are stored by the target, per peer, and enforced by the target:
 | `view` | video channel; asking for a keyframe (`reset_video`) |
 | `audio` | audio channel |
 | `control` | input and navigation messages, while holding the input lease |
-| `clipboard` | device clipboard updates; `get_clipboard`/`set_clipboard` (writes need the lease too) |
+| `clipboard` | device clipboard updates; `get_clipboard`, and `set_clipboard` with the lease |
 
 Pairing records identities in both directions but grants in one: B may
 control A only if A granted B, independently of what B granted A. Changing or
@@ -155,7 +158,8 @@ that frame each media connection carries exactly a scrcpy media stream: the
 frames. There is no device-name field; `welcome.device` replaces it.
 
 `reject.code` values: `version`, `not_paired`, `forbidden`, `busy`,
-`bad_request`, `bad_token`, `bad_proof`, `no_invitation`, `unavailable`.
+`bad_request`, `bad_token`, `bad_proof`, `no_invitation`, `unavailable`, and
+`declined` (nearby pairing only).
 Versions: the target picks the highest version in `[minV, v]` it speaks (1).
 
 ## The control channel after the handshake
@@ -164,14 +168,20 @@ Controller to target: scrcpy v4.1 control messages. Target to controller:
 scrcpy device messages. In both directions, **envelope frames** carry peer
 events: type byte `0xFE` (never assigned by scrcpy), `u32` length, JSON.
 
-| Envelope | Direction | Meaning |
-| --- | --- | --- |
-| `ping {t}` / `pong {t}` | C→T / T→C | Heartbeat every 5 s; the target drops a control channel silent for 20 s |
-| `takeover` | C→T | Take the input lease (needs `control`) |
-| `lease {state, holder}` | T→C | `held`, or `viewer` with the holder's name (none: the lease is free) |
-| `error {code, message, controlType}` | T→C | A refused message: `forbidden`, `no_lease`, `unsupported`; at most one per type per second |
-| `status {streams, caps, grants}` | T→C | Capabilities or stream availability changed |
-| `bye {reason, endSession}` | both | Orderly close. From the lease holder, `endSession` disconnects every viewer (the legacy `quit`); serving itself stays on, since only the local user can stop it |
+Envelopes, with their direction (C is the controller, T the target):
+
+- `ping {t}` (C→T) and `pong {t}` (T→C): heartbeat every 5 s; the target drops
+  a control channel silent for 20 s.
+- `takeover` (C→T): take the input lease (needs `control`).
+- `lease {state, holder}` (T→C): `held`, or `viewer` with the holder's name
+  (none: the lease is free).
+- `error {code, message, controlType}` (T→C): a refused message: `forbidden`,
+  `no_lease`, `unsupported`; at most one per type per second.
+- `status {streams, caps, grants}` (T→C): capabilities or stream availability
+  changed.
+- `bye {reason, endSession}` (both): orderly close. From the lease holder,
+  `endSession` disconnects every viewer (the legacy `quit`); serving itself
+  stays on, since only the local user can stop it.
 
 Unknown envelope types are skipped; malformed ones end the session.
 

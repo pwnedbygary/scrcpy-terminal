@@ -1,0 +1,3 @@
+# A byte-identical copy of third_party/LICENSE.scrcpy, which ends with a blank
+# line; licenses_test.go keeps the two identical.
+android/app/src/main/assets/LICENSE.scrcpy whitespace=-blank-at-eof

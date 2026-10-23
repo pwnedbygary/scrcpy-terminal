@@ -5,13 +5,30 @@
 // holds a target of ~96 ms, which absorbs host-side scheduling jitter without
 // adding perceptible delay. Underruns are padded with silence (never a stall)
 // and reported so the HUD can show them.
+//
+// The page also loads this file as a classic script, before player.js. An
+// AudioWorklet exists only in secure contexts (https, localhost), so a page
+// opened over plain http from another machine has none; player.js then drains
+// this same ring from a ScriptProcessorNode on the main thread, where there is
+// no AudioWorkletProcessor to extend and nothing to register.
+//
+// The page asks for a 48 kHz context, so the ring normally plays frame for
+// frame. A browser that runs the context at another rate anyway (an older
+// Safari's webkitAudioContext takes no options) would play the stream slow or
+// fast, and the host would run ahead of it; processorOptions.ratio, the
+// stream's frames per output frame, makes pull() resample instead.
+"use strict";
 
-class SctermPCM extends AudioWorkletProcessor {
+const SctermPCMBase = typeof AudioWorkletProcessor === "function" ? AudioWorkletProcessor : class {};
+
+class SctermPCM extends SctermPCMBase {
   constructor(options) {
     super();
     const opt = (options && options.processorOptions) || {};
     this.target = opt.targetFrames || 4608;   // 96 ms @ 48 kHz
     this.max = opt.maxFrames || 11520;        // 240 ms
+    this.ratio = opt.ratio > 0 ? opt.ratio : 1; // stream frames per output frame
+    this.frac = 0;                             // how far past `read` playback is
     this.buf = new Float32Array(this.max * 2); // interleaved stereo
     this.read = 0;
     this.write = 0;
@@ -19,7 +36,7 @@ class SctermPCM extends AudioWorkletProcessor {
     this.started = false;
     this.underruns = 0;
     this.dropped = 0;
-    this.port.onmessage = (e) => this.feed(e.data);
+    if (this.port) this.port.onmessage = (e) => this.feed(e.data);
     this.reportAt = 0;
   }
 
@@ -55,24 +72,29 @@ class SctermPCM extends AudioWorkletProcessor {
 
   process(inputs, outputs) {
     const out = outputs[0];
-    const left = out[0];
-    const right = out[1] || out[0];
+    this.pull(out[0], out[1] || out[0]);
+    this.report();
+    return true;
+  }
+
+  // pull plays the next left.length frames into left and right (the same
+  // array for both on a mono output), as silence while buffering or starved.
+  pull(left, right) {
     const frames = left.length;
 
     if (!this.started || this.count === 0) {
-      left.fill(0);
-      if (right !== left) right.fill(0);
-      if (this.started && this.count === 0) this.underruns++;
-      this.report();
-      return true;
+      this.starve(left, right, 0);
+      return;
+    }
+    if (this.ratio !== 1) {
+      this.resample(left, right);
+      return;
     }
 
     for (let i = 0; i < frames; i++) {
       if (this.count === 0) {
-        this.underruns++;
-        left[i] = 0;
-        right[i] = 0;
-        continue;
+        this.starve(left, right, i);
+        return;
       }
       const r = this.read * 2;
       left[i] = this.buf[r];
@@ -80,18 +102,52 @@ class SctermPCM extends AudioWorkletProcessor {
       this.read = (this.read + 1) % this.max;
       this.count--;
     }
-    this.report();
-    return true;
+  }
+
+  // starve plays silence from frame `from` to the end of the block: nothing
+  // arrives while a block plays. A block the stream could not fill is one
+  // underrun, however many frames it lacked, so the count means the same
+  // whether or not the ring resamples; before playback starts it is only
+  // buffering.
+  starve(left, right, from) {
+    left.fill(0, from);
+    if (right !== left) right.fill(0, from);
+    if (this.started) this.underruns++;
+  }
+
+  // resample plays the stream at `ratio` stream frames per output frame, each
+  // output frame a straight line between the two stream frames it falls
+  // between. It needs both, so the last frame waits for the next burst.
+  resample(left, right) {
+    for (let i = 0; i < left.length; i++) {
+      while (this.frac >= 1 && this.count > 1) {
+        this.frac -= 1;
+        this.read = (this.read + 1) % this.max;
+        this.count--;
+      }
+      if (this.count < 2) {
+        this.starve(left, right, i);
+        return;
+      }
+      const a = this.read * 2;
+      const b = ((this.read + 1) % this.max) * 2;
+      const f = this.frac;
+      left[i] = this.buf[a] + (this.buf[b] - this.buf[a]) * f;
+      right[i] = this.buf[a + 1] + (this.buf[b + 1] - this.buf[a + 1]) * f;
+      this.frac += this.ratio;
+    }
+  }
+
+  stats() {
+    return { underruns: this.underruns, dropped: this.dropped, queued: this.count };
   }
 
   report() {
     const now = currentFrame;
     if (now - this.reportAt < sampleRate) return; // ~1 Hz
     this.reportAt = now;
-    this.port.postMessage({
-      stats: { underruns: this.underruns, dropped: this.dropped, queued: this.count },
-    });
+    this.port.postMessage({ stats: this.stats() });
   }
 }
 
-registerProcessor("scterm-pcm", SctermPCM);
+if (typeof registerProcessor === "function") registerProcessor("scterm-pcm", SctermPCM);

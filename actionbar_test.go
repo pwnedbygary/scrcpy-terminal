@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -530,4 +532,271 @@ func TestBarMuteHasNoChordButWorks(t *testing.T) {
 		}
 	}
 	t.Fatalf("Mute button not found in a 200-cell bar: %q", a.tui.overlay[a.barBotRow-1].text)
+}
+
+// paintedBar reads the bar's label row as it was painted: the trimmed label of
+// every pill, left to right (‹ and › included), and the 1-based cell in the
+// middle of each.
+func paintedBar(t *testing.T, a *app) (labels []string, cells []int) {
+	t.Helper()
+	if a.barBotRow == 0 {
+		t.Fatal("the bar is not painted")
+	}
+	line := a.tui.overlay[a.barBotRow-1]
+	text := []rune(line.text)
+	for _, s := range line.segs {
+		labels = append(labels, strings.TrimSpace(string(text[s.from:s.to])))
+		cells = append(cells, (s.from+s.to)/2+1)
+	}
+	return labels, cells
+}
+
+// barCell is the 1-based cell in the middle of the painted pill reading label.
+func barCell(t *testing.T, a *app, label string) int {
+	t.Helper()
+	labels, cells := paintedBar(t, a)
+	for i, l := range labels {
+		if l == label {
+			return cells[i]
+		}
+	}
+	t.Fatalf("no %q on the bar: %q", label, labels)
+	return 0
+}
+
+// barLabelAt is the painted label of the pill covering 1-based cell x.
+func barLabelAt(t *testing.T, a *app, x int) string {
+	t.Helper()
+	if a.barBotRow == 0 {
+		t.Fatal("the bar is not painted")
+	}
+	line := a.tui.overlay[a.barBotRow-1]
+	for _, s := range line.segs {
+		if x-1 >= s.from && x-1 < s.to {
+			return strings.TrimSpace(string([]rune(line.text)[s.from:s.to]))
+		}
+	}
+	t.Fatalf("no pill at cell %d: %q", x, line.text)
+	return ""
+}
+
+// TestBarWakingClickIsATap: a terminal without hover reporting sends no
+// motion, so the first click on the bottom rows is what wakes the bar. That
+// click must not run a button the user never saw: it reaches the device as a
+// touch, like any click on the video. A click on the bar once it is on screen
+// runs the button.
+func TestBarWakingClickIsATap(t *testing.T) {
+	withTermSize(t, 120, 30)
+	// Where Home is painted once the bar is up, read from an identical app.
+	probe := newTestApp(nil)
+	probe.tui = &tui{cols: 120, rows: 29}
+	probe.wakeBar()
+	x, y := barCell(t, probe, "Home"), probe.barBotRow
+
+	cc := &capConn{}
+	a := newTestApp(newController(cc))
+	a.tui = &tui{cols: 120, rows: 29}
+	a.handleInput(mouseSeq(0, x, y, true))
+	a.handleInput(mouseSeq(0, x, y, false))
+	if !a.barVisible() {
+		t.Fatal("the click did not wake the bar")
+	}
+	// AMOTION_EVENT_ACTION_DOWN is 0 and _UP is 1.
+	if len(cc.captured) != 2 ||
+		cc.captured[0][0] != ctrlInjectTouch || cc.captured[0][1] != 0 ||
+		cc.captured[1][0] != ctrlInjectTouch || cc.captured[1][1] != 1 {
+		t.Fatalf("the waking click sent % x, want a touch down and up", cc.captured)
+	}
+
+	cc.captured = nil
+	a.handleInput(mouseSeq(0, x, y, true))
+	a.handleInput(mouseSeq(0, x, y, false))
+	if len(cc.captured) != 2 {
+		t.Fatalf("a click on the visible Home sent % x, want a key down and up", cc.captured)
+	}
+	if _, code, _ := keycoded(t, cc.captured[0]); code != 3 {
+		t.Errorf("the click on Home sent keycode %d, want HOME (3)", code)
+	}
+}
+
+// catalogBarLabels reads the bar's buttons from the catalog file itself: the
+// short label of every action in views.tuiBar, in order.
+func catalogBarLabels(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile("protocol/fixtures/actions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type action struct {
+		ID    string `json:"id"`
+		Short string `json:"short"`
+	}
+	var catalog struct {
+		Device []action `json:"device"`
+		Local  []action `json:"local"`
+		Views  struct {
+			TUIBar []string `json:"tuiBar"`
+		} `json:"views"`
+	}
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	short := map[string]string{}
+	for _, a := range append(append([]action{}, catalog.Device...), catalog.Local...) {
+		short[a.ID] = a.Short
+	}
+	var labels []string
+	for _, id := range catalog.Views.TUIBar {
+		labels = append(labels, short[id])
+	}
+	if len(labels) == 0 {
+		t.Fatal("the catalog's tuiBar view is empty")
+	}
+	return labels
+}
+
+// TestBarPagingReachesEveryButton: at every width the bar draws at, paging
+// forward with › from the first page shows every button of the catalog's
+// tuiBar view, and the last page ends with the last of them.
+func TestBarPagingReachesEveryButton(t *testing.T) {
+	want := catalogBarLabels(t)
+	old := termSizeOverride
+	t.Cleanup(func() { termSizeOverride = old })
+	for width := 16; width <= 140; width++ {
+		termSizeOverride = struct{ cols, rows int }{width, 30}
+		a := newTestApp(nil)
+		a.tui = &tui{cols: width, rows: 29}
+		a.wakeBar()
+		seen := map[string]bool{}
+		var labels []string
+		for pages := 1; ; pages++ {
+			var cells []int
+			labels, cells = paintedBar(t, a)
+			if n := len([]rune(a.tui.overlay[a.barBotRow-1].text)); n > width {
+				t.Errorf("width %d: page %d is %d cells wide", width, pages, n)
+			}
+			next := 0
+			for i, l := range labels {
+				switch l {
+				case "›":
+					next = cells[i]
+				case "‹":
+				default:
+					seen[l] = true
+				}
+			}
+			if next == 0 {
+				break
+			}
+			if pages > len(want) {
+				t.Fatalf("width %d: still a › after %d pages", width, pages)
+			}
+			a.handleInput(mouseSeq(0, next, a.barBotRow, true))
+			a.handleInput(mouseSeq(0, next, a.barBotRow, false))
+		}
+		var missing []string
+		for _, l := range want {
+			if !seen[l] {
+				missing = append(missing, l)
+			}
+		}
+		if len(missing) > 0 {
+			t.Errorf("width %d: paging never shows %q", width, missing)
+		}
+		if last := labels[len(labels)-1]; last != want[len(want)-1] {
+			t.Errorf("width %d: the last page ends with %q, want %q", width, last, want[len(want)-1])
+		}
+	}
+}
+
+// TestBarGoesWithMouseReporting: with hover reporting the pointer rests on
+// Grab when it is clicked, and Grab turns mouse reporting off. Nothing will
+// report the pointer leaving after that, so the bar must go at once and forget
+// the pointer's row instead of staying on screen for good.
+func TestBarGoesWithMouseReporting(t *testing.T) {
+	withTermSize(t, 200, 30) // every button on one page
+	a := newTestApp(newController(&capConn{}))
+	a.tui = &tui{cols: 200, rows: 29}
+	a.wakeBar()
+	x, y := barCell(t, a, "Grab"), a.barBotRow
+	captureStdout(t, func() { // the mouse-off sequence
+		a.handleInput(mouseSeq(35, x, y, true)) // hover onto Grab
+		a.handleInput(mouseSeq(0, x, y, true))  // and click it
+	})
+	if a.grabbed {
+		t.Fatal("Grab left mouse reporting on")
+	}
+	if a.barVisible() || a.barPointerY != 0 {
+		t.Fatalf("after Grab the bar is visible=%v, pointer row %d", a.barVisible(), a.barPointerY)
+	}
+	a.barHideCheck(timeNowUnixNano() + int64(time.Minute))
+	for i, line := range a.tui.overlay {
+		if line.text != "" {
+			t.Errorf("overlay line %d is still painted after Grab: %q", i, line.text)
+		}
+	}
+
+	// Ctrl-G turns reporting off the same way.
+	b := newTestApp(nil)
+	b.tui = &tui{cols: 200, rows: 29}
+	b.wakeBar()
+	captureStdout(t, func() { b.handleInput([]byte{0x07}) })
+	if b.grabbed || b.barVisible() {
+		t.Errorf("after Ctrl-G grabbed=%v, bar visible=%v", b.grabbed, b.barVisible())
+	}
+}
+
+// TestBarQuitTakesTwoPresses: one press on Quit only arms it, and the button
+// says so; a second press within 2 s quits. An arm older than that, or one
+// followed by any other press, does not quit.
+func TestBarQuitTakesTwoPresses(t *testing.T) {
+	withTermSize(t, 200, 30) // every button on one page
+	a := newTestApp(newController(&capConn{}))
+	a.tui = &tui{cols: 200, rows: 29}
+	a.wakeBar()
+	quit, y := barCell(t, a, "Quit"), a.barBotRow
+	click := func(x int) {
+		a.handleInput(mouseSeq(0, x, y, true))
+		a.handleInput(mouseSeq(0, x, y, false))
+	}
+
+	click(quit)
+	if quitQueued(a) {
+		t.Fatal("one press on Quit quit")
+	}
+	if got := barLabelAt(t, a, quit); got != "Quit?" {
+		t.Fatalf("armed Quit reads %q, want Quit?", got)
+	}
+	click(quit)
+	if !quitQueued(a) {
+		t.Fatal("a second press at once did not quit")
+	}
+
+	click(quit)
+	ageQuitArm(a, 1900*time.Millisecond)
+	click(quit)
+	if !quitQueued(a) {
+		t.Fatal("a second press 1.9 s after the first did not quit")
+	}
+
+	click(quit)
+	ageQuitArm(a, 2100*time.Millisecond)
+	a.refreshOverlays()
+	if got := barLabelAt(t, a, quit); got != "Quit" {
+		t.Errorf("a 2.1 s old arm still reads %q after a repaint", got)
+	}
+	click(quit)
+	if quitQueued(a) {
+		t.Fatal("a press 2.1 s after the first quit")
+	}
+
+	// That press armed it again; Home in between disarms it.
+	click(barCell(t, a, "Home"))
+	if got := barLabelAt(t, a, quit); got != "Quit" {
+		t.Errorf("after another press Quit reads %q", got)
+	}
+	click(quit)
+	if quitQueued(a) {
+		t.Fatal("Quit, Home, Quit quit")
+	}
 }

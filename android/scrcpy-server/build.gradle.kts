@@ -2,10 +2,12 @@ plugins {
     alias(libs.plugins.android.library)
 }
 
-// The vendored scrcpy v4.1 server, compiled from third_party/ without edits so
-// the APK carries a helper that matches the reviewed source. It only runs
-// under `app_process` with shell identity (see HelperActivation in :app);
-// inside the app process nothing references it.
+// The vendored scrcpy v4.1 server, compiled from third_party/ so the APK
+// carries a helper that matches the reviewed source: upstream, plus one local
+// patch marked "scterm patch" (audio/AudioPlaybackCapture.java: playback
+// capture also takes game and untagged audio). It only runs under
+// `app_process` with shell identity (see HelperMain in :app); inside the app
+// process nothing references it.
 val vendored = layout.projectDirectory.dir("../../third_party/scrcpy-server-src/src/main")
 
 android {

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // User report: Ctrl+[ and Ctrl+= crash. Ctrl+[ = bare ESC (0x1B).
 // Ctrl+= in Konsole sends `\x1b[27;5;61~` (CSI-u) or `\x1b[61;5u` (kitty).
@@ -9,7 +12,7 @@ func TestCtrlBracketEquals(t *testing.T) {
 		events:  make(chan inputEvent, 64),
 		kb:      newKeyboard(),
 		grabbed: true,
-		audio:   &audioSink{gain: 256},
+		audio:   &audioSink{gain: 256, pct: 100},
 		cfg:     config{audio: true},
 		tui:     &tui{cols: 80, rows: 39, keys: make([]uint64, 80*39), prev: make([]uint64, 80*39)},
 		stream:  &streamState{videoW: 1280, videoH: 720},
@@ -38,4 +41,39 @@ func TestCtrlBracketEquals(t *testing.T) {
 		}()
 	}
 	t.Log("no panic on Ctrl+[/=/-/] variants")
+}
+
+// TestTextWithoutAControlSocket: typing beyond ASCII (whole, or cut across
+// reads), Alt with it, and pastes, one of them too long to send, with a
+// controller that has no socket never crash, with or without the menu or the
+// on-screen keyboard open.
+func TestTextWithoutAControlSocket(t *testing.T) {
+	withTermSize(t, 80, 40)
+	for _, overlay := range []string{"nothing", "the menu", "the keyboard"} {
+		a := &app{
+			events:  make(chan inputEvent, 64),
+			kb:      newKeyboard(),
+			grabbed: true,
+			audio:   &audioSink{gain: 256, pct: 100},
+			tui:     &tui{cols: 80, rows: 39, keys: make([]uint64, 80*39), prev: make([]uint64, 80*39)},
+			stream:  &streamState{videoW: 1280, videoH: 720},
+			ctrl:    &controller{},
+		}
+		a.stream.updateGeometry()
+		switch overlay {
+		case "the menu":
+			a.toggleMenu()
+		case "the keyboard":
+			a.openKeyboard()
+		}
+		captureTerminal(t, func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("PANIC with %s open: %v", overlay, r)
+				}
+			}()
+			feedReads(a, &inputDecoder{}, "é😀", "\x1bé", "\xc3", "\xa9", pasted("a\rb"),
+				pasted(strings.Repeat("x", 1<<18)), "z")
+		})
+	}
 }
