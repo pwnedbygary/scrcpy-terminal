@@ -57,8 +57,10 @@ func inputLoopChild() {
 // Esc key, and an Esc with the start of a paste's start marker after it waits
 // as long, then decodes as before; an Esc and a paste in one write are the Esc
 // key and one paste; a paste whose end marker never comes gets a notice after
-// about 2 s that Ctrl+C cancels it, Ctrl+C does, what comes with the Ctrl+C is
-// dropped, and once input has stopped for a moment keys act again. A pause of
+// about 2 s that Ctrl+C cancels it, Ctrl+C does, what comes with it and after
+// it is dropped, also after a pause, and once Ctrl+C is written again on its
+// own keys act again; the rest of a cancelled paste that comes after a pause
+// is dropped up to its end marker, and the key after that acts. A pause of
 // 400 ms comes before the event marked as coming after one.
 func TestInputLoop(t *testing.T) {
 	if os.Getenv("SCTERM_TEST_INPUT_LOOP") != "" {
@@ -81,8 +83,10 @@ func TestInputLoop(t *testing.T) {
 			[]string{"\x1b\x1b", "[", "2", "x"}, 3, nil},
 		{"Esc and a paste in one write", []write{{"\x1b\x1b[200~hi\x1b[201~", pause}, {"x", 0}},
 			[]string{"\x1b", "\x1b[200~hi\x1b[201~", "x"}, 2, nil},
-		{"a paste whose end marker never comes", []write{{"\x1b[200~abc", 2600 * time.Millisecond}, {"\x03q\r", 700 * time.Millisecond}, {"x", 0}},
-			[]string{"x"}, -1, []string{"scterm: Ctrl+C cancels the unfinished paste\n", "scterm: paste cancelled by Ctrl+C\n"}},
+		{"a paste whose end marker never comes", []write{{"\x1b[200~abc", 2600 * time.Millisecond}, {"\x03q\r", pause}, {"y", pause}, {"\x03", pause}, {"x", 0}},
+			[]string{"x"}, -1, []string{"scterm: Ctrl+C cancels the unfinished paste\n", "scterm: paste cancelled by Ctrl+C\n", "scterm: keys no longer dropped\n"}},
+		{"the rest of a cancelled paste after a pause", []write{{"\x1b[200~ab\x03cd", pause}, {"ef\x1bq\r", pause}, {"gh\x1b[201~x", 0}},
+			[]string{"x"}, -1, []string{"scterm: paste cancelled by Ctrl+C\n"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

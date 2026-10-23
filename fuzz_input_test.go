@@ -44,10 +44,12 @@ func TestInputFuzz(t *testing.T) {
 		"é", "€", "日本", "😀", "e\u0301", "\xc3", "\xc3(", "\xf0\x9f\x98", "\x80", "\xff",
 		"\xc0\xaf", "\xed\xa0\x80", "\xf4\x90\x80\x80", "\x1bé", "\x1b😀", "\x1b\xc3", "\x1b\xff",
 		// bracketed paste markers, alone, empty, nested, unterminated, cancelled
-		// by a Ctrl+C, after an Esc or an ESC O
+		// by a Ctrl+C (fed a byte per read, a second one then ends the
+		// dropping after it), after an Esc or an ESC O
 		"\x1b[200~", "\x1b[201~", "\x1b[200~\x1b[201~", "\x1b[200~hi\r\n\x1b[201~",
 		"\x1b[200~\x1b[200~x\x1b[201~", "\x1b[200~ab\x1bh", "\x1b[200~é\xc3",
 		"\x03", "\x1b[200~\x03", "\x1b[200~ab\x03cd", "\x1b[200~a\x03b\x1b[201~x", "\x1b[200~\x03\x1b[201~\x1b[201~",
+		"\x1b[200~a\x03b\x03\x1bq\x1b[201~", "\x1b[200~\x03\x03\x1b[20",
 		"\x1b\x1b[200~x\x1b[201~", "\x1b\x1b[20", "\x1bO\x1b", "\x1bO\x1b[200~x\x1b[201~", "\x1b\x1b[200~\x03",
 	}
 	// Through the decoder the input loop uses, which is the one that knows

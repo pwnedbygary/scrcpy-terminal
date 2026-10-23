@@ -7,6 +7,99 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-22: QoL overhaul, part 55: dropping a cancelled paste's rest)
+
+- Issue #10. After Ctrl+C cancels a paste, input is dropped up to the
+  paste's end marker, however late it comes. The 250 ms quiet window
+  (`cancelQuiet`) is gone: on a slow link (SSH, a busy terminal) the rest
+  of a paste was typed as keys after such a pause, and an Esc q in it quit.
+- Where the end marker never comes, Ctrl+C pressed again ends the dropping
+  at once: a read of nothing but Ctrl+C, 1 to 4 of them, as key presses
+  are. It is not sent, what was left of the paste goes too, and the status
+  row says "keys no longer dropped". A Ctrl+C read with other bytes is more
+  of the paste, as is a run of more than 4, an empty read or a second
+  Ctrl+C in the cancelling read; only the read's own bytes count (`left`,
+  past what `discard` kept).
+- 2 s after the cancel, while still dropping, the status row says "Ctrl+C
+  stops it: keys dropped until the paste ends" (50 cells, whole after the
+  hints in 80 columns, Ctrl+C whole down to 37), again every 2 s; keys
+  typed meanwhile do not move it. Once it has shown, the end marker swaps
+  it for "paste ended: keys no longer dropped". It reuses `hintAt`, which
+  the end marker and the way out clear; while it is set, a leftover Esc
+  never times out as the Esc key. None of the three notices is kept for
+  the replay at exit.
+- Decision: Ctrl+C again, not a longer quiet window. Any window types the
+  rest of a link that stalls longer, and a longer one drops the user's own
+  keys after every Ctrl+C when the end marker never comes (part 27). Cost:
+  a lost end marker takes Ctrl+C twice, as the README's paste paragraph says.
+- Tests: TestCancelledPasteIsDroppedToItsEnd (the rest comes 300 ms, 2 s or
+  10 s late), TestDroppingNotice and TestCtrlCAgainStopsTheDropping (12
+  cases) replace TestCancelledPasteEndsWhenInputStops. Updated:
+  TestCtrlCAlwaysGetsOut (out with Ctrl+C twice; the loop never spins),
+  TestNoHintOncePasteIsOver, TestInputLoop (one new case, real pauses),
+  TestCtrlCCancelsAPaste (two Ctrl+C in a paste; a paste of 10,000 Ctrl+C),
+  TestInputFuzz. Round 2 adds TestExpireKeepsLeftInStep (below).
+- Verification, round 1 (builder, base bee1feb): gofmt, vet, build and
+  mdcheck clean; `go test ./...` 516 pass, 3 skip, 0 fail; `-race ./...`
+  ok; related tests `-race -count=3` 189 of 189; the 8 new and changed
+  tests `-count=20` 160 of 160 and `-race -count=5` 40 of 40, no data
+  race. On the base input.go 4 of the 8 fail; 19 of 19 input.go mutants
+  fail a test.
+- Limits: a pasted run of 1 to 4 Ctrl+C that arrives as a read of its own
+  (on a link that gives a few bytes a read, say) ends the dropping, and the
+  rest is typed; Ctrl+C pressed during a slow paste does so only where a
+  terminal or multiplexer slips keys into a paste. Others send it after
+  the end marker, so on a slow link a Ctrl+C pressed on the notice's advice
+  reaches the device (key 31 meta 0x1000: a copy, an interrupt in Termux).
+  A lost end marker drops the next paste whole; once the dropping notice
+  has shown, that paste's end marker even says "paste ended".
+- Left alone: the volume keys, the unfinished-paste hint, the Esc wait, the
+  browser's paste.
+- Not run by the builder: a real terminal or pty (TestInputLoop reads a
+  pipe), a slow link, a device, CI.
+- Intake: taken in on 20dad0f, the tip once parts 57, 59 and 58 had
+  landed: 5 of the builder's 6 files as built, and README.md (part 59)
+  merged three ways (the merge adds exactly this part's lines). Reviewed
+  on /tmp/opencode/review-55.
+- Review round 1 (NEEDS CHANGES), no defect in what the code does: the
+  limits and the decision above were wrong; below 80 columns the notice
+  lost its advice; a paste's run of Ctrl+C that filled a read got out.
+- Round 2: the notice reads "Ctrl+C stops it: keys dropped until the paste
+  ends" (a test pins Ctrl+C whole at 40 columns); once shown, the end
+  marker swaps it for "paste ended: keys no longer dropped" (it stayed up
+  to 4 s). The way out takes 1 to 4 Ctrl+C in a read, not a paste's run of
+  them; expire keeps `left` in step. New TestExpireKeepsLeftInStep; 4 tests
+  changed.
+- Verification, round 2 (builder, base bee1feb): static checks clean;
+  `./...` 517 pass, 3 skip, 0 fail, also -race; related -race -count=3 192
+  of 192; the 9 new and changed -count=20 180/180, -race -count=5 45/45.
+  On round 1's input.go 5 of the 9 fail, on the base's 4; 28/28 mutants caught.
+- Intake, round 2: on 8b5fa95, the tip once part 61 had also landed (it
+  changes none of this part's files): 6 of the builder's 7 files as
+  built, and README.md (unchanged in round 2) merged three ways again,
+  adding exactly this part's lines. Reviewed on /tmp/opencode/review-55b.
+- Review round 2 (NEEDS CHANGES), wording only: the bullets above still
+  gave round 1's way out, notice and case count (corrected in place). Two
+  NITs, now in Limits: the cap stops a pasted run of Ctrl+C only where the
+  link gives reads of 5 bytes or more, and a paste lost after a lost end
+  marker can end on "paste ended". Also: TestExpireKeepsLeftInStep tests
+  the field, not behaviour; nothing depends on expire keeping `left` in
+  step today, as expire never changes pend while dropping.
+- Round 3 changes only this entry, and moves the part onto fc7d19e, the
+  tip once part 53 had landed: input.go and README.md, which part 53 also
+  changes, merged three ways (each merge adds exactly this part's lines);
+  the part's other files are round 2's bytes. Reviewed on
+  /tmp/opencode/review-55c.
+- Review round 3 (PASS), one NIT: the entry gave two widths for Ctrl+C
+  staying whole, 37 in the notice bullet and 40 in round 2's; both are
+  true, and round 2's now says it is what a test pins.
+- Round 4 changes only this entry, and moves the part onto 531fd36, the tip
+  once parts 51 and 52 had landed: README.md, which both also change,
+  merged three ways again (the merge adds exactly this part's lines);
+  input.go and the part's other files are round 3's bytes. Reviewed on
+  /tmp/opencode/review-55d; that tree's checks are in this part's commit
+  message.
+
 ## Update (2026-10-23: QoL overhaul, part 52: forgetting a damaged pairing)
 
 - `scterm forget --damaged` forgets the pairings whose identity in

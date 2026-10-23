@@ -496,12 +496,13 @@ func peerWith(t *testing.T, grants, control []string, lease string) (s *peer.Ses
 // it cancels it: the way out of a paste whose end marker never comes, inside
 // which the keys that would quit or close an overlay are only more of the
 // paste. Nothing of it is sent, a notice says it was cancelled, and what
-// follows is dropped up to the paste's end marker (or until input stops, see
-// TestInputLoop), so keys typed at once act as nothing; after it, keys act
-// again. A paste that holds a Ctrl+C character is dropped whole the same way,
-// never typed, however the reads cut it, and also once it is too long to send.
-// A Ctrl+C after a paste's end marker, even in the same read, is not in it:
-// it is the key.
+// follows is dropped up to the paste's end marker, however late that comes
+// (TestCancelledPasteIsDroppedToItsEnd), so keys typed at once act as nothing;
+// after it, keys act again. A paste that holds a Ctrl+C character, or two, is
+// dropped whole the same way, never typed, however two reads cut it, and also
+// once it is too long to send; so is one holding a run of them that fills
+// reads of its own. A Ctrl+C after a paste's end marker, even in the same
+// read, is not in it: it is the key.
 func TestCtrlCCancelsAPaste(t *testing.T) {
 	const cancelled = "scterm: paste cancelled by Ctrl+C\n"
 
@@ -524,16 +525,17 @@ func TestCtrlCCancelsAPaste(t *testing.T) {
 		t.Errorf("then the paste's end marker and x: sent %q, left % x, said %q; want only the x", got, left, out)
 	}
 
-	p := pasted("a\x03b\rc\x1bq") + "x"
-	for i := 0; i < len(p); i++ {
-		cc := &capConn{}
-		a := newTestApp(newController(cc))
-		var left []byte
-		out := captureStderr(t, func() { left = feedReads(a, &inputDecoder{}, p[:i], p[i:]) })
-		quit := quitQueued(a)
-		if got := wireLog(t, cc.captured); strings.Join(got, "|") != "key 52" || len(left) != 0 || quit || out != cancelled {
-			t.Errorf("a paste holding Ctrl+C, cut after %d bytes: sent %q, left % x, quit %v, said %q; want only the x, and %q",
-				i, got, left, quit, out, cancelled)
+	for _, p := range []string{pasted("a\x03b\rc\x1bq") + "x", pasted("a\x03b\rc\x03d\x1bq\re") + "x"} {
+		for i := 0; i < len(p); i++ {
+			cc := &capConn{}
+			a := newTestApp(newController(cc))
+			var left []byte
+			out := captureStderr(t, func() { left = feedReads(a, &inputDecoder{}, p[:i], p[i:]) })
+			quit := quitQueued(a)
+			if got := wireLog(t, cc.captured); strings.Join(got, "|") != "key 52" || len(left) != 0 || quit || out != cancelled {
+				t.Errorf("%q, cut after %d bytes: sent %q, left % x, quit %v, said %q; want only the x, and %q",
+					p, i, got, left, quit, out, cancelled)
+			}
 		}
 	}
 
@@ -546,6 +548,19 @@ func TestCtrlCCancelsAPaste(t *testing.T) {
 		if got := wireLog(t, cc.captured); strings.Join(got, "|") != "key 52" || len(left) != 0 || out != cancelled {
 			t.Errorf("a paste too long to send with a Ctrl+C after the limit, in %d reads: sent %q, left % x, said %q; want only the x, and %q",
 				len(reads), got, left, out, cancelled)
+		}
+	}
+
+	run := pasted(strings.Repeat("\x03", 10000)+"z\x1bq") + "x"
+	for _, reads := range [][]string{{run}, readsOf(run, 4096)} {
+		cc := &capConn{}
+		a := newTestApp(newController(cc))
+		var left []byte
+		out := captureStderr(t, func() { left = feedReads(a, &inputDecoder{}, reads...) })
+		quit := quitQueued(a)
+		if got := wireLog(t, cc.captured); len(got) != 1 || got[0] != "key 52" || len(left) != 0 || quit || out != cancelled {
+			t.Errorf("a paste holding 10000 Ctrl+C characters, in %d reads: sent %d messages, left % x, quit %v, said %q; want only the x, and %q",
+				len(reads), len(got), left, quit, out, cancelled)
 		}
 	}
 
