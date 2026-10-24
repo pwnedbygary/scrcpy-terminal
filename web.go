@@ -77,7 +77,7 @@ const (
 	webMaxQuality = 31
 
 	// Mailboxes are 1-deep on purpose: frame N+1 supersedes frame N.
-	webAudioQueue = 48 // ~256 ms of 5 ms PCM bursts
+	webAudioQueue = 48 // ~0.96 s: a PCM burst is a decoded packet, 20 ms of Opus
 )
 
 // webCmdInbox is the depth of the control-event queue (see webInbox).
@@ -805,8 +805,9 @@ func (s *webServer) pushPCM(pcm []byte) {
 		c.audioMu.Lock()
 		if len(c.audio) >= webAudioQueue {
 			// The client is behind: drop the oldest burst rather than grow.
-			// 48 queued bursts is already ~256 ms of audio; anything older is
-			// worthless for lip sync.
+			// A burst is one decoded packet (20 ms of Opus, up to 21.3 ms of
+			// raw sound), so 48 queued bursts are already about a second of
+			// audio; anything older is worthless for lip sync.
 			c.audio = c.audio[1:]
 		}
 		c.audio = append(c.audio, dup)

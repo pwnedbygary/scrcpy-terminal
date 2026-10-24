@@ -354,6 +354,17 @@ Alt+M mutes the sound on this computer, and Alt+- and Alt+= turn it down and up 
 In the terminal they act on scterm's PulseAudio stream, and in the browser on the page's own
 volume.
 
+Over a connection that stalls, as wireless adb can for a few seconds, the sound arrives late and
+then all at once. Where this computer plays the sound over adb (the terminal display,
+`--no-tui`, and `--audio-dup`), scterm skips the sound that stays queued for a few seconds, so
+that the sound keeps up with the picture: you hear it jump ahead. It keeps what the
+connection's bursts of the last half minute needed, up to about a second, so over wireless adb
+at the default video bit rate the sound often stays about a second behind (about 2 s without
+the skipping); in exchange, it goes quiet sooner when the connection stalls, since less sound
+waits to fill the gap. In peer mode nothing is skipped: the encrypted connection does not show
+what waits in it. The browser display drops late sound by itself; with `--audio-dup`, its
+browsers also hear this computer's jumps.
+
 ## Peer mode
 
 The scterm Android app can serve its device's screen to paired devices. scterm connects to it
@@ -420,6 +431,9 @@ or names them as the command after pairing does when there is no terminal to ask
 - scterm sends `--no-video`, `--no-audio`, `--no-control`, `--max-size`, `--max-fps`, `-b` and
   `--audio-codec` to the device, and the device decides what it can do. `--audio-source`,
   `--audio-bit-rate` and the device side of `--audio-dup` have no effect in peer mode.
+- Sound that falls behind is not skipped, as it is over adb (see
+  [Sound on this computer](#sound-on-this-computer)): the TLS connection does not show what
+  waits in it.
 - What works depends on how the device serves. The full-control helper works like adb. Screen
   capture on a standard install has no sound and takes one finger.
 

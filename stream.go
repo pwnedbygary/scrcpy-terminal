@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unsafe"
 )
@@ -90,12 +91,19 @@ type streamState struct {
 	quitting *atomic.Bool
 
 	// A/V lag probe: the device timestamps audio packets and video frames on
-	// the same monotonic clock, so ptsLagUs = video.pts - audio.pts at arrival
-	// time shows how much the audio stream lags the video pipeline end-to-end
-	// (capture-side buffering, e.g. remote submix, shows up here, not in the
-	// host playback buffer).
+	// the same monotonic clock, so video.pts - audio.pts, as the demuxers read
+	// them, shows how far the audio scterm reads trails the video. Android's
+	// software Opus and FLAC encoders (Opus is the default) hand their
+	// packets to the server, which stamps each one anew as it comes out, so
+	// with them the lag is scterm's own backlog of sound read late plus the
+	// transport, not buffering on the capture side. It leaves out the host's
+	// playback buffer, which comes after the demuxer.
 	lastVideoPts atomic.Int64 // us
 	lastAudioPts atomic.Int64 // us
+
+	// backlog drops the sound that stays queued where it plays here
+	// (dropBehind).
+	backlog audioBacklog
 
 	// pcmTaps receive every decoded s16le stereo 48k buffer in addition to the
 	// local PulseAudio sink. Web/window clients need the same PCM the sink
@@ -165,6 +173,23 @@ func (s *streamState) audioBytesSeen() int64 {
 		return 0
 	}
 	return s.audioBytes
+}
+
+// droppedSound is the sound dropped so far because it stayed queued
+// (audioBacklog).
+func (s *streamState) droppedSound() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return time.Duration(s.backlog.dropped.Load())
+}
+
+// soundCushion is the cushion kept for the sound's bursts (audioBacklog).
+func (s *streamState) soundCushion() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return time.Duration(s.backlog.cushion.Load())
 }
 
 // soundStopped is why the session's sound stopped (see soundEnd), or nil while
@@ -634,6 +659,7 @@ func (s *streamState) runAudio(audioOut *audioSink) (err error) {
 	}
 
 	r := bufio.NewReaderSize(s.sess.audio, 1<<20)
+	rc := rawConn(s.sess.audio)
 	he := make([]byte, 12)
 	pcm := make([]byte, 1<<16)
 
@@ -656,6 +682,9 @@ func (s *streamState) runAudio(audioOut *audioSink) (err error) {
 			if s.cfg.audioDump != "" {
 				// before writePCM16, which scales the samples in place
 				dumpAudioPacket(s.cfg.audioDump, payload)
+			}
+			if s.dropBehind(r, rc, ptsUs, audioOut) {
+				continue
 			}
 			s.audioBytes += int64(len(payload))
 			s.noteAudioPeak(maxAbsInt16(payload))
@@ -699,6 +728,9 @@ func (s *streamState) runAudio(audioOut *audioSink) (err error) {
 		if s.cfg.audioDump != "" {
 			dumpAudioPacket(s.cfg.audioDump, payload)
 		}
+		if s.dropBehind(r, rc, ptsUs, audioOut) {
+			continue
+		}
 		if err := adecSend(dec, payload, ptsUs); err != nil {
 			continue
 		}
@@ -718,6 +750,19 @@ func (s *streamState) runAudio(audioOut *audioSink) (err error) {
 			s.fanPCM(pcm[:n])
 		}
 	}
+}
+
+// dropBehind reports whether to drop the audio packet stamped ptsUs, just read
+// from r, unplayed, as sound that stayed queued (audioBacklog). Sound queues
+// only while the writes to audioOut wait for it to play (paces); otherwise
+// nothing is measured or dropped.
+func (s *streamState) dropBehind(r *bufio.Reader, rc syscall.RawConn, ptsUs int64, audioOut *audioSink) bool {
+	pts := time.Duration(ptsUs) * time.Microsecond
+	if !audioOut.paces() {
+		s.backlog.restart(pts)
+		return false
+	}
+	return s.backlog.skip(pts, audioQueued(r, rc, ptsUs))
 }
 
 // deliverFrame hands a frame to the sink, recycling the buffer if there is no

@@ -7,6 +7,66 @@ its parents as of this snapshot). Reconcile this checkpoint against Git,
 current source, live task ownership and test evidence before editing. Status
 here is a snapshot, not proof that no other work has started.
 
+## Update (2026-10-23: QoL overhaul, part 66: dropping sound that falls behind)
+
+- Fixes #14. Where this computer plays the sound over adb (the terminal,
+  `--no-tui`, `--audio-dup`), sound that stays queued is dropped: a
+  stall's backlog goes 3 to 5 s after its refill (one exception, in
+  Open), a start delay after 2.5 s. Bursts after a stall keep a cushion
+  of up to about a second for 30 s. `--no-tui` adds `cushion=` and
+  `dropped=`.
+- How (`audiobacklog.go`): the socket's unread bytes (`TIOCINQ`) join the
+  demuxer's buffer; the queue is the stamp span of its whole packets. Its
+  low point over the last 2.5 s of sound, less a 150 ms margin and the
+  bursts' cushion (the largest swing within 2.5 s over the last 30 s of
+  stamps; a stall, above 1.2 s, and the windows around it earn none), is
+  skipped, oldest first, before the decoder, when 100 ms or more.
+- Decided: by stamps, not part 56's bytes-to-time estimate; on the
+  reader's goroutine (avlag keeps its meaning); post-stall bursts keep
+  their cushion at the cost in Open; `backlogBurst` (1.2 s) and
+  `backlogMemory` (30 s) are the knobs.
+- Keep: drop only while the sink paces the reader (plays here, unmuted);
+  no window that sees part of a stall's rise earns a cushion; a cushion
+  lasts 30 s of the device's stamps; drop the oldest, never the last
+  packet queued; peer mode (TLS) drops nothing.
+- Also: comments fixed in `stream.go` (avlag) and `web.go` (48 bursts are
+  ~0.96 s); README and `docs/ARCHITECTURE.md`.
+- Tests (`audiobacklog_test.go`, a fake link on one fake clock): start
+  delay, stalls of 1.5-6 s refilled over 0-2 s, bursts with upper bounds,
+  cushions kept and expiring, drift, mute, browser-only, a mute mid-stream,
+  the TCP queue; 10 of 14 fail on main, 2 on round 1; 18 of 18 mutants.
+- Review round 1: NEEDS CHANGES. A stall whose refill spanned a segment
+  boundary kept 0.55-1.40 s as a cushion for 30 s; the 8 Mbit/s cost was
+  understated; the burst tests had no upper bound; peer mode overclaimed.
+  Round 2: the reviewer's s02 (keyed by stamp), the memory by stamps,
+  those tests, `cushion=`, and the replayed cost stated.
+- Review round 2: NEEDS CHANGES. A stall that began while an earlier
+  backlog was being dropped kept up to about 1.4 s for 30 s, against the
+  "3 to 5 s"; the 8 Mbit/s cost was not in Open. Round 3, docs only: the
+  exception in `docs/ARCHITECTURE.md` and Open (#29), the cost in Open,
+  and the README says the sound goes quiet sooner in a stall.
+- Verified, by the builder on 1b782b6 plus round 2's `part66.diff` (round
+  3 changes no code): gofmt, vet and `git diff --check` clean; module 593
+  pass, 3 skip, 0 fail with `SCTERM_TEST_REQUIRE_SHELLS=1`; `-race ./...`
+  ok; related `-race` x3 288; new x20 280, `-race` x5 70.
+- Intake, round 1: taken in on 1b782b6, the builder's nine files as
+  built; reviewed on /tmp/opencode/review-66, which asked for the changes
+  above.
+- Intake, round 2: taken in on 1b782b6, the builder's nine files as
+  built; reviewed on /tmp/opencode/review-66b, which asked for the change
+  above.
+- Intake, round 3: taken in on 1b782b6, round 2's code and tests as
+  built; the orchestrator changed only README.md, `docs/ARCHITECTURE.md`
+  and this entry; reviewed on /tmp/opencode/review-66c; that tree's checks
+  are in the commit message.
+- Open: the phone check (YouTube at 8 Mbit/s, the owner listening; avlag,
+  `cushion=`, `dropped=`); by a replay of the measured runs the sound
+  stays about 0.6-1.1 s behind at 8 Mbit/s (1.5-2.9 s without), at
+  0.9-4.5 s more silence per run; a stall that begins while an earlier
+  backlog is still being dropped keeps up to about 1.4 s for 30 s (#29);
+  refills slower than 2 s can earn a cushion; AAC, FLAC and how a drop
+  sounds untested.
+
 ## Update (2026-10-23: QoL overhaul, part 65: a copy that selects nothing)
 
 - A printed command (`scterm --peer`, `scterm forget`), and so completion,

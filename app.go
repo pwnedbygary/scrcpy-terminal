@@ -702,9 +702,11 @@ var statisticsEvery = 2 * time.Second
 // statistics is the statistics line of --no-tui: the picture's size, the
 // stream's frame rate and the sound (audioState). While sound plays, which
 // takes a sound stream that is not off and has sent a packet, it adds the
-// PCM decoded and its peak, and once a video packet has come too, how far
-// the audio lags the video. The server stamps packets with the device's
-// monotonic clock, so a timestamp of 0 means that none has come yet.
+// PCM decoded and its peak, once a video packet has come too, how far the
+// audio lags the video, the cushion kept for the sound's bursts when there
+// is one, and once sound that stayed queued has been dropped (audioBacklog),
+// how much in all. The server stamps packets with the device's monotonic
+// clock, so a timestamp of 0 means that none has come yet.
 func (a *app) statistics() string {
 	audio := audioState(a)
 	line := fmt.Sprintf("%dx%d fps=%.0f audio=%s", a.frameW, a.frameH, a.stream.currentFPS, audio)
@@ -715,6 +717,12 @@ func (a *app) statistics() string {
 	line += fmt.Sprintf(" pcm=%dKB peak=%d", a.stream.audioBytesSeen()/1024, a.stream.peakAudio())
 	if videoPts := a.stream.lastVideoPts.Load(); videoPts != 0 {
 		line += fmt.Sprintf(" avlag=%dms", (videoPts-audioPts)/1000)
+	}
+	if cushion := a.stream.soundCushion(); cushion > 0 {
+		line += fmt.Sprintf(" cushion=%dms", cushion.Milliseconds())
+	}
+	if dropped := a.stream.droppedSound(); dropped > 0 {
+		line += fmt.Sprintf(" dropped=%dms", dropped.Milliseconds())
 	}
 	return line
 }

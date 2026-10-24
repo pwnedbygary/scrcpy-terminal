@@ -222,6 +222,13 @@ func (a *audioSink) plays() bool {
 	return a != nil && a.failure() == nil && !a.closed.Load() && !a.silent.Load()
 }
 
+// paces reports whether a write waits for the sound to play, so that sound
+// read faster than it plays queues up behind it: the sink plays here and is
+// not muted (writePCM16 drops muted sound at once).
+func (a *audioSink) paces() bool {
+	return a.plays() && atomic.LoadInt32(&a.gain) > 0
+}
+
 // failure is why the sink does not play: why it never opened, or the write
 // that failed since; nil while it works, and for the sink of a browser-only
 // session, which is silent instead (browserOnlySink). Closing the sink is no

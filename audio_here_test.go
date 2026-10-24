@@ -669,7 +669,9 @@ func TestBrowserIsToldTheSessionsSound(t *testing.T) {
 // sound plays: not when it is off, nor before the first audio packet; and the
 // lag only once a video packet has come too. Before, the line always had
 // them, and without sound the lag was the video's own timestamp
-// (avlag=214994453ms on the first real-device run).
+// (avlag=214994453ms on the first real-device run). The cushion kept for the
+// sound's bursts and the sound dropped for staying queued come while sound
+// plays, once there is some.
 func TestStatisticsLineSaysOffWithoutSound(t *testing.T) {
 	headless := func(cfg config, audio net.Conn, sink *audioSink) *app {
 		a := streamApp(&session{deviceName: "Pixel 8", video: videoSocket(t), audio: audio})
@@ -732,6 +734,12 @@ func TestStatisticsLineSaysOffWithoutSound(t *testing.T) {
 		check("after an audio packet too", "576x1280 fps=10 audio="+tc.state+plays(pcm+" avlag=120ms"))
 		s.lastVideoPts.Store(0)
 		check("after an audio packet, before any video", "576x1280 fps=10 audio="+tc.state+plays(pcm))
+		s.backlog.dropped.Store(int64(1840 * time.Millisecond))
+		check("once sound was dropped", "576x1280 fps=10 audio="+tc.state+plays(pcm+" dropped=1840ms"))
+		s.lastVideoPts.Store(214994453000)
+		check("once sound was dropped, with video", "576x1280 fps=10 audio="+tc.state+plays(pcm+" avlag=120ms dropped=1840ms"))
+		s.backlog.cushion.Store(int64(980 * time.Millisecond))
+		check("with a cushion for bursts", "576x1280 fps=10 audio="+tc.state+plays(pcm+" avlag=120ms cushion=980ms dropped=1840ms"))
 	}
 }
 
