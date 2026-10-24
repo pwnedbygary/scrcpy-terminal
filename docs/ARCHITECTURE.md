@@ -110,6 +110,36 @@ These notes describe scrcpy v4.1, which `protocol.go` and `stream.go` implement.
   and converts it with libswresample to 48 kHz stereo, 16-bit samples (`native.c`).
 - The terminal display plays it through a PulseAudio stream named `scterm`, with a 20 ms
   buffer target and a software gain for Alt+M, Alt+- and Alt+= (`audio.go`).
+- Where this computer plays the sound (the terminal display, `--no-tui`, and `--web` or
+  `--window` with `--audio-dup`), one goroutine reads, decodes and plays it, and each write
+  waits for room in that buffer, so scterm reads the sound only as fast as it plays. What
+  arrives faster waits in scterm's buffer and in the socket: 0.2 to 0.6 s at the start, the
+  burst after each stall of the connection (1 to 6 s over wireless adb with a video playing),
+  and bursts of up to about a second even without stalls. Before it decodes a packet, scterm
+  reads what waits in the socket into its buffer and measures the queue behind the packet by
+  the packets' timestamps. When the queue's low point over the last 2.5 s of sound is 100 ms
+  or more above a margin of 150 ms, scterm skips the excess, the oldest sound, in whole
+  packets, before the decoder sees them (`audiobacklog.go`). It keeps more, a cushion, when
+  the queue rose and fell further within any 2.5 s of the last 30 s (by the device's
+  timestamps) than within the last 2.5 s, since such bursts come back. A swing above 1.2 s
+  is a stall, which gets no cushion, nor do the windows around it that see only part of its
+  refill: a stall's backlog goes 3 to 5 s after the refill has come, even a refill that takes
+  2 s. A stall that begins while an earlier backlog is still being skipped, within seconds of
+  another stall or near the start, is the exception: the queue's fall as the waiting sound
+  plays out then counts as a burst, so up to about 1.4 s can stay for 30 s. The bursts in the
+  seconds after a stall do get a cushion: in a replay of the measured runs
+  at the default 8 Mbit/s, the sound waited about 0.6 to 1.1 s in scterm, against 1.5 to
+  2.9 s without the skipping. `backlogBurst` (1.2 s) and `backlogMemory` (30 s) are the
+  settings that trade that delay against silences before bursts. The sound jumps ahead. How
+  a jump sounds has not been listened to; by the codecs' design, raw sound and FLAC cut
+  straight from one packet to the next, which can click, and Opus and AAC decode the packet
+  after the jump with what they kept from the last one played (Opus predicts each band's
+  level from it), which can glitch for some tens of milliseconds. With `--audio-dup` the
+  browsers get the sound after the skipping, jumps included. A muted sink and the sink of a
+  browser-only session do not wait, so nothing queues there and nothing is dropped, nor in
+  peer mode, whose TLS connection does not show its queue. `--no-tui`'s statistics line adds
+  `cushion=`, the cushion kept, and once some sound has been skipped, `dropped=`, how much in
+  all.
 - A session without sound, with `--no-audio` or from a peer target that does not grant sound,
   opens no PulseAudio stream and does not connect to the server (`newApp` in `app.go`). Nor
   does a session whose only sound output is the browser (`--web` or `--window` without
